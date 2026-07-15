@@ -227,20 +227,6 @@ export async function buildModelsList(kindFilter) {
   }
   const isDisabled = (alias, modelId) => Array.isArray(disabledByAlias[alias]) && disabledByAlias[alias].includes(modelId);
 
-  let displayNames = {};
-  try {
-    const { getModelDisplayNames } = await import("@/lib/localDb");
-    const rawDisplayNames = await getModelDisplayNames();
-    // Filter out invalid display names
-    for (const [key, value] of Object.entries(rawDisplayNames)) {
-      if (key && value && typeof key === "string" && typeof value === "string" && !value.includes("/")) {
-        displayNames[key] = value;
-      }
-    }
-  } catch (e) {
-    console.log("Could not fetch display names");
-  }
-
   const activeConnectionByProvider = new Map();
   for (const conn of connections) {
     if (!activeConnectionByProvider.has(conn.provider)) {
@@ -395,30 +381,53 @@ export async function buildModelsList(kindFilter) {
         })
         .filter((modelId) => modelId !== "");
 
-      const aliasModelIds = Object.values(modelAliases || {})
-        .filter((fullModel) => {
-          if (typeof fullModel !== "string" || !fullModel.includes("/")) return false;
-          return (
-            fullModel.startsWith(`${outputAlias}/`) ||
-            fullModel.startsWith(`${staticAlias}/`) ||
-            fullModel.startsWith(`${providerId}/`)
-          );
-        })
-        .map((fullModel) => {
-          if (fullModel.startsWith(`${outputAlias}/`)) {
-            return fullModel.slice(outputAlias.length + 1);
-          }
-          if (fullModel.startsWith(`${staticAlias}/`)) {
-            return fullModel.slice(staticAlias.length + 1);
-          }
-          if (fullModel.startsWith(`${providerId}/`)) {
-            return fullModel.slice(providerId.length + 1);
-          }
-          return fullModel;
-        })
-        .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "");
+      // Build reverse map: fullModelId → aliasKey (for /v1/models to show alias as id)
+      const fullModelToAlias = {};
+      for (const [aliasKey, fullModel] of Object.entries(modelAliases || {})) {
+        if (typeof fullModel === "string") {
+          // Normalize: match on any of outputAlias/staticAlias/providerId prefix
+          const normalized = fullModel.startsWith(`${outputAlias}/`) ? fullModel
+            : fullModel.startsWith(`${staticAlias}/`) ? `${outputAlias}/${fullModel.slice(staticAlias.length + 1)}`
+            : fullModel.startsWith(`${providerId}/`) ? `${outputAlias}/${fullModel.slice(providerId.length + 1)}`
+            : fullModel;
+          fullModelToAlias[normalized] = aliasKey;
+        }
+      }
 
-      const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds, ...aliasModelIds]));
+      // Build alias entries: each alias key becomes its own model entry so clients
+      // can send `model: "alias-key"` and get routed correctly.
+      const aliasEntries = [];
+      for (const [aliasKey, fullModel] of Object.entries(modelAliases || {})) {
+        if (typeof fullModel !== "string" || !fullModel.includes("/")) continue;
+        // Check if this alias belongs to the current provider
+        const belongsToProvider =
+          fullModel.startsWith(`${outputAlias}/`) ||
+          fullModel.startsWith(`${staticAlias}/`) ||
+          fullModel.startsWith(`${providerId}/`);
+        if (!belongsToProvider) continue;
+        // Extract the modelId portion
+        let modelId;
+        if (fullModel.startsWith(`${outputAlias}/`)) modelId = fullModel.slice(outputAlias.length + 1);
+        else if (fullModel.startsWith(`${staticAlias}/`)) modelId = fullModel.slice(staticAlias.length + 1);
+        else modelId = fullModel.slice(providerId.length + 1);
+        // Check disabled
+        if (isDisabled(outputAlias, modelId) || isDisabled(staticAlias, modelId)) continue;
+        // Check kind
+        const customKind = customModelKindById.get(modelId);
+        const liveKind = liveModelKindById.get(modelId);
+        const kind = customKind || liveKind || staticModelKindById.get(modelId) || inferKindFromUnknownModelId(modelId);
+        const allowAsLlm = kind === "imageToText" && kindFilter.includes(LLM_KIND);
+        if (!kindFilter.includes(kind) && !allowAsLlm) continue;
+        aliasEntries.push({
+          id: aliasKey,
+          object: "model",
+          owned_by: outputAlias,
+          original_id: `${outputAlias}/${modelId}`,
+        });
+      }
+
+      // Build the set of model IDs from static + custom (not aliases — those are separate entries)
+      const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds]));
 
       for (const modelId of mergedModelIds) {
         // Resolve kind: prefer custom/live metadata, then static, then ID heuristics.
@@ -431,20 +440,20 @@ export async function buildModelsList(kindFilter) {
         if (isDisabled(outputAlias, modelId) || isDisabled(staticAlias, modelId)) continue;
 
         const fullModelId = `${outputAlias}/${modelId}`;
-        const displayName = displayNames[fullModelId] || null;
+        const aliasKey = fullModelToAlias[fullModelId];
 
         const model = {
-          id: displayName || fullModelId,
+          id: aliasKey || fullModelId,
           object: "model",
           owned_by: outputAlias,
         };
-        if (displayName) {
-          model.original_id = fullModelId;
-        }
         const caps = liveCapabilitiesById.get(modelId) || capabilitiesFromServiceKind(customKind || liveKind);
         if (caps) model.capabilities = caps;
         models.push(model);
       }
+
+      // Add alias entries
+      models.push(...aliasEntries);
 
       // Web search/fetch — provider IS the model, expose as {alias}/search and/or {alias}/fetch with explicit kind
       const providerInfo = AI_PROVIDERS[providerId];
