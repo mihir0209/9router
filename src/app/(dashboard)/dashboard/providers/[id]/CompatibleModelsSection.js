@@ -58,121 +58,129 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
         {testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : "smart_toy"}
       </span>
       <div className="flex-1 min-w-0">
-        {/* Display Name */}
-        {editingDisplayName ? (
-          <div className="flex items-center gap-1">
-            <input
-              type="text"
-              value={displayNameValue}
-              onChange={(e) => setDisplayNameValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSaveDisplayName();
-                if (e.key === "Escape") handleCancelDisplayName();
-              }}
-              className="flex-1 min-w-0 rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-main border border-primary/30 focus:outline-none focus:ring-1 focus:ring-primary/50"
-              placeholder="Friendly name (e.g. GPT-4o)"
-              autoFocus
-            />
-            <button
-              onClick={handleSaveDisplayName}
-              className="rounded p-0.5 text-green-500 hover:bg-green-500/10"
-              title="Save display name"
-            >
-              <span className="material-symbols-outlined text-sm">check</span>
-            </button>
-            <button
-              onClick={handleCancelDisplayName}
-              className="rounded p-0.5 text-text-muted hover:bg-sidebar"
-              title="Cancel"
-            >
-              <span className="material-symbols-outlined text-sm">close</span>
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center gap-1">
-            <p className="text-sm font-medium truncate">{showAs}</p>
-            {displayName && (
-              <code className="text-[10px] text-text-muted/50 font-mono">{modelId}</code>
-            )}
-            <button
-              onClick={() => {
-                setDisplayNameValue(displayName || "");
-                setEditingDisplayName(true);
-              }}
-              className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
-              title="Set display name"
-            >
-              <span className="material-symbols-outlined text-sm">badge</span>
-            </button>
-          </div>
-        )}
+        {/* Display name editing + alias editing inline */}
+        <div className="flex flex-wrap items-center gap-1">
+          {/* Display Name editing */}
+          {editingDisplayName ? (
+            <div className="flex items-center gap-0.5">
+              <input
+                type="text"
+                value={displayNameValue}
+                onChange={(e) => setDisplayNameValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSaveDisplayName();
+                  if (e.key === "Escape") handleCancelDisplayName();
+                }}
+                className="flex-1 min-w-0 rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-main border border-primary/30 focus:outline-none focus:ring-1 focus:ring-primary/50"
+                placeholder="Display name (e.g. DeepSeek v4)"
+                autoFocus
+              />
+              <button
+                onClick={handleSaveDisplayName}
+                className="rounded p-0.5 text-green-500 hover:bg-green-500/10"
+                title="Save display name"
+              >
+                <span className="material-symbols-outlined text-sm">check</span>
+              </button>
+              <button
+                onClick={handleCancelDisplayName}
+                className="rounded p-0.5 text-text-muted hover:bg-sidebar"
+                title="Cancel"
+              >
+                <span className="material-symbols-outlined text-sm">close</span>
+              </button>
+            </div>
+          ) : null}
 
-        {/* Alias ID */}
-        {editingAliasId ? (
-          <div className="flex items-center gap-1 mt-1">
-            <input
-              type="text"
-              value={aliasIdValue}
-              onChange={(e) => setAliasIdValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSaveAliasId();
-                if (e.key === "Escape") handleCancelAliasId();
-              }}
-              className="flex-1 min-w-0 rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-main border border-primary/30 focus:outline-none focus:ring-1 focus:ring-primary/50"
-              placeholder="Alias (e.g. gpt-4o)"
-              autoFocus
-            />
-            <button
-              onClick={handleSaveAliasId}
-              className="rounded p-0.5 text-green-500 hover:bg-green-500/10"
-              title="Save alias"
-            >
-              <span className="material-symbols-outlined text-sm">check</span>
-            </button>
-            <button
-              onClick={handleCancelAliasId}
-              className="rounded p-0.5 text-text-muted hover:bg-sidebar"
-              title="Cancel"
-            >
-              <span className="material-symbols-outlined text-sm">close</span>
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center gap-1 mt-1">
-            {aliasId ? (
-              <>
-                <code className="text-[10px] text-primary font-mono">Alias: {aliasId}</code>
+          {/* Alias editing */}
+          {editingAliasId ? (
+            <div className="flex items-center gap-0.5">
+              <input
+                type="text"
+                value={aliasIdValue}
+                onChange={(e) => setAliasIdValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSaveAliasId();
+                  if (e.key === "Escape") handleCancelAliasId();
+                }}
+                className="flex-1 min-w-0 rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-main border border-primary/30 focus:outline-none focus:ring-1 focus:ring-primary/50"
+                placeholder="Alias (e.g. ds-v4)"
+                autoFocus
+              />
+              <button
+                onClick={handleSaveAliasId}
+                className="rounded p-0.5 text-green-500 hover:bg-green-500/10"
+                title="Save alias"
+              >
+                <span className="material-symbols-outlined text-sm">check</span>
+              </button>
+              <button
+                onClick={handleCancelAliasId}
+                className="rounded p-0.5 text-text-muted hover:bg-sidebar"
+                title="Cancel"
+              >
+                <span className="material-symbols-outlined text-sm">close</span>
+              </button>
+            </div>
+          ) : null}
+
+          {/* Read-only row when neither field is being edited */}
+          {!editingDisplayName && !editingAliasId ? (
+            <>
+              <p className="text-sm font-medium truncate">{showAs}</p>
+              {displayName && (
+                <code className="text-[10px] text-text-muted/50 font-mono">{modelId}</code>
+              )}
+              {/* Display Name badge button */}
+              <button
+                onClick={() => {
+                  setDisplayNameValue(displayName || "");
+                  setEditingDisplayName(true);
+                }}
+                className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
+                title={displayName ? "Edit display name" : "Set display name"}
+              >
+                <span className="material-symbols-outlined text-sm">badge</span>
+              </button>
+              {/* Alias indicator + button — directly right of display name badge */}
+              {aliasId ? (
+                <>
+                  <code className="truncate rounded bg-sidebar px-1.5 py-0.5 font-mono text-[10px] text-primary">
+                    {aliasId}
+                  </code>
+                  <button
+                    onClick={() => {
+                      setAliasIdValue(aliasId || "");
+                      setEditingAliasId(true);
+                    }}
+                    className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
+                    title="Edit alias"
+                  >
+                    <span className="material-symbols-outlined text-sm">link</span>
+                  </button>
+                </>
+              ) : (
                 <button
                   onClick={() => {
-                    setAliasIdValue(aliasId || "");
+                    setAliasIdValue("");
                     setEditingAliasId(true);
                   }}
                   className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
-                  title="Edit alias"
+                  title="Set alias"
                 >
-                  <span className="material-symbols-outlined text-sm">edit</span>
+                  <span className="material-symbols-outlined text-sm">link</span>
                 </button>
-              </>
-            ) : (
-              <button
-                onClick={() => {
-                  setAliasIdValue("");
-                  setEditingAliasId(true);
-                }}
-                className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
-                title="Set alias"
-              >
-                <span className="material-symbols-outlined text-sm">link</span>
-              </button>
-            )}
-          </div>
-        )}
+              )}
+            </>
+          ) : null}
+        </div>
 
+        {/* Model controller-row: copy + test */}
         <div className="flex items-center gap-1 mt-1">
           <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{fullModel}</code>
           <div className="relative group/btn">
             <button
-              onClick={() => onCopy(aliasId || displayName || fullModel, `model-${modelId}`)}
+              onClick={() => onCopy(aliasId || showAs, `model-${modelId}`)}
               className="p-0.5 hover:bg-sidebar rounded text-text-muted hover:text-primary"
             >
               <span className="material-symbols-outlined text-sm">

@@ -1119,6 +1119,7 @@ export default function ProviderDetailPage() {
               copied={copied}
               onCopy={copy}
               onSetAlias={() => {}}
+              onSetAliasId={(modelId, alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
               onDeleteAlias={() => {
                 if (model.source === "custom") {
                   handleDeleteCustomModel(model.id, "llm", providerStorageAlias);
