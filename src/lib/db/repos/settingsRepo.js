@@ -17,6 +17,7 @@ const DEFAULT_SETTINGS = {
   comboStickyRoundRobinLimit: 1,
   comboStrategies: {},
   requireLogin: true,
+  requireApiKey: true,
   tunnelDashboardAccess: true,
   authMode: "password",
   oidcIssuerUrl: "",
@@ -46,6 +47,7 @@ const DEFAULT_SETTINGS = {
   pxpipeAutoInstall: true,
   pxpipeMinChars: 25000,
   pxpipeTimeoutMs: 15000,
+  autoBlockedIPs: [],
 };
 
 async function readRaw() {

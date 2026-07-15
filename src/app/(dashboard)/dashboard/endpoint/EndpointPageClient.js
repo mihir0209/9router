@@ -25,6 +25,25 @@ export default function APIPageClient({ machineId }) {
   const [createdKey, setCreatedKey] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
 
+  // API Key creation/editing form state
+  const [keyForm, setKeyForm] = useState({
+    description: "",
+    rateLimitRequests: 0,
+    rateLimitWindowSeconds: 60,
+    tokenLimitDaily: 0,
+    tokenLimitMonthly: 0,
+    allowedModels: "",
+    blockedModels: "",
+    allowedIPs: "",
+    blockedIPs: "",
+    expiresAt: "",
+  });
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingKey, setEditingKey] = useState(null);
+
+  // Blocked IPs state
+  const [blockedIPs, setBlockedIPs] = useState([]);
+
   const [requireApiKey, setRequireApiKey] = useState(false);
   const [requireLogin, setRequireLogin] = useState(true);
   const [hasPassword, setHasPassword] = useState(true);
@@ -259,6 +278,12 @@ export default function APIPageClient({ machineId }) {
       const keysData = await keysRes.json();
       if (keysRes.ok) {
         setKeys(keysData.keys || []);
+      }
+      // Load blocked IPs
+      const blockedRes = await fetch("/api/settings/blocked-ips");
+      const blockedData = await blockedRes.json();
+      if (blockedRes.ok) {
+        setBlockedIPs(blockedData.blockedIPs || []);
       }
     } catch (error) {
       console.log("Error fetching data:", error);
@@ -614,7 +639,14 @@ export default function APIPageClient({ machineId }) {
       const res = await fetch("/api/keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newKeyName }),
+        body: JSON.stringify({
+          name: newKeyName,
+          ...keyForm,
+          rateLimitRequests: parseInt(keyForm.rateLimitRequests) || 0,
+          rateLimitWindowSeconds: parseInt(keyForm.rateLimitWindowSeconds) || 60,
+          tokenLimitDaily: parseInt(keyForm.tokenLimitDaily) || 0,
+          tokenLimitMonthly: parseInt(keyForm.tokenLimitMonthly) || 0,
+        }),
       });
       const data = await res.json();
 
@@ -622,11 +654,27 @@ export default function APIPageClient({ machineId }) {
         setCreatedKey(data.key);
         await fetchData();
         setNewKeyName("");
+        resetKeyForm();
         setShowAddModal(false);
       }
     } catch (error) {
       console.log("Error creating key:", error);
     }
+  };
+
+  const resetKeyForm = () => {
+    setKeyForm({
+      description: "",
+      rateLimitRequests: 0,
+      rateLimitWindowSeconds: 60,
+      tokenLimitDaily: 0,
+      tokenLimitMonthly: 0,
+      allowedModels: "",
+      blockedModels: "",
+      allowedIPs: "",
+      blockedIPs: "",
+      expiresAt: "",
+    });
   };
 
   const handleDeleteKey = async (id) => {
@@ -664,6 +712,64 @@ export default function APIPageClient({ machineId }) {
       }
     } catch (error) {
       console.log("Error toggling key:", error);
+    }
+  };
+
+  const openEditModal = (key) => {
+    setEditingKey(key);
+    setKeyForm({
+      description: key.description || "",
+      rateLimitRequests: key.rateLimitRequests || 0,
+      rateLimitWindowSeconds: key.rateLimitWindowSeconds || 60,
+      tokenLimitDaily: key.tokenLimitDaily || 0,
+      tokenLimitMonthly: key.tokenLimitMonthly || 0,
+      allowedModels: key.allowedModels || "",
+      blockedModels: key.blockedModels || "",
+      allowedIPs: key.allowedIPs || "",
+      blockedIPs: key.blockedIPs || "",
+      expiresAt: key.expiresAt ? key.expiresAt.slice(0, 16) : "",
+    });
+    setShowEditModal(true);
+  };
+
+  const handleEditKey = async () => {
+    if (!editingKey) return;
+
+    try {
+      const res = await fetch(`/api/keys/${editingKey.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...keyForm,
+          rateLimitRequests: parseInt(keyForm.rateLimitRequests) || 0,
+          rateLimitWindowSeconds: parseInt(keyForm.rateLimitWindowSeconds) || 60,
+          tokenLimitDaily: parseInt(keyForm.tokenLimitDaily) || 0,
+          tokenLimitMonthly: parseInt(keyForm.tokenLimitMonthly) || 0,
+          expiresAt: keyForm.expiresAt ? new Date(keyForm.expiresAt).toISOString() : "",
+        }),
+      });
+      if (res.ok) {
+        await fetchData();
+        setShowEditModal(false);
+        setEditingKey(null);
+        resetKeyForm();
+      }
+    } catch (error) {
+      console.log("Error editing key:", error);
+    }
+  };
+
+  const handleUnblockIP = async (ip) => {
+    try {
+      const res = await fetch(`/api/settings/blocked-ips?ip=${encodeURIComponent(ip)}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setBlockedIPs(data.blockedIPs || []);
+      }
+    } catch (error) {
+      console.log("Error unblocking IP:", error);
     }
   };
 
@@ -973,6 +1079,41 @@ export default function APIPageClient({ machineId }) {
           />
         </div>
 
+        {/* Auto IP Blocking Section */}
+        <div className="pb-4 mb-4 border-b border-border">
+          <div className="flex items-center justify-between mb-2">
+            <div>
+              <p className="font-medium">Auto IP Blocking</p>
+              <p className="text-sm text-text-muted">
+                Automatically block IPs after 10 rate limit violations
+              </p>
+            </div>
+          </div>
+          {blockedIPs.length > 0 ? (
+            <div className="mt-2">
+              <p className="text-xs text-text-muted mb-2">{blockedIPs.length} IP(s) blocked:</p>
+              <div className="flex flex-wrap gap-2">
+                {blockedIPs.map((ip) => (
+                  <span
+                    key={ip}
+                    className="inline-flex items-center gap-1 bg-red-500/10 text-red-500 px-2 py-1 rounded text-xs"
+                  >
+                    {ip}
+                    <button
+                      onClick={() => handleUnblockIP(ip)}
+                      className="hover:text-red-700 ml-1"
+                    >
+                      <span className="material-symbols-outlined text-[12px]">close</span>
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-text-muted mt-2">No IPs currently blocked</p>
+          )}
+        </div>
+
         {isRemoteHost && !requireApiKey && (
           <div className="mb-4 -mt-2">
             <SecurityWarning message="Endpoint is exposed without an API key." />
@@ -998,7 +1139,14 @@ export default function APIPageClient({ machineId }) {
                 className={`group flex items-center justify-between py-3 border-b border-black/[0.03] dark:border-white/[0.03] last:border-b-0 ${key.isActive === false ? "opacity-60" : ""}`}
               >
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium">{key.name}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium">{key.name}</p>
+                    {key.description && (
+                      <span className="text-xs text-text-muted bg-surface-2 px-2 py-0.5 rounded-full">
+                        {key.description}
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center gap-2 mt-1">
                     <code className="text-xs text-text-muted font-mono">
                       {visibleKeys.has(key.id) ? key.key : maskKey(key.key)}
@@ -1021,14 +1169,48 @@ export default function APIPageClient({ machineId }) {
                       </span>
                     </button>
                   </div>
-                  <p className="text-xs text-text-muted mt-1">
-                    Created {new Date(key.createdAt).toLocaleDateString()}
-                  </p>
+                  <div className="flex items-center gap-3 mt-1 flex-wrap">
+                    <p className="text-xs text-text-muted">
+                      Created {new Date(key.createdAt).toLocaleDateString()}
+                    </p>
+                    {key.rateLimitRequests > 0 && (
+                      <span className="text-xs text-blue-500 bg-blue-500/10 px-1.5 py-0.5 rounded">
+                        {key.rateLimitRequests} req/{key.rateLimitWindowSeconds}s
+                      </span>
+                    )}
+                    {key.tokenLimitDaily > 0 && (
+                      <span className="text-xs text-purple-500 bg-purple-500/10 px-1.5 py-0.5 rounded">
+                        {(key.tokenLimitDaily / 1000).toFixed(0)}K tok/day
+                      </span>
+                    )}
+                    {key.allowedModels && key.allowedModels !== "*" && (
+                      <span className="text-xs text-green-500 bg-green-500/10 px-1.5 py-0.5 rounded">
+                        {key.allowedModels.split(",").length} model{key.allowedModels.split(",").length > 1 ? "s" : ""}
+                      </span>
+                    )}
+                    {key.allowedIPs && (
+                      <span className="text-xs text-orange-500 bg-orange-500/10 px-1.5 py-0.5 rounded">
+                        IP locked
+                      </span>
+                    )}
+                    {key.expiresAt && (
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${new Date(key.expiresAt) < new Date() ? "text-red-500 bg-red-500/10" : "text-gray-500 bg-gray-500/10"}`}>
+                        Exp {new Date(key.expiresAt).toLocaleDateString()}
+                      </span>
+                    )}
+                  </div>
                   {key.isActive === false && (
                     <p className="text-xs text-orange-500 mt-1">Paused</p>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => openEditModal(key)}
+                    className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
+                    title="Edit key settings"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">settings</span>
+                  </button>
                   <Toggle
                     size="sm"
                     checked={key.isActive ?? true}
@@ -1068,7 +1250,9 @@ export default function APIPageClient({ machineId }) {
         onClose={() => {
           setShowAddModal(false);
           setNewKeyName("");
+          resetKeyForm();
         }}
+        size="lg"
       >
         <div className="flex flex-col gap-4">
           <Input
@@ -1076,8 +1260,99 @@ export default function APIPageClient({ machineId }) {
             value={newKeyName}
             onChange={(e) => setNewKeyName(e.target.value)}
             placeholder="Production Key"
+            required
           />
-          <div className="flex gap-2">
+          <Input
+            label="Description"
+            value={keyForm.description}
+            onChange={(e) => setKeyForm({ ...keyForm, description: e.target.value })}
+            placeholder="Optional description for this key"
+          />
+
+          <div className="border-t border-border pt-4">
+            <p className="text-sm font-medium text-text-main mb-3">Rate Limiting</p>
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="Max Requests"
+                type="number"
+                value={keyForm.rateLimitRequests}
+                onChange={(e) => setKeyForm({ ...keyForm, rateLimitRequests: e.target.value })}
+                placeholder="0 = unlimited"
+              />
+              <Input
+                label="Window (seconds)"
+                type="number"
+                value={keyForm.rateLimitWindowSeconds}
+                onChange={(e) => setKeyForm({ ...keyForm, rateLimitWindowSeconds: e.target.value })}
+                placeholder="60"
+              />
+            </div>
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <p className="text-sm font-medium text-text-main mb-3">Token Limits</p>
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="Daily Token Limit"
+                type="number"
+                value={keyForm.tokenLimitDaily}
+                onChange={(e) => setKeyForm({ ...keyForm, tokenLimitDaily: e.target.value })}
+                placeholder="0 = unlimited"
+              />
+              <Input
+                label="Monthly Token Limit"
+                type="number"
+                value={keyForm.tokenLimitMonthly}
+                onChange={(e) => setKeyForm({ ...keyForm, tokenLimitMonthly: e.target.value })}
+                placeholder="0 = unlimited"
+              />
+            </div>
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <p className="text-sm font-medium text-text-main mb-3">Model Restrictions</p>
+            <Input
+              label="Allowed Models"
+              value={keyForm.allowedModels}
+              onChange={(e) => setKeyForm({ ...keyForm, allowedModels: e.target.value })}
+              placeholder="gpt-4,claude-3-opus (* for all)"
+            />
+            <Input
+              label="Blocked Models"
+              value={keyForm.blockedModels}
+              onChange={(e) => setKeyForm({ ...keyForm, blockedModels: e.target.value })}
+              placeholder="gpt-3.5-turbo"
+              className="mt-3"
+            />
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <p className="text-sm font-medium text-text-main mb-3">IP Restrictions</p>
+            <Input
+              label="Allowed IPs"
+              value={keyForm.allowedIPs}
+              onChange={(e) => setKeyForm({ ...keyForm, allowedIPs: e.target.value })}
+              placeholder="192.168.1.0/24,10.0.0.1"
+            />
+            <Input
+              label="Blocked IPs"
+              value={keyForm.blockedIPs}
+              onChange={(e) => setKeyForm({ ...keyForm, blockedIPs: e.target.value })}
+              placeholder="1.2.3.4"
+              className="mt-3"
+            />
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <Input
+              label="Expires At"
+              type="datetime-local"
+              value={keyForm.expiresAt}
+              onChange={(e) => setKeyForm({ ...keyForm, expiresAt: e.target.value })}
+            />
+          </div>
+
+          <div className="flex gap-2 mt-2">
             <Button onClick={handleCreateKey} fullWidth disabled={!newKeyName.trim()}>
               Create
             </Button>
@@ -1085,6 +1360,128 @@ export default function APIPageClient({ machineId }) {
               onClick={() => {
                 setShowAddModal(false);
                 setNewKeyName("");
+                resetKeyForm();
+              }}
+              variant="ghost"
+              fullWidth
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Edit Key Modal */}
+      <Modal
+        isOpen={showEditModal}
+        title={`Edit Key: ${editingKey?.name || ""}`}
+        onClose={() => {
+          setShowEditModal(false);
+          setEditingKey(null);
+          resetKeyForm();
+        }}
+        size="lg"
+      >
+        <div className="flex flex-col gap-4">
+          <Input
+            label="Description"
+            value={keyForm.description}
+            onChange={(e) => setKeyForm({ ...keyForm, description: e.target.value })}
+            placeholder="Optional description for this key"
+          />
+
+          <div className="border-t border-border pt-4">
+            <p className="text-sm font-medium text-text-main mb-3">Rate Limiting</p>
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="Max Requests"
+                type="number"
+                value={keyForm.rateLimitRequests}
+                onChange={(e) => setKeyForm({ ...keyForm, rateLimitRequests: e.target.value })}
+                placeholder="0 = unlimited"
+              />
+              <Input
+                label="Window (seconds)"
+                type="number"
+                value={keyForm.rateLimitWindowSeconds}
+                onChange={(e) => setKeyForm({ ...keyForm, rateLimitWindowSeconds: e.target.value })}
+                placeholder="60"
+              />
+            </div>
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <p className="text-sm font-medium text-text-main mb-3">Token Limits</p>
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="Daily Token Limit"
+                type="number"
+                value={keyForm.tokenLimitDaily}
+                onChange={(e) => setKeyForm({ ...keyForm, tokenLimitDaily: e.target.value })}
+                placeholder="0 = unlimited"
+              />
+              <Input
+                label="Monthly Token Limit"
+                type="number"
+                value={keyForm.tokenLimitMonthly}
+                onChange={(e) => setKeyForm({ ...keyForm, tokenLimitMonthly: e.target.value })}
+                placeholder="0 = unlimited"
+              />
+            </div>
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <p className="text-sm font-medium text-text-main mb-3">Model Restrictions</p>
+            <Input
+              label="Allowed Models"
+              value={keyForm.allowedModels}
+              onChange={(e) => setKeyForm({ ...keyForm, allowedModels: e.target.value })}
+              placeholder="gpt-4,claude-3-opus (* for all)"
+            />
+            <Input
+              label="Blocked Models"
+              value={keyForm.blockedModels}
+              onChange={(e) => setKeyForm({ ...keyForm, blockedModels: e.target.value })}
+              placeholder="gpt-3.5-turbo"
+              className="mt-3"
+            />
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <p className="text-sm font-medium text-text-main mb-3">IP Restrictions</p>
+            <Input
+              label="Allowed IPs"
+              value={keyForm.allowedIPs}
+              onChange={(e) => setKeyForm({ ...keyForm, allowedIPs: e.target.value })}
+              placeholder="192.168.1.0/24,10.0.0.1"
+            />
+            <Input
+              label="Blocked IPs"
+              value={keyForm.blockedIPs}
+              onChange={(e) => setKeyForm({ ...keyForm, blockedIPs: e.target.value })}
+              placeholder="1.2.3.4"
+              className="mt-3"
+            />
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <Input
+              label="Expires At"
+              type="datetime-local"
+              value={keyForm.expiresAt}
+              onChange={(e) => setKeyForm({ ...keyForm, expiresAt: e.target.value })}
+            />
+          </div>
+
+          <div className="flex gap-2 mt-2">
+            <Button onClick={handleEditKey} fullWidth>
+              Save Changes
+            </Button>
+            <Button
+              onClick={() => {
+                setShowEditModal(false);
+                setEditingKey(null);
+                resetKeyForm();
               }}
               variant="ghost"
               fullWidth

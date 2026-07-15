@@ -12,7 +12,11 @@
     "build:bun": "bun --bun next build --webpack",
     "start:bun": "bun ./.next/standalone/server.js",
     "cli:pack": "npm --prefix cli run pack:cli",
-    "cli:publish": "npm --prefix cli run publish:cli"
+    "cli:publish": "npm --prefix cli run publish:cli",
+    "dev:cloudflare": "npx wrangler pages dev . --port 20128",
+    "build:cloudflare": "npx wrangler pages build .",
+    "deploy:cloudflare": "npx wrangler pages deploy .worker/output",
+    "db:init:cloudflare": "npx wrangler d1 create 9router-db"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -55,6 +59,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "postcss": "^8.5.6",
-    "tailwindcss": "^4"
+    "tailwindcss": "^4",
+    "wrangler": "^3.60.0"
   }
 }

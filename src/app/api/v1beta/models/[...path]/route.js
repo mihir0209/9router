@@ -5,6 +5,7 @@ import {
   isValidApiKey,
   markAccountUnavailable,
 } from "@/sse/services/auth.js";
+import { validateAndEnforceApiKey } from "@/sse/services/validateApiKey.js";
 import { getSettings } from "@/lib/localDb";
 import { PROVIDER_MODELS } from "@/shared/constants/models";
 import { GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
@@ -177,18 +178,13 @@ function buildGeminiNativeUrl(requestUrl, model, action) {
   return upstreamUrl.toString();
 }
 
-async function validateGeminiNativeClientKey(request) {
+async function validateGeminiNativeClientKey(request, body) {
   const settings = await getSettings();
   if (!settings.requireApiKey) return null;
 
-  const apiKey = extractGeminiClientApiKey(request);
-  if (!apiKey) {
-    return Response.json({ error: { message: "Missing API key" } }, { status: 401 });
-  }
-
-  const valid = await isValidApiKey(apiKey);
-  if (!valid) {
-    return Response.json({ error: { message: "Invalid API key" } }, { status: 401 });
+  const keyCheck = await validateAndEnforceApiKey(request, body, "GEMINI_NATIVE");
+  if (!keyCheck.allowed) {
+    return Response.json({ error: { message: keyCheck.response?.body?.error || keyCheck.response?.statusText || "Unauthorized" } }, { status: keyCheck.response?.status || 401 });
   }
 
   return null;
@@ -236,7 +232,7 @@ function getSafeGeminiNativeErrorText(error) {
 }
 
 async function forwardGeminiNativeRequest(request, body, model, action) {
-  const authError = await validateGeminiNativeClientKey(request);
+  const authError = await validateGeminiNativeClientKey(request, body);
   if (authError) return authError;
 
   const modelId = normalizeGeminiNativeModel(model);

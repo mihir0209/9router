@@ -21,7 +21,6 @@ export async function PUT(request, { params }) {
   try {
     const { id } = await params;
     const body = await request.json();
-    const { isActive } = body;
 
     const existing = await getApiKeyById(id);
     if (!existing) {
@@ -29,10 +28,20 @@ export async function PUT(request, { params }) {
     }
 
     const updateData = {};
-    if (isActive !== undefined) updateData.isActive = isActive;
+    const allowedFields = [
+      "name", "isActive", "rateLimitRequests", "rateLimitWindowSeconds",
+      "tokenLimitDaily", "tokenLimitMonthly",
+      "allowedModels", "blockedModels",
+      "allowedIPs", "blockedIPs",
+      "expiresAt", "description",
+    ];
+    for (const field of allowedFields) {
+      if (body[field] !== undefined) {
+        updateData[field] = body[field];
+      }
+    }
 
     const updated = await updateApiKey(id, updateData);
-
     return NextResponse.json({ key: updated });
   } catch (error) {
     console.log("Error updating key:", error);
@@ -44,12 +53,10 @@ export async function PUT(request, { params }) {
 export async function DELETE(request, { params }) {
   try {
     const { id } = await params;
-
     const deleted = await deleteApiKey(id);
     if (!deleted) {
       return NextResponse.json({ error: "Key not found" }, { status: 404 });
     }
-
     return NextResponse.json({ message: "Key deleted successfully" });
   } catch (error) {
     console.log("Error deleting key:", error);
