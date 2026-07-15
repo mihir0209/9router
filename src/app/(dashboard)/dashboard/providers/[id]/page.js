@@ -53,6 +53,7 @@ export default function ProviderDetailPage() {
   const [selectedConnection, setSelectedConnection] = useState(null);
   const [modelAliases, setModelAliases] = useState({});
   const [customModels, setCustomModels] = useState([]);
+  const [modelDisplayNames, setModelDisplayNames] = useState({});
   const [headerImgError, setHeaderImgError] = useState(false);
   const [modelTestResults, setModelTestResults] = useState({});
   const [modelsTestError, setModelsTestError] = useState("");
@@ -271,6 +272,33 @@ export default function ProviderDetailPage() {
     }
   }, []);
 
+  const fetchDisplayNames = useCallback(async () => {
+    try {
+      const res = await fetch("/api/models/display-names");
+      const data = await res.json();
+      if (res.ok) {
+        setModelDisplayNames(data.displayNames || {});
+      }
+    } catch (error) {
+      console.log("Error fetching display names:", error);
+    }
+  }, []);
+
+  const handleSetDisplayName = useCallback(async (modelId, displayName) => {
+    try {
+      const res = await fetch("/api/models/display-names", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelId, displayName }),
+      });
+      if (res.ok) {
+        setModelDisplayNames(prev => ({ ...prev, [modelId]: displayName }));
+      }
+    } catch (error) {
+      console.log("Error setting display name:", error);
+    }
+  }, []);
+
   // Fetch free models from Kilo API for kilocode provider
   useEffect(() => {
     if (providerId !== "kilocode") return;
@@ -446,7 +474,8 @@ export default function ProviderDetailPage() {
     fetchAliases();
     fetchCustomModels();
     fetchDisabledModels();
-  }, [fetchConnections, fetchAliases, fetchCustomModels, fetchDisabledModels]);
+    fetchDisplayNames();
+  }, [fetchConnections, fetchAliases, fetchCustomModels, fetchDisabledModels, fetchDisplayNames]);
 
   // Fetch suggested models from provider's public API (if configured)
   useEffect(() => {
@@ -1071,34 +1100,40 @@ export default function ProviderDetailPage() {
     return (
       <div className="flex flex-wrap gap-3">
         {/* Custom models first */}
-        {customModelRows.map((model) => (
-          <ModelRow
-            key={`${model.source}-${model.fullModel}`}
-            model={{ id: model.id, name: model.name }}
-            fullModel={`${providerDisplayAlias}/${model.id}`}
-            alias={model.alias}
-            copied={copied}
-            onCopy={copy}
-            onSetAlias={() => {}}
-            onDeleteAlias={() => {
-              if (model.source === "custom") {
-                handleDeleteCustomModel(model.id, "llm", providerStorageAlias);
-              } else {
-                handleDeleteAlias(model.alias);
-              }
-            }}
-            testStatus={modelTestResults[model.id]}
-            onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
-            isTesting={testingModelIds.has(model.id)}
-            isCustom
-            isFree={false}
-            caps={getCaps(`${providerId}/${model.id}`)}
-            thinkingSuffix={resolveThinkingSuffix(model.id)}
-          />
-        ))}
+        {customModelRows.map((model) => {
+          const fullModelId = `${providerDisplayAlias}/${model.id}`;
+          return (
+            <ModelRow
+              key={`${model.source}-${model.fullModel}`}
+              model={{ id: model.id, name: model.name }}
+              fullModel={fullModelId}
+              alias={model.alias}
+              copied={copied}
+              onCopy={copy}
+              onSetAlias={() => {}}
+              onDeleteAlias={() => {
+                if (model.source === "custom") {
+                  handleDeleteCustomModel(model.id, "llm", providerStorageAlias);
+                } else {
+                  handleDeleteAlias(model.alias);
+                }
+              }}
+              testStatus={modelTestResults[model.id]}
+              onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
+              isTesting={testingModelIds.has(model.id)}
+              isCustom
+              isFree={false}
+              caps={getCaps(`${providerId}/${model.id}`)}
+              thinkingSuffix={resolveThinkingSuffix(model.id)}
+              displayName={modelDisplayNames[fullModelId]}
+              onSetDisplayName={handleSetDisplayName}
+            />
+          );
+        })}
 
         {displayModels.map((model) => {
           const fullModel = `${providerStorageAlias}/${model.id}`;
+          const displayFullModel = `${providerDisplayAlias}/${model.id}`;
           const oldFormatModel = `${providerId}/${model.id}`;
           const existingAlias = Object.entries(modelAliases).find(
             ([, m]) => m === fullModel || m === oldFormatModel
@@ -1107,7 +1142,7 @@ export default function ProviderDetailPage() {
             <ModelRow
               key={model.id}
               model={model}
-              fullModel={`${providerDisplayAlias}/${model.id}`}
+              fullModel={displayFullModel}
               alias={existingAlias}
               copied={copied}
               onCopy={copy}
@@ -1120,6 +1155,8 @@ export default function ProviderDetailPage() {
               onDisable={() => handleDisableModel(model.id)}
               caps={getCaps(`${providerId}/${model.id}`)}
               thinkingSuffix={resolveThinkingSuffix(model.id)}
+              displayName={modelDisplayNames[displayFullModel]}
+              onSetDisplayName={handleSetDisplayName}
             />
           );
         })}

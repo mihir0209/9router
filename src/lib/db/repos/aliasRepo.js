@@ -5,6 +5,7 @@ import { makeKv } from "../helpers/kvStore.js";
 const aliasKv = makeKv("modelAliases");
 const customKv = makeKv("customModels");
 const mitmKv = makeKv("mitmAlias");
+const modelDisplayNamesKv = makeKv("modelDisplayNames");
 
 // modelAliases: key=alias, value=modelString
 export async function getModelAliases() {
@@ -17,6 +18,19 @@ export async function setModelAlias(alias, model) {
 
 export async function deleteModelAlias(alias) {
   await aliasKv.remove(alias);
+}
+
+// modelDisplayNames: key=fullModelId (e.g. "openai/gpt-4o"), value=friendlyName (e.g. "GPT-4o")
+export async function getModelDisplayNames() {
+  return await modelDisplayNamesKv.getAll();
+}
+
+export async function setModelDisplayName(modelId, displayName) {
+  await modelDisplayNamesKv.set(modelId, displayName);
+}
+
+export async function deleteModelDisplayName(modelId) {
+  await modelDisplayNamesKv.remove(modelId);
 }
 
 // customModels: key=`${providerAlias}|${id}|${type}`, value=full model object

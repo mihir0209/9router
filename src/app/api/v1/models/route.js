@@ -227,6 +227,14 @@ export async function buildModelsList(kindFilter) {
   }
   const isDisabled = (alias, modelId) => Array.isArray(disabledByAlias[alias]) && disabledByAlias[alias].includes(modelId);
 
+  let displayNames = {};
+  try {
+    const { getModelDisplayNames } = await import("@/lib/localDb");
+    displayNames = await getModelDisplayNames();
+  } catch (e) {
+    console.log("Could not fetch display names");
+  }
+
   const activeConnectionByProvider = new Map();
   for (const conn of connections) {
     if (!activeConnectionByProvider.has(conn.provider)) {
@@ -416,11 +424,17 @@ export async function buildModelsList(kindFilter) {
         if (!kindFilter.includes(kind) && !allowAsLlm) continue;
         if (isDisabled(outputAlias, modelId) || isDisabled(staticAlias, modelId)) continue;
 
+        const fullModelId = `${outputAlias}/${modelId}`;
+        const displayName = displayNames[fullModelId] || null;
+
         const model = {
-          id: `${outputAlias}/${modelId}`,
+          id: displayName || fullModelId,
           object: "model",
           owned_by: outputAlias,
         };
+        if (displayName) {
+          model.original_id = fullModelId;
+        }
         const caps = liveCapabilitiesById.get(modelId) || capabilitiesFromServiceKind(customKind || liveKind);
         if (caps) model.capabilities = caps;
         models.push(model);

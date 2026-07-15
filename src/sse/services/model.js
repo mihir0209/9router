@@ -1,5 +1,5 @@
 // Re-export from open-sse with localDb integration
-import { getModelAliases, getComboByName, getProviderNodes } from "@/lib/localDb";
+import { getModelAliases, getComboByName, getProviderNodes, getModelDisplayNames } from "@/lib/localDb";
 import { parseModel as parseModelCore, resolveModelAliasFromMap, getModelInfoCore } from "open-sse/services/model.js";
 import REGISTRY from "open-sse/providers/registry/index.js";
 
@@ -36,6 +36,16 @@ export async function resolveModelAlias(alias) {
  * Get full model info (parse or resolve)
  */
 export async function getModelInfo(modelStr) {
+  // First, check if this is a display name and resolve it
+  const displayNames = await getModelDisplayNames();
+  const reverseDisplayNames = {};
+  for (const [fullId, displayName] of Object.entries(displayNames)) {
+    reverseDisplayNames[displayName] = fullId;
+  }
+  if (reverseDisplayNames[modelStr]) {
+    modelStr = reverseDisplayNames[modelStr];
+  }
+
   const parsed = parseModel(modelStr);
 
   if (!parsed.isAlias) {
