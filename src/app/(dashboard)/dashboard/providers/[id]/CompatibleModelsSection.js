@@ -4,7 +4,11 @@ import { useState } from "react";
 import PropTypes from "prop-types";
 import { Button } from "@/shared/components";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
-function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias, onTest, testStatus, isTesting }) {
+
+function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias, onTest, testStatus, isTesting, displayName, onSetDisplayName }) {
+  const [editingAlias, setEditingAlias] = useState(false);
+  const [aliasValue, setAliasValue] = useState(displayName || "");
+
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
     : testStatus === "error"
@@ -17,6 +21,20 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
     ? "#ef4444"
     : undefined;
 
+  const showAs = displayName || modelId;
+
+  const handleSaveAlias = () => {
+    if (aliasValue.trim() && onSetDisplayName) {
+      onSetDisplayName(fullModel, aliasValue.trim());
+    }
+    setEditingAlias(false);
+  };
+
+  const handleCancelAlias = () => {
+    setAliasValue(displayName || "");
+    setEditingAlias(false);
+  };
+
   return (
     <div className={`flex items-center gap-3 p-3 rounded-lg border ${borderColor} hover:bg-sidebar/50`}>
       <span
@@ -26,12 +44,58 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
         {testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : "smart_toy"}
       </span>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium truncate">{modelId}</p>
+        {editingAlias ? (
+          <div className="flex items-center gap-1">
+            <input
+              type="text"
+              value={aliasValue}
+              onChange={(e) => setAliasValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSaveAlias();
+                if (e.key === "Escape") handleCancelAlias();
+              }}
+              className="flex-1 min-w-0 rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-main border border-primary/30 focus:outline-none focus:ring-1 focus:ring-primary/50"
+              placeholder="Friendly name (e.g. GPT-4o)"
+              autoFocus
+            />
+            <button
+              onClick={handleSaveAlias}
+              className="rounded p-0.5 text-green-500 hover:bg-green-500/10"
+              title="Save alias"
+            >
+              <span className="material-symbols-outlined text-sm">check</span>
+            </button>
+            <button
+              onClick={handleCancelAlias}
+              className="rounded p-0.5 text-text-muted hover:bg-sidebar"
+              title="Cancel"
+            >
+              <span className="material-symbols-outlined text-sm">close</span>
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1">
+            <p className="text-sm font-medium truncate">{showAs}</p>
+            {displayName && (
+              <code className="text-[10px] text-text-muted/50 font-mono">{modelId}</code>
+            )}
+            <button
+              onClick={() => {
+                setAliasValue(displayName || "");
+                setEditingAlias(true);
+              }}
+              className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
+              title="Set display name"
+            >
+              <span className="material-symbols-outlined text-sm">badge</span>
+            </button>
+          </div>
+        )}
         <div className="flex items-center gap-1 mt-1">
           <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{fullModel}</code>
           <div className="relative group/btn">
             <button
-              onClick={() => onCopy(fullModel, `model-${modelId}`)}
+              onClick={() => onCopy(displayName || fullModel, `model-${modelId}`)}
               className="p-0.5 hover:bg-sidebar rounded text-text-muted hover:text-primary"
             >
               <span className="material-symbols-outlined text-sm">
@@ -71,7 +135,20 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
   );
 }
 
-export default function CompatibleModelsSection({ providerStorageAlias, providerDisplayAlias, modelAliases, customModels, copied, onCopy, onDeleteAlias, onAddCustomModel, onDeleteCustomModel, connections, isAnthropic }) {
+CompatibleModelRow.propTypes = {
+  modelId: PropTypes.string.isRequired,
+  fullModel: PropTypes.string.isRequired,
+  copied: PropTypes.string,
+  onCopy: PropTypes.func.isRequired,
+  onDeleteAlias: PropTypes.func.isRequired,
+  onTest: PropTypes.func,
+  testStatus: PropTypes.oneOf(["ok", "error"]),
+  isTesting: PropTypes.bool,
+  displayName: PropTypes.string,
+  onSetDisplayName: PropTypes.func,
+};
+
+export default function CompatibleModelsSection({ providerStorageAlias, providerDisplayAlias, modelAliases, customModels, copied, onCopy, onDeleteAlias, onAddCustomModel, onDeleteCustomModel, connections, isAnthropic, modelDisplayNames, onSetDisplayName }) {
   const [newModel, setNewModel] = useState("");
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -195,19 +272,24 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
 
       {allModels.length > 0 && (
         <div className="flex flex-col gap-3">
-          {allModels.map(({ id, alias, source }) => (
-            <CompatibleModelRow
-              key={`${source}-${providerStorageAlias}/${id}`}
-              modelId={id}
-              fullModel={`${providerDisplayAlias}/${id}`}
-              copied={copied}
-              onCopy={onCopy}
-              onDeleteAlias={() => source === "custom" ? onDeleteCustomModel(id) : onDeleteAlias(alias)}
-              onTest={connections.length > 0 ? () => handleTestModel(id) : undefined}
-              testStatus={modelTestResults[id]}
-              isTesting={testingModelId === id}
-            />
-          ))}
+          {allModels.map(({ id, alias, source }) => {
+            const fullModelId = `${providerDisplayAlias}/${id}`;
+            return (
+              <CompatibleModelRow
+                key={`${source}-${providerStorageAlias}/${id}`}
+                modelId={id}
+                fullModel={fullModelId}
+                copied={copied}
+                onCopy={onCopy}
+                onDeleteAlias={() => source === "custom" ? onDeleteCustomModel(id) : onDeleteAlias(alias)}
+                onTest={connections.length > 0 ? () => handleTestModel(id) : undefined}
+                testStatus={modelTestResults[id]}
+                isTesting={testingModelId === id}
+                displayName={modelDisplayNames?.[fullModelId]}
+                onSetDisplayName={onSetDisplayName}
+              />
+            );
+          })}
         </div>
       )}
     </div>
@@ -229,4 +311,6 @@ CompatibleModelsSection.propTypes = {
     isActive: PropTypes.bool,
   })).isRequired,
   isAnthropic: PropTypes.bool,
+  modelDisplayNames: PropTypes.object,
+  onSetDisplayName: PropTypes.func,
 };

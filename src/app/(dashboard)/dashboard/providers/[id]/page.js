@@ -1077,6 +1077,8 @@ export default function ProviderDetailPage() {
           onDeleteCustomModel={(modelId) => handleDeleteCustomModel(modelId, "llm", providerStorageAlias)}
           connections={connections}
           isAnthropic={isAnthropicCompatible}
+          modelDisplayNames={modelDisplayNames}
+          onSetDisplayName={handleSetDisplayName}
         />
       );
     }
