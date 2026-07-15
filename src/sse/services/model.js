@@ -65,19 +65,33 @@ export async function getModelInfo(modelStr) {
       const openaiNodes = await getProviderNodes({ type: "openai-compatible" });
       const matchedOpenAI = openaiNodes.find((node) => node.prefix === parsed.providerAlias);
       if (matchedOpenAI) {
-        return { provider: matchedOpenAI.id, model: parsed.model };
+        // Extract model name by removing provider ID prefix from model string
+        // Model string format: prefix/providerId/modelName → modelName
+        const providerIdPrefix = matchedOpenAI.id + "/";
+        const modelStrAfterPrefix = modelStr.startsWith(providerIdPrefix) 
+          ? modelStr.slice(providerIdPrefix.length) 
+          : parsed.model;
+        return { provider: matchedOpenAI.id, model: modelStrAfterPrefix };
       }
 
       const anthropicNodes = await getProviderNodes({ type: "anthropic-compatible" });
       const matchedAnthropic = anthropicNodes.find((node) => node.prefix === parsed.providerAlias);
       if (matchedAnthropic) {
-        return { provider: matchedAnthropic.id, model: parsed.model };
+        const providerIdPrefix = matchedAnthropic.id + "/";
+        const modelStrAfterPrefix = modelStr.startsWith(providerIdPrefix) 
+          ? modelStr.slice(providerIdPrefix.length) 
+          : parsed.model;
+        return { provider: matchedAnthropic.id, model: modelStrAfterPrefix };
       }
 
       const embeddingNodes = await getProviderNodes({ type: "custom-embedding" });
       const matchedEmbedding = embeddingNodes.find((node) => node.prefix === parsed.providerAlias);
       if (matchedEmbedding) {
-        return { provider: matchedEmbedding.id, model: parsed.model };
+        const providerIdPrefix = matchedEmbedding.id + "/";
+        const modelStrAfterPrefix = modelStr.startsWith(providerIdPrefix) 
+          ? modelStr.slice(providerIdPrefix.length) 
+          : parsed.model;
+        return { provider: matchedEmbedding.id, model: modelStrAfterPrefix };
       }
     }
     return {
@@ -103,19 +117,35 @@ export async function getModelInfo(modelStr) {
     const openaiNodes = await getProviderNodes({ type: "openai-compatible" });
     const matchedOpenAI = openaiNodes.find((node) => node.prefix === result.provider);
     if (matchedOpenAI) {
-      return { provider: matchedOpenAI.id, model: result.model };
+      // Extract model name by removing provider ID prefix from resolved model string
+      const resolvedFullModel = result.provider + "/" + result.model;
+      const providerIdPrefix = matchedOpenAI.id + "/";
+      const modelStrAfterPrefix = resolvedFullModel.startsWith(providerIdPrefix) 
+        ? resolvedFullModel.slice(providerIdPrefix.length) 
+        : result.model;
+      return { provider: matchedOpenAI.id, model: modelStrAfterPrefix };
     }
 
     const anthropicNodes = await getProviderNodes({ type: "anthropic-compatible" });
     const matchedAnthropic = anthropicNodes.find((node) => node.prefix === result.provider);
     if (matchedAnthropic) {
-      return { provider: matchedAnthropic.id, model: result.model };
+      const resolvedFullModel = result.provider + "/" + result.model;
+      const providerIdPrefix = matchedAnthropic.id + "/";
+      const modelStrAfterPrefix = resolvedFullModel.startsWith(providerIdPrefix) 
+        ? resolvedFullModel.slice(providerIdPrefix.length) 
+        : result.model;
+      return { provider: matchedAnthropic.id, model: modelStrAfterPrefix };
     }
 
     const embeddingNodes = await getProviderNodes({ type: "custom-embedding" });
     const matchedEmbedding = embeddingNodes.find((node) => node.prefix === result.provider);
     if (matchedEmbedding) {
-      return { provider: matchedEmbedding.id, model: result.model };
+      const resolvedFullModel = result.provider + "/" + result.model;
+      const providerIdPrefix = matchedEmbedding.id + "/";
+      const modelStrAfterPrefix = resolvedFullModel.startsWith(providerIdPrefix) 
+        ? resolvedFullModel.slice(providerIdPrefix.length) 
+        : result.model;
+      return { provider: matchedEmbedding.id, model: modelStrAfterPrefix };
     }
   }
   
