@@ -1079,6 +1079,7 @@ export default function ProviderDetailPage() {
           isAnthropic={isAnthropicCompatible}
           modelDisplayNames={modelDisplayNames}
           onSetDisplayName={handleSetDisplayName}
+          onSetAliasId={(modelId, alias) => handleSetAlias(modelId, alias, providerStorageAlias)}
         />
       );
     }
@@ -1146,9 +1147,11 @@ export default function ProviderDetailPage() {
               model={model}
               fullModel={displayFullModel}
               alias={existingAlias}
+              aliasId={existingAlias}
               copied={copied}
               onCopy={copy}
               onSetAlias={(alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
+              onSetAliasId={(modelId, alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
               onDeleteAlias={() => handleDeleteAlias(existingAlias)}
               testStatus={modelTestResults[model.id]}
               onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}

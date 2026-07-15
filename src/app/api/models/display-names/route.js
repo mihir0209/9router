@@ -24,11 +24,6 @@ export async function PUT(request) {
       return NextResponse.json({ error: "modelId is required" }, { status: 400 });
     }
 
-    // Validate modelId format: must contain exactly one slash (provider/model)
-    if (!modelId.includes("/") || modelId.split("/").length !== 2) {
-      return NextResponse.json({ error: "modelId must be in format 'provider/model'" }, { status: 400 });
-    }
-
     // Validate modelId characters (alphanumeric, hyphens, underscores, dots, slashes)
     if (!/^[a-zA-Z0-9._\-\/]+$/.test(modelId)) {
       return NextResponse.json({ error: "modelId contains invalid characters" }, { status: 400 });

@@ -5,9 +5,11 @@ import PropTypes from "prop-types";
 import { Button } from "@/shared/components";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
 
-function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias, onTest, testStatus, isTesting, displayName, onSetDisplayName }) {
-  const [editingAlias, setEditingAlias] = useState(false);
-  const [aliasValue, setAliasValue] = useState(displayName || "");
+function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias, onTest, testStatus, isTesting, displayName, onSetDisplayName, aliasId, onSetAliasId }) {
+  const [editingDisplayName, setEditingDisplayName] = useState(false);
+  const [displayNameValue, setDisplayNameValue] = useState(displayName || "");
+  const [editingAliasId, setEditingAliasId] = useState(false);
+  const [aliasIdValue, setAliasIdValue] = useState(aliasId || "");
 
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
@@ -21,18 +23,30 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
     ? "#ef4444"
     : undefined;
 
-  const showAs = displayName || modelId;
+  const showAs = displayName || aliasId || modelId;
 
-  const handleSaveAlias = () => {
-    if (aliasValue.trim() && onSetDisplayName) {
-      onSetDisplayName(fullModel, aliasValue.trim());
+  const handleSaveDisplayName = () => {
+    if (displayNameValue.trim() && onSetDisplayName) {
+      onSetDisplayName(fullModel, displayNameValue.trim());
     }
-    setEditingAlias(false);
+    setEditingDisplayName(false);
   };
 
-  const handleCancelAlias = () => {
-    setAliasValue(displayName || "");
-    setEditingAlias(false);
+  const handleCancelDisplayName = () => {
+    setDisplayNameValue(displayName || "");
+    setEditingDisplayName(false);
+  };
+
+  const handleSaveAliasId = () => {
+    if (aliasIdValue.trim() && onSetAliasId) {
+      onSetAliasId(fullModel, aliasIdValue.trim());
+    }
+    setEditingAliasId(false);
+  };
+
+  const handleCancelAliasId = () => {
+    setAliasIdValue(aliasId || "");
+    setEditingAliasId(false);
   };
 
   return (
@@ -44,29 +58,30 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
         {testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : "smart_toy"}
       </span>
       <div className="flex-1 min-w-0">
-        {editingAlias ? (
+        {/* Display Name */}
+        {editingDisplayName ? (
           <div className="flex items-center gap-1">
             <input
               type="text"
-              value={aliasValue}
-              onChange={(e) => setAliasValue(e.target.value)}
+              value={displayNameValue}
+              onChange={(e) => setDisplayNameValue(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") handleSaveAlias();
-                if (e.key === "Escape") handleCancelAlias();
+                if (e.key === "Enter") handleSaveDisplayName();
+                if (e.key === "Escape") handleCancelDisplayName();
               }}
               className="flex-1 min-w-0 rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-main border border-primary/30 focus:outline-none focus:ring-1 focus:ring-primary/50"
               placeholder="Friendly name (e.g. GPT-4o)"
               autoFocus
             />
             <button
-              onClick={handleSaveAlias}
+              onClick={handleSaveDisplayName}
               className="rounded p-0.5 text-green-500 hover:bg-green-500/10"
-              title="Save alias"
+              title="Save display name"
             >
               <span className="material-symbols-outlined text-sm">check</span>
             </button>
             <button
-              onClick={handleCancelAlias}
+              onClick={handleCancelDisplayName}
               className="rounded p-0.5 text-text-muted hover:bg-sidebar"
               title="Cancel"
             >
@@ -81,8 +96,8 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
             )}
             <button
               onClick={() => {
-                setAliasValue(displayName || "");
-                setEditingAlias(true);
+                setDisplayNameValue(displayName || "");
+                setEditingDisplayName(true);
               }}
               className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
               title="Set display name"
@@ -91,11 +106,73 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
             </button>
           </div>
         )}
+
+        {/* Alias ID */}
+        {editingAliasId ? (
+          <div className="flex items-center gap-1 mt-1">
+            <input
+              type="text"
+              value={aliasIdValue}
+              onChange={(e) => setAliasIdValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSaveAliasId();
+                if (e.key === "Escape") handleCancelAliasId();
+              }}
+              className="flex-1 min-w-0 rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-main border border-primary/30 focus:outline-none focus:ring-1 focus:ring-primary/50"
+              placeholder="Alias (e.g. gpt-4o)"
+              autoFocus
+            />
+            <button
+              onClick={handleSaveAliasId}
+              className="rounded p-0.5 text-green-500 hover:bg-green-500/10"
+              title="Save alias"
+            >
+              <span className="material-symbols-outlined text-sm">check</span>
+            </button>
+            <button
+              onClick={handleCancelAliasId}
+              className="rounded p-0.5 text-text-muted hover:bg-sidebar"
+              title="Cancel"
+            >
+              <span className="material-symbols-outlined text-sm">close</span>
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1 mt-1">
+            {aliasId ? (
+              <>
+                <code className="text-[10px] text-primary font-mono">Alias: {aliasId}</code>
+                <button
+                  onClick={() => {
+                    setAliasIdValue(aliasId || "");
+                    setEditingAliasId(true);
+                  }}
+                  className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
+                  title="Edit alias"
+                >
+                  <span className="material-symbols-outlined text-sm">edit</span>
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => {
+                  setAliasIdValue("");
+                  setEditingAliasId(true);
+                }}
+                className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
+                title="Set alias"
+              >
+                <span className="material-symbols-outlined text-sm">link</span>
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="flex items-center gap-1 mt-1">
           <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{fullModel}</code>
           <div className="relative group/btn">
             <button
-              onClick={() => onCopy(displayName || fullModel, `model-${modelId}`)}
+              onClick={() => onCopy(aliasId || displayName || fullModel, `model-${modelId}`)}
               className="p-0.5 hover:bg-sidebar rounded text-text-muted hover:text-primary"
             >
               <span className="material-symbols-outlined text-sm">
@@ -146,9 +223,11 @@ CompatibleModelRow.propTypes = {
   isTesting: PropTypes.bool,
   displayName: PropTypes.string,
   onSetDisplayName: PropTypes.func,
+  aliasId: PropTypes.string,
+  onSetAliasId: PropTypes.func,
 };
 
-export default function CompatibleModelsSection({ providerStorageAlias, providerDisplayAlias, modelAliases, customModels, copied, onCopy, onDeleteAlias, onAddCustomModel, onDeleteCustomModel, connections, isAnthropic, modelDisplayNames, onSetDisplayName }) {
+export default function CompatibleModelsSection({ providerStorageAlias, providerDisplayAlias, modelAliases, customModels, copied, onCopy, onDeleteAlias, onAddCustomModel, onDeleteCustomModel, connections, isAnthropic, modelDisplayNames, onSetDisplayName, onSetAliasId }) {
   const [newModel, setNewModel] = useState("");
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -287,6 +366,8 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
                 isTesting={testingModelId === id}
                 displayName={modelDisplayNames?.[fullModelId]}
                 onSetDisplayName={onSetDisplayName}
+                aliasId={alias}
+                onSetAliasId={onSetAliasId}
               />
             );
           })}
@@ -313,4 +394,5 @@ CompatibleModelsSection.propTypes = {
   isAnthropic: PropTypes.bool,
   modelDisplayNames: PropTypes.object,
   onSetDisplayName: PropTypes.func,
+  onSetAliasId: PropTypes.func,
 };

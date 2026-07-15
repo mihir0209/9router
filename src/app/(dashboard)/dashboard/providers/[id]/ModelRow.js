@@ -2,12 +2,14 @@ import { useState } from "react";
 import PropTypes from "prop-types";
 import { CapacityBadges } from "@/shared/components";
 
-export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting, onDisable, caps, thinkingSuffix, displayName, onSetDisplayName }) {
-  const [editingAlias, setEditingAlias] = useState(false);
-  const [aliasValue, setAliasValue] = useState(displayName || "");
+export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting, onDisable, caps, thinkingSuffix, displayName, onSetDisplayName, aliasId, onSetAliasId }) {
+  const [editingDisplayName, setEditingDisplayName] = useState(false);
+  const [displayNameValue, setDisplayNameValue] = useState(displayName || "");
+  const [editingAliasId, setEditingAliasId] = useState(false);
+  const [aliasIdValue, setAliasIdValue] = useState(aliasId || "");
 
   const displayModel = thinkingSuffix ? `${fullModel}(${thinkingSuffix})` : fullModel;
-  const showAs = displayName || displayModel;
+  const showAs = displayName || aliasId || displayModel;
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
     : testStatus === "error"
@@ -20,16 +22,28 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
     ? "#ef4444"
     : undefined;
 
-  const handleSaveAlias = () => {
-    if (aliasValue.trim() && onSetDisplayName) {
-      onSetDisplayName(fullModel, aliasValue.trim());
+  const handleSaveDisplayName = () => {
+    if (displayNameValue.trim() && onSetDisplayName) {
+      onSetDisplayName(fullModel, displayNameValue.trim());
     }
-    setEditingAlias(false);
+    setEditingDisplayName(false);
   };
 
-  const handleCancelAlias = () => {
-    setAliasValue(displayName || "");
-    setEditingAlias(false);
+  const handleCancelDisplayName = () => {
+    setDisplayNameValue(displayName || "");
+    setEditingDisplayName(false);
+  };
+
+  const handleSaveAliasId = () => {
+    if (aliasIdValue.trim() && onSetAliasId) {
+      onSetAliasId(fullModel, aliasIdValue.trim());
+    }
+    setEditingAliasId(false);
+  };
+
+  const handleCancelAliasId = () => {
+    setAliasIdValue(aliasId || "");
+    setEditingAliasId(false);
   };
 
   return (
@@ -42,29 +56,30 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
           {testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : "smart_toy"}
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-1">
-          {editingAlias ? (
+          {/* Display Name */}
+          {editingDisplayName ? (
             <div className="flex items-center gap-1">
               <input
                 type="text"
-                value={aliasValue}
-                onChange={(e) => setAliasValue(e.target.value)}
+                value={displayNameValue}
+                onChange={(e) => setDisplayNameValue(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") handleSaveAlias();
-                  if (e.key === "Escape") handleCancelAlias();
+                  if (e.key === "Enter") handleSaveDisplayName();
+                  if (e.key === "Escape") handleCancelDisplayName();
                 }}
                 className="flex-1 min-w-0 rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-main border border-primary/30 focus:outline-none focus:ring-1 focus:ring-primary/50"
                 placeholder="Friendly name (e.g. GPT-4o)"
                 autoFocus
               />
               <button
-                onClick={handleSaveAlias}
+                onClick={handleSaveDisplayName}
                 className="rounded p-0.5 text-green-500 hover:bg-green-500/10"
-                title="Save alias"
+                title="Save display name"
               >
                 <span className="material-symbols-outlined text-sm">check</span>
               </button>
               <button
-                onClick={handleCancelAlias}
+                onClick={handleCancelDisplayName}
                 className="rounded p-0.5 text-text-muted hover:bg-sidebar"
                 title="Cancel"
               >
@@ -79,8 +94,8 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
               )}
               <button
                 onClick={() => {
-                  setAliasValue(displayName || "");
-                  setEditingAlias(true);
+                  setDisplayNameValue(displayName || "");
+                  setEditingDisplayName(true);
                 }}
                 className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
                 title="Set display name"
@@ -89,6 +104,68 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
               </button>
             </div>
           )}
+
+          {/* Alias ID */}
+          {editingAliasId ? (
+            <div className="flex items-center gap-1">
+              <input
+                type="text"
+                value={aliasIdValue}
+                onChange={(e) => setAliasIdValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSaveAliasId();
+                  if (e.key === "Escape") handleCancelAliasId();
+                }}
+                className="flex-1 min-w-0 rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-main border border-primary/30 focus:outline-none focus:ring-1 focus:ring-primary/50"
+                placeholder="Alias (e.g. gpt-4o)"
+                autoFocus
+              />
+              <button
+                onClick={handleSaveAliasId}
+                className="rounded p-0.5 text-green-500 hover:bg-green-500/10"
+                title="Save alias"
+              >
+                <span className="material-symbols-outlined text-sm">check</span>
+              </button>
+              <button
+                onClick={handleCancelAliasId}
+                className="rounded p-0.5 text-text-muted hover:bg-sidebar"
+                title="Cancel"
+              >
+                <span className="material-symbols-outlined text-sm">close</span>
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1">
+              {aliasId ? (
+                <>
+                  <code className="max-w-[72vw] truncate rounded bg-sidebar px-1.5 py-0.5 font-mono text-[10px] text-primary sm:max-w-[360px]">Alias: {aliasId}</code>
+                  <button
+                    onClick={() => {
+                      setAliasIdValue(aliasId || "");
+                      setEditingAliasId(true);
+                    }}
+                    className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
+                    title="Edit alias"
+                  >
+                    <span className="material-symbols-outlined text-sm">edit</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => {
+                    setAliasIdValue("");
+                    setEditingAliasId(true);
+                  }}
+                  className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
+                  title="Set alias"
+                >
+                  <span className="material-symbols-outlined text-sm">link</span>
+                </button>
+              )}
+            </div>
+          )}
+
           <span className="flex min-w-0 items-center text-[9px] gap-1 pl-1">
             {model.name && <span className="truncate text-[9px] italic text-text-muted/70">{model.name}</span>}
             <CapacityBadges caps={caps} colorOverride="text-text-muted/70" size={12} />
@@ -112,7 +189,7 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
         )}
         <div className="relative shrink-0 group/btn">
           <button
-            onClick={() => onCopy(showAs, `model-${model.id}`)}
+            onClick={() => onCopy(aliasId || displayName || displayModel, `model-${model.id}`)}
             className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary"
           >
             <span className="material-symbols-outlined text-sm">
@@ -164,4 +241,6 @@ ModelRow.propTypes = {
   thinkingSuffix: PropTypes.string,
   displayName: PropTypes.string,
   onSetDisplayName: PropTypes.func,
+  aliasId: PropTypes.string,
+  onSetAliasId: PropTypes.func,
 };
