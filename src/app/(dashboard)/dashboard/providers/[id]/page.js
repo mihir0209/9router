@@ -1079,7 +1079,12 @@ export default function ProviderDetailPage() {
           isAnthropic={isAnthropicCompatible}
           modelDisplayNames={modelDisplayNames}
           onSetDisplayName={handleSetDisplayName}
-          onSetAliasId={(modelId, alias) => handleSetAlias(modelId, alias, providerStorageAlias)}
+          onSetAliasId={(modelId, alias) => {
+            // modelId from CompatibleModelRow is fullModel = "${prefix}/${modelId}"
+            // We need just the modelId portion
+            const bareModelId = modelId.includes("/") ? modelId.slice(modelId.indexOf("/") + 1) : modelId;
+            handleSetAlias(bareModelId, alias, providerStorageAlias);
+          }}
         />
       );
     }
