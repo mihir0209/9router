@@ -230,7 +230,13 @@ export async function buildModelsList(kindFilter) {
   let displayNames = {};
   try {
     const { getModelDisplayNames } = await import("@/lib/localDb");
-    displayNames = await getModelDisplayNames();
+    const rawDisplayNames = await getModelDisplayNames();
+    // Filter out invalid display names
+    for (const [key, value] of Object.entries(rawDisplayNames)) {
+      if (key && value && typeof key === "string" && typeof value === "string" && !value.includes("/")) {
+        displayNames[key] = value;
+      }
+    }
   } catch (e) {
     console.log("Could not fetch display names");
   }

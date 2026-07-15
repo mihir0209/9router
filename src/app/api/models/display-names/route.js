@@ -24,8 +24,27 @@ export async function PUT(request) {
       return NextResponse.json({ error: "modelId is required" }, { status: 400 });
     }
 
+    // Validate modelId format: must contain exactly one slash (provider/model)
+    if (!modelId.includes("/") || modelId.split("/").length !== 2) {
+      return NextResponse.json({ error: "modelId must be in format 'provider/model'" }, { status: 400 });
+    }
+
+    // Validate modelId characters (alphanumeric, hyphens, underscores, dots, slashes)
+    if (!/^[a-zA-Z0-9._\-\/]+$/.test(modelId)) {
+      return NextResponse.json({ error: "modelId contains invalid characters" }, { status: 400 });
+    }
+
     if (!displayName || typeof displayName !== "string") {
       return NextResponse.json({ error: "displayName is required" }, { status: 400 });
+    }
+
+    // Validate displayName (no slashes, reasonable length)
+    if (displayName.includes("/")) {
+      return NextResponse.json({ error: "displayName cannot contain slashes" }, { status: 400 });
+    }
+
+    if (displayName.length > 100) {
+      return NextResponse.json({ error: "displayName too long (max 100 chars)" }, { status: 400 });
     }
 
     await setModelDisplayName(modelId, displayName.trim());

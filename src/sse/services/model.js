@@ -36,14 +36,24 @@ export async function resolveModelAlias(alias) {
  * Get full model info (parse or resolve)
  */
 export async function getModelInfo(modelStr) {
-  // First, check if this is a display name and resolve it
-  const displayNames = await getModelDisplayNames();
-  const reverseDisplayNames = {};
-  for (const [fullId, displayName] of Object.entries(displayNames)) {
-    reverseDisplayNames[displayName] = fullId;
+  if (!modelStr || typeof modelStr !== "string") {
+    return { provider: null, model: null };
   }
-  if (reverseDisplayNames[modelStr]) {
-    modelStr = reverseDisplayNames[modelStr];
+
+  // First, check if this is a display name and resolve it
+  try {
+    const displayNames = await getModelDisplayNames();
+    const reverseDisplayNames = {};
+    for (const [fullId, displayName] of Object.entries(displayNames)) {
+      if (displayName && fullId) {
+        reverseDisplayNames[displayName] = fullId;
+      }
+    }
+    if (reverseDisplayNames[modelStr]) {
+      modelStr = reverseDisplayNames[modelStr];
+    }
+  } catch (e) {
+    // Ignore display name lookup errors
   }
 
   const parsed = parseModel(modelStr);

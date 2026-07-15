@@ -82,7 +82,7 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
                   setAliasValue(displayName || "");
                   setEditingAlias(true);
                 }}
-                className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
+                className="rounded p-0.5 text-text-muted hover:bg-sidebar hover:text-primary transition-all"
                 title="Set display name"
               >
                 <span className="material-symbols-outlined text-sm">badge</span>
