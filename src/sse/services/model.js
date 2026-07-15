@@ -62,36 +62,22 @@ export async function getModelInfo(modelStr) {
     // Provider-node prefixes are user-defined. They must not override built-in
     // provider ids/aliases such as `cf`, `cloudflare-ai`, `openai`, or `hf`.
     if (!RESERVED_PROVIDER_PREFIXES.has(parsed.providerAlias)) {
-      const openaiNodes = await getProviderNodes({ type: "openai-compatible" });
-      const matchedOpenAI = openaiNodes.find((node) => node.prefix === parsed.providerAlias);
-      if (matchedOpenAI) {
-        // Extract model name by removing provider ID prefix from model string
-        // Model string format: prefix/providerId/modelName → modelName
-        const providerIdPrefix = matchedOpenAI.id + "/";
-        const modelStrAfterPrefix = modelStr.startsWith(providerIdPrefix) 
-          ? modelStr.slice(providerIdPrefix.length) 
-          : parsed.model;
-        return { provider: matchedOpenAI.id, model: modelStrAfterPrefix };
-      }
+      // Helper: strip only the local prefix, keep the upstream provider path.
+      // e.g. prefix="9", id="9/v/posiden", modelStr="9/v/posiden/deepseek-v4-flash"
+      // → returns "v/posiden/deepseek-v4-flash" (sent to upstream as-is)
+      const stripLocalPrefix = (node, modelStr, fallbackModel) => {
+        const prefixSlash = node.prefix + "/";
+        if (modelStr.startsWith(prefixSlash)) {
+          return modelStr.slice(prefixSlash.length);
+        }
+        return fallbackModel;
+      };
 
-      const anthropicNodes = await getProviderNodes({ type: "anthropic-compatible" });
-      const matchedAnthropic = anthropicNodes.find((node) => node.prefix === parsed.providerAlias);
-      if (matchedAnthropic) {
-        const providerIdPrefix = matchedAnthropic.id + "/";
-        const modelStrAfterPrefix = modelStr.startsWith(providerIdPrefix) 
-          ? modelStr.slice(providerIdPrefix.length) 
-          : parsed.model;
-        return { provider: matchedAnthropic.id, model: modelStrAfterPrefix };
-      }
-
-      const embeddingNodes = await getProviderNodes({ type: "custom-embedding" });
-      const matchedEmbedding = embeddingNodes.find((node) => node.prefix === parsed.providerAlias);
-      if (matchedEmbedding) {
-        const providerIdPrefix = matchedEmbedding.id + "/";
-        const modelStrAfterPrefix = modelStr.startsWith(providerIdPrefix) 
-          ? modelStr.slice(providerIdPrefix.length) 
-          : parsed.model;
-        return { provider: matchedEmbedding.id, model: modelStrAfterPrefix };
+      const allNodes = await getProviderNodes();
+      const matchedNode = allNodes.find((node) => node.prefix === parsed.providerAlias);
+      if (matchedNode) {
+        const upstreamModel = stripLocalPrefix(matchedNode, modelStr, parsed.model);
+        return { provider: matchedNode.id, model: upstreamModel };
       }
     }
     return {
@@ -111,41 +97,21 @@ export async function getModelInfo(modelStr) {
 
   const result = await getModelInfoCore(modelStr, getModelAliases);
   
-  // After alias resolution, check if the resolved provider is a prefix for a provider node
+  // After alias resolution, check if the resolved provider is a prefix for a provider node.
   // This handles cases like alias resolving to "9/v/posiden/deepseek-v4-flash"
+  // where "9" is a provider node prefix, not the actual provider ID.
   if (result && result.provider) {
-    const openaiNodes = await getProviderNodes({ type: "openai-compatible" });
-    const matchedOpenAI = openaiNodes.find((node) => node.prefix === result.provider);
-    if (matchedOpenAI) {
-      // Extract model name by removing provider ID prefix from resolved model string
+    const allNodes = await getProviderNodes();
+    const matchedNode = allNodes.find((node) => node.prefix === result.provider);
+    if (matchedNode) {
+      // Reconstruct the full model string from the alias resolution result,
+      // then strip only the local prefix to get the upstream model.
       const resolvedFullModel = result.provider + "/" + result.model;
-      const providerIdPrefix = matchedOpenAI.id + "/";
-      const modelStrAfterPrefix = resolvedFullModel.startsWith(providerIdPrefix) 
-        ? resolvedFullModel.slice(providerIdPrefix.length) 
+      const prefixSlash = matchedNode.prefix + "/";
+      const upstreamModel = resolvedFullModel.startsWith(prefixSlash) 
+        ? resolvedFullModel.slice(prefixSlash.length) 
         : result.model;
-      return { provider: matchedOpenAI.id, model: modelStrAfterPrefix };
-    }
-
-    const anthropicNodes = await getProviderNodes({ type: "anthropic-compatible" });
-    const matchedAnthropic = anthropicNodes.find((node) => node.prefix === result.provider);
-    if (matchedAnthropic) {
-      const resolvedFullModel = result.provider + "/" + result.model;
-      const providerIdPrefix = matchedAnthropic.id + "/";
-      const modelStrAfterPrefix = resolvedFullModel.startsWith(providerIdPrefix) 
-        ? resolvedFullModel.slice(providerIdPrefix.length) 
-        : result.model;
-      return { provider: matchedAnthropic.id, model: modelStrAfterPrefix };
-    }
-
-    const embeddingNodes = await getProviderNodes({ type: "custom-embedding" });
-    const matchedEmbedding = embeddingNodes.find((node) => node.prefix === result.provider);
-    if (matchedEmbedding) {
-      const resolvedFullModel = result.provider + "/" + result.model;
-      const providerIdPrefix = matchedEmbedding.id + "/";
-      const modelStrAfterPrefix = resolvedFullModel.startsWith(providerIdPrefix) 
-        ? resolvedFullModel.slice(providerIdPrefix.length) 
-        : result.model;
-      return { provider: matchedEmbedding.id, model: modelStrAfterPrefix };
+      return { provider: matchedNode.id, model: upstreamModel };
     }
   }
   
