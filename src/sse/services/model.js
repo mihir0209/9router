@@ -95,7 +95,31 @@ export async function getModelInfo(modelStr) {
     return { provider: null, model: parsed.model };
   }
 
-  return getModelInfoCore(modelStr, getModelAliases);
+  const result = await getModelInfoCore(modelStr, getModelAliases);
+  
+  // After alias resolution, check if the resolved provider is a prefix for a provider node
+  // This handles cases like alias resolving to "9/v/posiden/deepseek-v4-flash"
+  if (result && result.provider) {
+    const openaiNodes = await getProviderNodes({ type: "openai-compatible" });
+    const matchedOpenAI = openaiNodes.find((node) => node.prefix === result.provider);
+    if (matchedOpenAI) {
+      return { provider: matchedOpenAI.id, model: result.model };
+    }
+
+    const anthropicNodes = await getProviderNodes({ type: "anthropic-compatible" });
+    const matchedAnthropic = anthropicNodes.find((node) => node.prefix === result.provider);
+    if (matchedAnthropic) {
+      return { provider: matchedAnthropic.id, model: result.model };
+    }
+
+    const embeddingNodes = await getProviderNodes({ type: "custom-embedding" });
+    const matchedEmbedding = embeddingNodes.find((node) => node.prefix === result.provider);
+    if (matchedEmbedding) {
+      return { provider: matchedEmbedding.id, model: result.model };
+    }
+  }
+  
+  return result;
 }
 
 /**
