@@ -24,7 +24,7 @@ export {
 // Proxy pools
 export {
   getProxyPools, getProxyPoolById,
-  createProxyPool, updateProxyPool, deleteProxyPool,
+  createProxyPool, updateProxyPool, deleteProxyPool, replaceProxyPoolsBySource,
 } from "./repos/proxyPoolsRepo.js";
 
 // API keys

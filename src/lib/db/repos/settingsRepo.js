@@ -48,6 +48,19 @@ const DEFAULT_SETTINGS = {
   pxpipeMinChars: 25000,
   pxpipeTimeoutMs: 15000,
   autoBlockedIPs: [],
+  proxyscrapeProxyPool: {
+    enabled: false,
+    protocol: "socks5",
+    country: "all",
+    ssl: "all",
+    anonymity: "all",
+    timeoutMs: 10000,
+    limit: 100,
+    intervalMinutes: 60,
+    lastRefreshAt: null,
+    lastError: null,
+    lastImportedCount: 0,
+  },
 };
 
 async function readRaw() {

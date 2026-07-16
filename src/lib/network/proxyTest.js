@@ -25,13 +25,14 @@ function normalizeString(value) {
   return String(value).trim();
 }
 
-export async function testProxyUrl({ proxyUrl, testUrl, timeoutMs } = {}) {
+export async function testProxyUrl({ proxyUrl, testUrl, timeoutMs, method: methodRaw } = {}) {
   const normalizedProxyUrl = normalizeString(proxyUrl);
   if (!normalizedProxyUrl) {
     return { ok: false, status: 400, error: "proxyUrl is required" };
   }
 
   const normalizedTestUrl = normalizeString(testUrl) || DEFAULT_TEST_URL;
+  const method = normalizeString(methodRaw).toUpperCase() || "HEAD";
   const timeoutMsRaw = Number(timeoutMs);
   const normalizedTimeoutMs =
     Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0
@@ -57,7 +58,7 @@ export async function testProxyUrl({ proxyUrl, testUrl, timeoutMs } = {}) {
 
     try {
       const res = await undiciFetch(normalizedTestUrl, {
-        method: "HEAD",
+        method,
         dispatcher,
         signal: controller.signal,
         headers: {

@@ -27,6 +27,35 @@ function normalizeFormData(data = {}) {
   };
 }
 
+function normalizeProxyScrapeForm(data = {}) {
+  return {
+    enabled: data.enabled === true,
+    protocol: data.protocol || "socks5",
+    country: data.country || "all",
+    ssl: data.ssl || "all",
+    anonymity: data.anonymity || "all",
+    timeoutMs: data.timeoutMs || 10000,
+    limit: data.limit || 100,
+    intervalMinutes: data.intervalMinutes || 60,
+    lastRefreshAt: data.lastRefreshAt || null,
+    lastError: data.lastError || null,
+    lastImportedCount: data.lastImportedCount || 0,
+  };
+}
+
+const COUNTRY_OPTIONS = [
+  { value: "all", label: "All countries" },
+  { value: "IN", label: "India (IN)" },
+  { value: "US", label: "United States (US)" },
+  { value: "GB", label: "United Kingdom (GB)" },
+  { value: "DE", label: "Germany (DE)" },
+  { value: "FR", label: "France (FR)" },
+  { value: "NL", label: "Netherlands (NL)" },
+  { value: "SG", label: "Singapore (SG)" },
+  { value: "JP", label: "Japan (JP)" },
+  { value: "BR", label: "Brazil (BR)" },
+];
+
 export default function ProxyPoolsPage() {
   const [proxyPools, setProxyPools] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -38,6 +67,7 @@ export default function ProxyPoolsPage() {
   const [showRelayMenu, setShowRelayMenu] = useState(false);
   const [editingProxyPool, setEditingProxyPool] = useState(null);
   const [formData, setFormData] = useState(normalizeFormData());
+  const [proxyScrapeForm, setProxyScrapeForm] = useState(normalizeProxyScrapeForm());
   const [batchImportText, setBatchImportText] = useState("");
   const [vercelForm, setVercelForm] = useState({ vercelToken: "", projectName: "vercel-relay" });
   const [cloudflareForm, setCloudflareForm] = useState({ accountId: "", apiToken: "", projectName: "cloudflare-relay" });
@@ -50,6 +80,7 @@ export default function ProxyPoolsPage() {
   const [healthChecking, setHealthChecking] = useState(false);
   const [healthProgress, setHealthProgress] = useState({ current: 0, total: 0 });
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [proxyScrapeBusy, setProxyScrapeBusy] = useState(false);
   const [confirmState, setConfirmState] = useState(null);
   const relayMenuRef = useRef(null);
   const notify = useNotificationStore();
@@ -80,9 +111,20 @@ export default function ProxyPoolsPage() {
     }
   }, []);
 
+  const fetchProxyScrapeConfig = useCallback(async () => {
+    try {
+      const res = await fetch("/api/proxy-pools/proxyscrape", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) setProxyScrapeForm(normalizeProxyScrapeForm(data.config));
+    } catch (error) {
+      console.log("Error fetching ProxyScrape config:", error);
+    }
+  }, []);
+
   useEffect(() => {
     fetchProxyPools();
-  }, [fetchProxyPools]);
+    fetchProxyScrapeConfig();
+  }, [fetchProxyPools, fetchProxyScrapeConfig]);
 
   const resetForm = () => {
     setEditingProxyPool(null);
@@ -558,8 +600,63 @@ export default function ProxyPoolsPage() {
     }
   };
 
+  const saveProxyScrapeConfig = async (overrides = {}, options = {}) => {
+    const payload = { ...proxyScrapeForm, ...overrides };
+    if (options.manageBusy !== false) setProxyScrapeBusy(true);
+    try {
+      const res = await fetch("/api/proxy-pools/proxyscrape", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        notify.error(data.error || "Failed to save ProxyScrape settings");
+        return null;
+      }
+      const next = normalizeProxyScrapeForm(data.config);
+      setProxyScrapeForm(next);
+      if (!options.silent) notify.success("ProxyScrape settings saved");
+      return next;
+    } catch (error) {
+      console.log("Error saving ProxyScrape config:", error);
+      notify.error("Failed to save ProxyScrape settings");
+      return null;
+    } finally {
+      if (options.manageBusy !== false) setProxyScrapeBusy(false);
+    }
+  };
+
+  const refreshProxyScrape = async () => {
+    setProxyScrapeBusy(true);
+    try {
+      const saved = await saveProxyScrapeConfig({}, { silent: true, manageBusy: false });
+      if (!saved) return;
+
+      const res = await fetch("/api/proxy-pools/proxyscrape/refresh", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        notify.error(data.error || "ProxyScrape refresh failed");
+        await fetchProxyScrapeConfig();
+        return;
+      }
+      setProxyScrapeForm(normalizeProxyScrapeForm(data.config));
+      await fetchProxyPools();
+      notify.success(`Imported ${data.importedCount || 0} ProxyScrape proxies`);
+    } catch (error) {
+      console.log("Error refreshing ProxyScrape proxies:", error);
+      notify.error("ProxyScrape refresh failed");
+    } finally {
+      setProxyScrapeBusy(false);
+    }
+  };
+
   const activeCount = useMemo(
     () => proxyPools.filter((pool) => pool.isActive === true).length,
+    [proxyPools]
+  );
+  const proxyScrapeCount = useMemo(
+    () => proxyPools.filter((pool) => pool.source === "proxyscrape").length,
     [proxyPools]
   );
 
@@ -635,6 +732,125 @@ export default function ProxyPoolsPage() {
           <Button size="sm" icon="add" onClick={openCreateModal}>Add Proxy Pool</Button>
         </div>
       </div>
+
+      <Card>
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-base font-semibold">ProxyScrape Auto Refresh</h2>
+                <Badge variant={proxyScrapeForm.enabled ? "success" : "default"} size="sm">
+                  {proxyScrapeForm.enabled ? "enabled" : "disabled"}
+                </Badge>
+                <Badge variant="default" size="sm">{proxyScrapeCount} managed</Badge>
+              </div>
+              <p className="mt-1 text-xs text-text-muted">
+                Fetches fresh proxies from ProxyScrape, validates the first result, then replaces only ProxyScrape-managed rows.
+              </p>
+            </div>
+            <Toggle
+              checked={proxyScrapeForm.enabled === true}
+              onChange={() => setProxyScrapeForm((prev) => ({ ...prev, enabled: !prev.enabled }))}
+              title="Enable scheduled ProxyScrape refresh"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-text-main">Protocol</span>
+              <select
+                value={proxyScrapeForm.protocol}
+                onChange={(e) => setProxyScrapeForm((prev) => ({ ...prev, protocol: e.target.value }))}
+                className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+              >
+                <option value="socks5">SOCKS5</option>
+                <option value="socks4">SOCKS4</option>
+                <option value="http">HTTP</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-text-main">Country</span>
+              <select
+                value={proxyScrapeForm.country}
+                onChange={(e) => setProxyScrapeForm((prev) => ({ ...prev, country: e.target.value }))}
+                className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+              >
+                {COUNTRY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <Input
+              label="Limit"
+              type="number"
+              min="1"
+              max="5000"
+              value={String(proxyScrapeForm.limit)}
+              onChange={(e) => setProxyScrapeForm((prev) => ({ ...prev, limit: e.target.value }))}
+              placeholder="100"
+            />
+            <Input
+              label="Timeout (ms)"
+              type="number"
+              min="1000"
+              max="60000"
+              value={String(proxyScrapeForm.timeoutMs)}
+              onChange={(e) => setProxyScrapeForm((prev) => ({ ...prev, timeoutMs: e.target.value }))}
+              placeholder="10000"
+            />
+            <Input
+              label="Refresh every (minutes)"
+              type="number"
+              min="5"
+              max="10080"
+              value={String(proxyScrapeForm.intervalMinutes)}
+              onChange={(e) => setProxyScrapeForm((prev) => ({ ...prev, intervalMinutes: e.target.value }))}
+              placeholder="60"
+            />
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-text-main">Anonymity</span>
+              <select
+                value={proxyScrapeForm.anonymity}
+                onChange={(e) => setProxyScrapeForm((prev) => ({ ...prev, anonymity: e.target.value }))}
+                className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+              >
+                <option value="all">All</option>
+                <option value="elite">Elite</option>
+                <option value="anonymous">Anonymous</option>
+                <option value="transparent">Transparent</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-text-main">SSL</span>
+              <select
+                value={proxyScrapeForm.ssl}
+                onChange={(e) => setProxyScrapeForm((prev) => ({ ...prev, ssl: e.target.value }))}
+                className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+              >
+                <option value="all">All</option>
+                <option value="yes">SSL only</option>
+                <option value="no">Non-SSL</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+            <span>Last refresh: {formatDateTime(proxyScrapeForm.lastRefreshAt)}</span>
+            <span>Imported: {proxyScrapeForm.lastImportedCount || 0}</span>
+            {proxyScrapeForm.lastError ? <span className="text-red-500">Last error: {proxyScrapeForm.lastError}</span> : null}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" icon="save" onClick={() => saveProxyScrapeConfig()} disabled={proxyScrapeBusy}>
+              Save Settings
+            </Button>
+            <Button size="sm" icon="sync" onClick={refreshProxyScrape} disabled={proxyScrapeBusy}>
+              {proxyScrapeBusy ? "Working..." : "Refresh Now"}
+            </Button>
+          </div>
+        </div>
+      </Card>
 
       <Card>
         <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -721,6 +937,9 @@ export default function ProxyPoolsPage() {
                     )}
                     {pool.type === "cloudflare" && (
                       <Badge variant="default" size="sm">cloudflare relay</Badge>
+                    )}
+                    {pool.source === "proxyscrape" && (
+                      <Badge variant="default" size="sm">proxyscrape</Badge>
                     )}
                     <Badge variant="default" size="sm">
                       {pool.boundConnectionCount || 0} bound
@@ -895,7 +1114,7 @@ export default function ProxyPoolsPage() {
             value={cloudflareForm.apiToken}
             onChange={(e) => setCloudflareForm((prev) => ({ ...prev, apiToken: e.target.value }))}
             placeholder="your-cloudflare-api-token"
-            hint={<>Requires "Workers Scripts: Edit" permission. <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Get token →</a></>}
+            hint={<>Requires &quot;Workers Scripts: Edit&quot; permission. <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Get token →</a></>}
             type="password"
           />
           <Input

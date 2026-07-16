@@ -101,3 +101,38 @@ export async function deleteProxyPool(id) {
   });
   return removed;
 }
+
+export async function replaceProxyPoolsBySource(source, pools = []) {
+  const normalizedSource = typeof source === "string" ? source.trim() : "";
+  if (!normalizedSource) throw new Error("source is required");
+
+  const db = await getAdapter();
+  const now = new Date().toISOString();
+  const nextPools = [];
+
+  db.transaction(() => {
+    const rows = db.all(`SELECT id, data FROM proxyPools`);
+    for (const row of rows) {
+      const data = parseJson(row.data, {});
+      if (data?.source === normalizedSource) {
+        db.run(`DELETE FROM proxyPools WHERE id = ?`, [row.id]);
+      }
+    }
+
+    for (const pool of pools) {
+      const next = {
+        ...pool,
+        source: normalizedSource,
+        id: pool.id,
+        isActive: pool.isActive !== false,
+        testStatus: pool.testStatus || "unknown",
+        createdAt: pool.createdAt || now,
+        updatedAt: now,
+      };
+      upsert(db, next);
+      nextPools.push(next);
+    }
+  });
+
+  return nextPools;
+}
