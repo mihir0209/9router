@@ -394,39 +394,6 @@ export async function buildModelsList(kindFilter) {
         }
       }
 
-      // Build alias entries: each alias key becomes its own model entry so clients
-      // can send `model: "alias-key"` and get routed correctly.
-      const aliasEntries = [];
-      for (const [aliasKey, fullModel] of Object.entries(modelAliases || {})) {
-        if (typeof fullModel !== "string" || !fullModel.includes("/")) continue;
-        // Check if this alias belongs to the current provider
-        const belongsToProvider =
-          fullModel.startsWith(`${outputAlias}/`) ||
-          fullModel.startsWith(`${staticAlias}/`) ||
-          fullModel.startsWith(`${providerId}/`);
-        if (!belongsToProvider) continue;
-        // Extract the modelId portion
-        let modelId;
-        if (fullModel.startsWith(`${outputAlias}/`)) modelId = fullModel.slice(outputAlias.length + 1);
-        else if (fullModel.startsWith(`${staticAlias}/`)) modelId = fullModel.slice(staticAlias.length + 1);
-        else modelId = fullModel.slice(providerId.length + 1);
-        // Check disabled
-        if (isDisabled(outputAlias, modelId) || isDisabled(staticAlias, modelId)) continue;
-        // Check kind
-        const customKind = customModelKindById.get(modelId);
-        const liveKind = liveModelKindById.get(modelId);
-        const kind = customKind || liveKind || staticModelKindById.get(modelId) || inferKindFromUnknownModelId(modelId);
-        const allowAsLlm = kind === "imageToText" && kindFilter.includes(LLM_KIND);
-        if (!kindFilter.includes(kind) && !allowAsLlm) continue;
-        aliasEntries.push({
-          id: aliasKey,
-          object: "model",
-          owned_by: outputAlias,
-          original_id: `${outputAlias}/${modelId}`,
-        });
-      }
-
-      // Build the set of model IDs from static + custom (not aliases — those are separate entries)
       const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds]));
 
       for (const modelId of mergedModelIds) {
@@ -451,9 +418,6 @@ export async function buildModelsList(kindFilter) {
         if (caps) model.capabilities = caps;
         models.push(model);
       }
-
-      // Add alias entries
-      models.push(...aliasEntries);
 
       // Web search/fetch — provider IS the model, expose as {alias}/search and/or {alias}/fetch with explicit kind
       const providerInfo = AI_PROVIDERS[providerId];

@@ -1144,8 +1144,9 @@ export default function ProviderDetailPage() {
           const fullModel = `${providerStorageAlias}/${model.id}`;
           const displayFullModel = `${providerDisplayAlias}/${model.id}`;
           const oldFormatModel = `${providerId}/${model.id}`;
+          const providerAliasModel = `${providerAlias}/${model.id}`;
           const existingAlias = Object.entries(modelAliases).find(
-            ([, m]) => m === fullModel || m === oldFormatModel
+            ([, m]) => m === fullModel || m === oldFormatModel || m === providerAliasModel
           )?.[0];
           return (
             <ModelRow
