@@ -23,6 +23,7 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { classifyProxyFailure, quarantineProxyPool } from "@/lib/proxy/quarantine";
 
 /**
  * Handle chat completion request
@@ -264,6 +265,18 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     });
 
     if (result.success) return result.response;
+
+    const proxyPoolId = credentials.providerSpecificData?.connectionProxyPoolId;
+    const proxyFailureKind = classifyProxyFailure(result.status, result.error);
+    if (proxyPoolId && proxyFailureKind) {
+      await quarantineProxyPool(proxyPoolId, {
+        provider,
+        model,
+        kind: proxyFailureKind,
+        reason: result.error || `HTTP ${result.status}`,
+      });
+      log.warn("PROXY", `Quarantined proxy pool ${proxyPoolId} (${proxyFailureKind}) for ${provider}/${model}`);
+    }
 
     // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);

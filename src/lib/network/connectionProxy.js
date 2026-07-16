@@ -1,4 +1,5 @@
 import { getProxyPoolById } from "@/models";
+import { isProxyQuarantined } from "@/lib/proxy/quarantine";
 
 // Safely normalize any value into a trimmed string.
 function normalizeString(value) {
@@ -64,7 +65,8 @@ function normalizeLegacyProxy(providerSpecificData = {}) {
  * 3. No Proxy
  */
 export async function resolveConnectionProxyConfig(
-  providerSpecificData = {}
+  providerSpecificData = {},
+  options = {}
 ) {
   try {
     const proxyPoolIdRaw = normalizeString(
@@ -83,6 +85,18 @@ export async function resolveConnectionProxyConfig(
      * -----------------------------
      */
     if (proxyPoolId) {
+      if (isProxyQuarantined(options.quarantine, proxyPoolId, { provider: options.provider, model: options.model })) {
+        return {
+          source: "quarantined",
+          proxyPoolId,
+          proxyPool: null,
+          connectionProxyEnabled: false,
+          connectionProxyUrl: "",
+          connectionNoProxy: "",
+          strictProxy: false,
+        };
+      }
+
       const proxyPool = await getProxyPoolById(proxyPoolId);
 
       const proxyUrl = normalizeString(proxyPool?.proxyUrl);

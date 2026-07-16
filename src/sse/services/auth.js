@@ -3,6 +3,7 @@ import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/con
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
+import { getProxyPoolQuarantine, isProxyQuarantined } from "@/lib/proxy/quarantine";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
@@ -37,13 +38,19 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const settings = await getSettings();
       const override = (settings.providerStrategies || {})[providerId] || {};
       const strategy = override.rotateStrategy || "none";
+      const quarantine = await getProxyPoolQuarantine();
       let pickedId = override.proxyPoolId || null;
       if (strategy !== "none") {
         const allPools = await getProxyPools({ isActive: true });
-        const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
+        const poolIds = allPools
+          .filter(p => p.proxyUrl && !isProxyQuarantined(quarantine, p.id, { provider: providerId, model }))
+          .map(p => p.id);
         pickedId = pickProxyPoolId(poolIds, strategy, providerId);
       }
-      const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
+      const resolvedProxy = await resolveConnectionProxyConfig(
+        { proxyPoolId: pickedId || "" },
+        { provider: providerId, model, quarantine }
+      );
       return {
         id: "noauth",
         connectionName: "Public",
@@ -163,7 +170,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connection = availableConnections[0];
     }
 
-    const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+    const resolvedProxy = await resolveConnectionProxyConfig(
+      connection.providerSpecificData || {},
+      { provider: providerId, model, quarantine: await getProxyPoolQuarantine() }
+    );
 
     return {
       authType: connection.authType,

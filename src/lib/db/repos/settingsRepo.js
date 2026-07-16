@@ -66,6 +66,9 @@ const DEFAULT_SETTINGS = {
     lastCheckedCount: 0,
     lastWorkingCount: 0,
   },
+  proxyPoolQuarantine: { global: {}, scoped: {} },
+  proxyPoolRateLimitCooldownMinutes: 30,
+  proxyPoolNetworkCooldownMinutes: 10,
 };
 
 async function readRaw() {
