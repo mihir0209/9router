@@ -31,13 +31,13 @@ export function getProviderCustomModelRows({
     seenFullModels.add(fullModel);
 
     // Attach alias from modelAliases if one exists for this model
-    const alias = aliasByFullModel[fullModel] || aliasByFullModel[`${providerAlias}/${model.id}`];
+    const alias = aliasByFullModel[fullModel];
 
     rows.push({
       id: model.id,
       name: model.name || model.id,
       fullModel,
-      alias,
+      alias: alias || undefined,
       source: "custom",
       type: rowType,
     });

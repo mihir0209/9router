@@ -368,7 +368,18 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
                 fullModel={fullModelId}
                 copied={copied}
                 onCopy={onCopy}
-                onDeleteAlias={() => source === "custom" ? onDeleteCustomModel(id) : onDeleteAlias(alias)}
+                onDeleteAlias={() => {
+                  if (source === "custom") {
+                    // If this custom model has an alias, remove the alias but keep the model
+                    if (alias) {
+                      onDeleteAlias(alias);
+                    } else {
+                      onDeleteCustomModel(id);
+                    }
+                  } else {
+                    onDeleteAlias(alias);
+                  }
+                }}
                 onTest={connections.length > 0 ? () => handleTestModel(id) : undefined}
                 testStatus={modelTestResults[id]}
                 isTesting={testingModelId === id}

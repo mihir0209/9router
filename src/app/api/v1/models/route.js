@@ -409,14 +409,27 @@ export async function buildModelsList(kindFilter) {
         const fullModelId = `${outputAlias}/${modelId}`;
         const aliasKey = fullModelToAlias[fullModelId];
 
-        const model = {
-          id: aliasKey || fullModelId,
+        const caps = liveCapabilitiesById.get(modelId) || capabilitiesFromServiceKind(customKind || liveKind);
+
+        // Always emit the original model entry
+        const originalModel = {
+          id: fullModelId,
           object: "model",
           owned_by: outputAlias,
         };
-        const caps = liveCapabilitiesById.get(modelId) || capabilitiesFromServiceKind(customKind || liveKind);
-        if (caps) model.capabilities = caps;
-        models.push(model);
+        if (caps) originalModel.capabilities = caps;
+        models.push(originalModel);
+
+        // Also emit an alias entry (so clients can use the short alias)
+        if (aliasKey) {
+          const aliasModel = {
+            id: aliasKey,
+            object: "model",
+            owned_by: outputAlias,
+          };
+          if (caps) aliasModel.capabilities = caps;
+          models.push(aliasModel);
+        }
       }
 
       // Web search/fetch — provider IS the model, expose as {alias}/search and/or {alias}/fetch with explicit kind

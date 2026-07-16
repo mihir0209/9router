@@ -1117,6 +1117,7 @@ export default function ProviderDetailPage() {
               model={{ id: model.id, name: model.name }}
               fullModel={fullModelId}
               alias={model.alias}
+              aliasId={model.alias}
               copied={copied}
               onCopy={copy}
               onSetAlias={() => {}}
