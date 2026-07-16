@@ -84,6 +84,7 @@ const UPSTREAM_CONNECTION_RE = /[-_][0-9a-f]{8,}$/i;
 
 // LLM kind sentinel — combos/models with no explicit kind default to LLM
 const LLM_KIND = "llm";
+const CLOUDFLARE_STATIC_PROVIDER_BLOCKLIST = new Set(["opencode"]);
 
 // Map per-model `type` field (in PROVIDER_MODELS) to service kind.
 // Models without `type` are treated as LLM.
@@ -178,6 +179,11 @@ function providerMatchesKinds(providerId, kindFilter) {
   return kindFilter.some((k) => kinds.includes(k));
 }
 
+function shouldExposeStaticProvider(providerId) {
+  if (process.env.NINEROUTER_RUNTIME !== "cloudflare") return true;
+  return !CLOUDFLARE_STATIC_PROVIDER_BLOCKLIST.has(providerId);
+}
+
 // Combo matches kindFilter when its `kind` field is in the list.
 // Combos with no kind are treated as LLM.
 function comboMatchesKinds(combo, kindFilter) {
@@ -258,6 +264,7 @@ export async function buildModelsList(kindFilter) {
     for (const [alias, providerModels] of Object.entries(PROVIDER_MODELS)) {
       const providerId = aliasToProviderId[alias] || alias;
       if (!providerMatchesKinds(providerId, kindFilter)) continue;
+      if (!shouldExposeStaticProvider(providerId)) continue;
       for (const model of providerModels) {
         if (!kindFilter.includes(modelKind(model))) continue;
         if (isDisabled(alias, model.id)) continue;
@@ -275,6 +282,8 @@ export async function buildModelsList(kindFilter) {
       if (!kindFilter.includes(LLM_KIND)) continue;
       const providerAlias = customModel.providerAlias;
       if (!providerAlias) continue;
+      const providerId = aliasToProviderId[providerAlias] || providerAlias;
+      if (!shouldExposeStaticProvider(providerId)) continue;
 
       const modelId = String(customModel.id).trim();
       if (!modelId) continue;

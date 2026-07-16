@@ -131,6 +131,12 @@ export async function handleChat(request, clientRawRequest = null) {
  */
 async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
   const modelInfo = await getModelInfo(modelStr);
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare" && modelInfo.provider === "opencode") {
+    return errorResponse(
+      HTTP_STATUS.FORBIDDEN,
+      "OpenCode Free is not available from Cloudflare Workers. Add a configured provider/API key instead."
+    );
+  }
 
   // If provider is null, this might be a combo name - check and handle
   if (!modelInfo.provider) {
