@@ -1,5 +1,7 @@
 import { TABLES } from "../schema.js";
 
+const D1_TABLE = "ninerouter_rows";
+
 const PRIMARY_KEYS = {
   _meta: ["key"],
   settings: ["id"],
@@ -15,6 +17,22 @@ const PRIMARY_KEYS = {
 };
 
 const AUTOINCREMENT = new Set(["usageHistory"]);
+
+async function getD1Context() {
+  try {
+    const { getCloudflareContext } = await import("@opennextjs/cloudflare");
+    return await getCloudflareContext({ async: true });
+  } catch (error) {
+    console.warn(`[DB] Cloudflare D1 context unavailable: ${error.message}`);
+    return null;
+  }
+}
+
+function primaryKeyFor(table, row) {
+  const keys = PRIMARY_KEYS[table] || [];
+  if (!keys.length) return row.id ?? JSON.stringify(row);
+  return keys.map((key) => `${key}:${String(row[key] ?? "")}`).join("|");
+}
 
 function clone(row) {
   return row ? { ...row } : row;
@@ -152,6 +170,54 @@ function createState() {
 
 export async function createCloudflareMemoryAdapter() {
   const state = createState();
+  const context = await getD1Context();
+  const d1 = context?.env?.DB || null;
+
+  async function initializeD1() {
+    if (!d1) return;
+    await d1.prepare(
+      `CREATE TABLE IF NOT EXISTS ${D1_TABLE} (` +
+      `table_name TEXT NOT NULL, ` +
+      `row_key TEXT NOT NULL, ` +
+      `data TEXT NOT NULL, ` +
+      `updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, ` +
+      `PRIMARY KEY (table_name, row_key))`
+    ).run();
+    const result = await d1.prepare(`SELECT table_name, data FROM ${D1_TABLE}`).all();
+    for (const row of result.results || []) {
+      if (!state.tables[row.table_name]) continue;
+      try {
+        const parsed = JSON.parse(row.data);
+        state.tables[row.table_name].push(parsed);
+        if (AUTOINCREMENT.has(row.table_name) && Number.isFinite(Number(parsed.id))) {
+          state.sequences[row.table_name] = Math.max(state.sequences[row.table_name] || 0, Number(parsed.id));
+        }
+      } catch {
+        // Ignore corrupt persisted rows; the in-memory adapter is fail-open.
+      }
+    }
+  }
+
+  function persistTable(table) {
+    if (!d1 || !state.tables[table]) return;
+    const rows = state.tables[table].map((row) => ({ key: primaryKeyFor(table, row), data: JSON.stringify(row) }));
+    const task = (async () => {
+      const statements = [d1.prepare(`DELETE FROM ${D1_TABLE} WHERE table_name = ?`).bind(table)];
+      for (const row of rows) {
+        statements.push(
+          d1.prepare(
+            `INSERT INTO ${D1_TABLE}(table_name, row_key, data, updated_at) ` +
+            `VALUES(?, ?, ?, CURRENT_TIMESTAMP) ` +
+            `ON CONFLICT(table_name, row_key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`
+          ).bind(table, row.key, row.data)
+        );
+      }
+      await d1.batch(statements);
+    })().catch((error) => console.warn(`[DB] D1 persist failed for ${table}: ${error.message}`));
+    context?.ctx?.waitUntil?.(task);
+  }
+
+  await initializeD1();
 
   function rowsFor(table) {
     if (!state.tables[table]) state.tables[table] = [];
@@ -190,6 +256,7 @@ export async function createCloudflareMemoryAdapter() {
     } else {
       rowsFor(table).push(row);
     }
+    persistTable(table);
     return { changes: 1, lastInsertRowid: row.id ?? null };
   }
 
@@ -213,6 +280,7 @@ export async function createCloudflareMemoryAdapter() {
       Object.assign(row, updates);
       changes++;
     }
+    if (changes) persistTable(table);
     return { changes, lastInsertRowid: null };
   }
 
@@ -223,7 +291,9 @@ export async function createCloudflareMemoryAdapter() {
     const where = buildWhere(whereSql, params);
     const before = rowsFor(table).length;
     state.tables[table] = rowsFor(table).filter((row) => !where(row));
-    return { changes: before - state.tables[table].length, lastInsertRowid: null };
+    const changes = before - state.tables[table].length;
+    if (changes) persistTable(table);
+    return { changes, lastInsertRowid: null };
   }
 
   function run(sql, params = []) {
@@ -277,7 +347,7 @@ export async function createCloudflareMemoryAdapter() {
   }
 
   return {
-    driver: "cloudflare-memory-js",
+    driver: d1 ? "cloudflare-d1-backed-memory" : "cloudflare-memory-js",
     run,
     get,
     all,
