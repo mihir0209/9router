@@ -1,4 +1,5 @@
-import { PROVIDER_MODELS } from "@/shared/constants/models";
+import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS } from "@/shared/constants/models";
+import { getProviderConnections } from "@/lib/localDb";
 
 /**
  * Handle CORS preflight
@@ -21,6 +22,10 @@ export async function GET() {
   try {
     const models = [];
     const seen = new Set();
+    const connections = (await getProviderConnections()).filter((connection) => connection.isActive !== false);
+    const activeAliases = new Set(
+      connections.map((connection) => PROVIDER_ID_TO_ALIAS[connection.provider] || connection.provider)
+    );
 
     function addModel({ name, displayName, description, methods = ["generateContent"] }) {
       if (seen.has(name)) return;
@@ -36,6 +41,7 @@ export async function GET() {
     }
     
     for (const [provider, providerModels] of Object.entries(PROVIDER_MODELS)) {
+      if (!activeAliases.has(provider)) continue;
       for (const model of providerModels) {
         addModel({
           name: `models/${provider}/${model.id}`,
