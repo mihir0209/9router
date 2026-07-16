@@ -50,16 +50,29 @@ describe("ProxyScrape refresh", () => {
     expect(result.importedCount).toBe(2);
   });
 
-  it("does not replace rows when first proxy validation fails", async () => {
+  it("still replaces rows when first proxy validation fails", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(textResponse("1.2.3.4:1080\n"));
     proxyTest.testProxyUrl.mockResolvedValue({ ok: false, error: "timeout" });
 
-    await expect(refreshProxyScrapePool({
+    const result = await refreshProxyScrapePool({
       config: { protocol: "socks5", limit: 1 },
       fetchImpl,
-    })).rejects.toThrow("First ProxyScrape proxy failed validation");
+    });
 
-    expect(localDb.replaceProxyPoolsBySource).not.toHaveBeenCalled();
-    expect(localDb.updateSettings).not.toHaveBeenCalled();
+    expect(localDb.replaceProxyPoolsBySource).toHaveBeenCalledWith("proxyscrape", [
+      expect.objectContaining({
+        proxyUrl: "socks5://1.2.3.4:1080",
+        source: "proxyscrape",
+        testStatus: "unknown",
+        lastError: "timeout",
+      }),
+    ]);
+    expect(localDb.updateSettings).toHaveBeenCalledWith({
+      proxyscrapeProxyPool: expect.objectContaining({
+        lastError: "Imported, but first proxy failed validation: timeout",
+        lastImportedCount: 1,
+      }),
+    });
+    expect(result.importedCount).toBe(1);
   });
 });

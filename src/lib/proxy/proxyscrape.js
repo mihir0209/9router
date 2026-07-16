@@ -151,17 +151,24 @@ export async function refreshProxyScrapePool({ config, validateFirst = true, fet
       method: "GET",
       timeoutMs: Math.min(normalized.timeoutMs, 15000),
     });
-    if (!validation.ok) {
-      throw new Error(`First ProxyScrape proxy failed validation: ${validation.error || validation.statusText || validation.status}`);
-    }
   }
 
   const pools = toPoolEntries(proxies, normalized);
+  if (validation) {
+    pools[0] = {
+      ...pools[0],
+      testStatus: validation.ok ? "active" : "unknown",
+      lastTestedAt: new Date().toISOString(),
+      lastError: validation.ok ? null : (validation.error || validation.statusText || `Proxy test failed with status ${validation.status}`),
+    };
+  }
   const replaced = await replaceProxyPoolsBySource(PROXYSCRAPE_SOURCE, pools);
   const nextConfig = {
     ...normalized,
     lastRefreshAt: new Date().toISOString(),
-    lastError: null,
+    lastError: validation && !validation.ok
+      ? `Imported, but first proxy failed validation: ${validation.error || validation.statusText || validation.status}`
+      : null,
     lastImportedCount: replaced.length,
   };
 
