@@ -14,6 +14,12 @@ export function getProviderCustomModelRows({
   const seenFullModels = new Set();
   const rows = [];
 
+  // Build reverse alias map: fullModel → aliasKey
+  const aliasByFullModel = {};
+  for (const [aliasKey, fm] of Object.entries(modelAliases || {})) {
+    if (typeof fm === "string") aliasByFullModel[fm] = aliasKey;
+  }
+
   for (const model of customModels) {
     if (!model?.id || model.providerAlias !== providerAlias) continue;
     const rowType = modelType(model);
@@ -23,10 +29,15 @@ export function getProviderCustomModelRows({
     const fullModel = `${providerAlias}/${model.id}`;
     if (seenFullModels.has(fullModel)) continue;
     seenFullModels.add(fullModel);
+
+    // Attach alias from modelAliases if one exists for this model
+    const alias = aliasByFullModel[fullModel] || aliasByFullModel[`${providerAlias}/${model.id}`];
+
     rows.push({
       id: model.id,
       name: model.name || model.id,
       fullModel,
+      alias,
       source: "custom",
       type: rowType,
     });

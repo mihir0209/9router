@@ -20,10 +20,11 @@ export async function GET() {
       .map((m) => {
         const fullModel = `${m.provider}/${m.model}`;
         const c = getCapabilitiesForModel(m.provider, m.model);
+        const aliasForModel = Object.entries(modelAliases).find(([, v]) => v === fullModel)?.[0];
         return {
           ...m,
           fullModel,
-          alias: modelAliases[fullModel] || m.model,
+          alias: aliasForModel || m.model,
           caps: { vision: c.vision, search: c.search, reasoning: c.reasoning },
         };
       });
@@ -57,7 +58,7 @@ export async function PUT(request) {
     }
 
     // Update alias
-    await setModelAlias(model, alias);
+    await setModelAlias(alias, model);
 
     return NextResponse.json({ success: true, model, alias });
   } catch (error) {

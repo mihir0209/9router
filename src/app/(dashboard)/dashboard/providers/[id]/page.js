@@ -253,7 +253,8 @@ export default function ProviderDetailPage() {
       const res = await fetch("/api/models/alias");
       const data = await res.json();
       if (res.ok) {
-        setModelAliases(data.aliases || {});
+        const aliases = data.aliases || {};
+        setModelAliases(aliases);
       }
     } catch (error) {
       console.log("Error fetching aliases:", error);

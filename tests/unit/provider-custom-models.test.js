@@ -46,6 +46,7 @@ describe("provider custom model rows", () => {
         id: "custom-a",
         name: "Custom A",
         fullModel: "ollama/custom-a",
+        alias: "custom-a",
         source: "custom",
         type: "llm",
       },
