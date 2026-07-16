@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { getSettings, updateSettings } from "@/lib/localDb";
+import { getDashboardAuthSession } from "@/lib/auth/dashboardSession";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -10,6 +12,14 @@ const SETTINGS_RESPONSE_HEADERS = {
 
 // Secrets must never be mass-assigned from request body (CWE-915)
 const PROTECTED_SETTING_KEYS = ["password", "mitmSudoEncrypted"];
+
+async function requireDashboardSession() {
+  if (process.env.NINEROUTER_RUNTIME !== "cloudflare") return null;
+  const cookieStore = await cookies();
+  const session = await getDashboardAuthSession(cookieStore.get("auth_token")?.value);
+  if (session?.authenticated) return null;
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: SETTINGS_RESPONSE_HEADERS });
+}
 
 export async function GET() {
   try {
@@ -34,6 +44,9 @@ export async function GET() {
 
 export async function PATCH(request) {
   try {
+    const unauthorized = await requireDashboardSession();
+    if (unauthorized) return unauthorized;
+
     const body = await request.json();
 
     // Strip protected secrets before any internal handling sets them
