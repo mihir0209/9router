@@ -30,11 +30,14 @@ describe("ProxyScrape refresh", () => {
     proxyTest.testProxyUrl.mockResolvedValue({ ok: true, status: 200 });
   });
 
-  it("validates first proxy before replacing managed rows", async () => {
+  it("keeps only proxies that pass validation", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(textResponse("1.2.3.4:1080\n5.6.7.8:1080\n"));
+    proxyTest.testProxyUrl
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce({ ok: false, error: "timeout" });
 
     const result = await refreshProxyScrapePool({
-      config: { protocol: "socks5", limit: 2 },
+      config: { protocol: "socks5", limit: 2, validateImported: true, minWorkingProxies: 1 },
       fetchImpl,
     });
 
@@ -43,36 +46,39 @@ describe("ProxyScrape refresh", () => {
       testUrl: "https://api.ipify.org/",
       method: "GET",
     }));
-    expect(localDb.replaceProxyPoolsBySource).toHaveBeenCalledWith("proxyscrape", expect.arrayContaining([
-      expect.objectContaining({ proxyUrl: "socks5://1.2.3.4:1080", source: "proxyscrape" }),
-      expect.objectContaining({ proxyUrl: "socks5://5.6.7.8:1080", source: "proxyscrape" }),
-    ]));
-    expect(result.importedCount).toBe(2);
+    expect(localDb.replaceProxyPoolsBySource).toHaveBeenCalledWith("proxyscrape", [
+      expect.objectContaining({ proxyUrl: "socks5://1.2.3.4:1080", source: "proxyscrape", testStatus: "active" }),
+    ]);
+    expect(result.importedCount).toBe(1);
+    expect(result.validationSummary.workingCount).toBe(1);
   });
 
-  it("still replaces rows when first proxy validation fails", async () => {
+  it("does not replace rows when validated import has too few working proxies", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(textResponse("1.2.3.4:1080\n"));
+    proxyTest.testProxyUrl.mockResolvedValue({ ok: false, error: "timeout" });
+
+    await expect(refreshProxyScrapePool({
+      config: { protocol: "socks5", limit: 1, validateImported: true, minWorkingProxies: 1 },
+      fetchImpl,
+    })).rejects.toThrow("Only 0 ProxyScrape proxies passed validation");
+
+    expect(localDb.replaceProxyPoolsBySource).not.toHaveBeenCalled();
+    expect(localDb.updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("can import directly when validation filtering is disabled", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(textResponse("1.2.3.4:1080\n"));
     proxyTest.testProxyUrl.mockResolvedValue({ ok: false, error: "timeout" });
 
     const result = await refreshProxyScrapePool({
-      config: { protocol: "socks5", limit: 1 },
+      config: { protocol: "socks5", limit: 1, validateImported: false },
       fetchImpl,
     });
 
-    expect(localDb.replaceProxyPoolsBySource).toHaveBeenCalledWith("proxyscrape", [
-      expect.objectContaining({
-        proxyUrl: "socks5://1.2.3.4:1080",
-        source: "proxyscrape",
-        testStatus: "unknown",
-        lastError: "timeout",
-      }),
-    ]);
-    expect(localDb.updateSettings).toHaveBeenCalledWith({
-      proxyscrapeProxyPool: expect.objectContaining({
-        lastError: "Imported, but first proxy failed validation: timeout",
-        lastImportedCount: 1,
-      }),
-    });
+    expect(localDb.replaceProxyPoolsBySource).toHaveBeenCalledWith("proxyscrape", expect.arrayContaining([
+      expect.objectContaining({ proxyUrl: "socks5://1.2.3.4:1080", source: "proxyscrape" }),
+    ]));
+    expect(proxyTest.testProxyUrl).not.toHaveBeenCalled();
     expect(result.importedCount).toBe(1);
   });
 });

@@ -12,10 +12,15 @@ export const DEFAULT_PROXYSCRAPE_CONFIG = {
   anonymity: "all",
   timeoutMs: 10000,
   limit: 100,
+  validateImported: true,
+  minWorkingProxies: 1,
+  validationConcurrency: 10,
   intervalMinutes: 60,
   lastRefreshAt: null,
   lastError: null,
   lastImportedCount: 0,
+  lastCheckedCount: 0,
+  lastWorkingCount: 0,
 };
 
 const VALID_PROTOCOLS = new Set(["all", "http", "socks4", "socks5"]);
@@ -50,10 +55,15 @@ export function normalizeProxyScrapeConfig(input = {}) {
     anonymity: normalizeChoice(input.anonymity, VALID_ANONYMITY, DEFAULT_PROXYSCRAPE_CONFIG.anonymity),
     timeoutMs: clampInt(input.timeoutMs, DEFAULT_PROXYSCRAPE_CONFIG.timeoutMs, 1000, 60000),
     limit: clampInt(input.limit, DEFAULT_PROXYSCRAPE_CONFIG.limit, 1, 5000),
+    validateImported: input.validateImported !== false,
+    minWorkingProxies: clampInt(input.minWorkingProxies, DEFAULT_PROXYSCRAPE_CONFIG.minWorkingProxies, 0, 5000),
+    validationConcurrency: clampInt(input.validationConcurrency, DEFAULT_PROXYSCRAPE_CONFIG.validationConcurrency, 1, 50),
     intervalMinutes: clampInt(input.intervalMinutes, DEFAULT_PROXYSCRAPE_CONFIG.intervalMinutes, 5, 10080),
     lastRefreshAt: input.lastRefreshAt || null,
     lastError: input.lastError || null,
     lastImportedCount: clampInt(input.lastImportedCount, 0, 0, 5000),
+    lastCheckedCount: clampInt(input.lastCheckedCount, 0, 0, 5000),
+    lastWorkingCount: clampInt(input.lastWorkingCount, 0, 0, 5000),
   };
 }
 
@@ -127,7 +137,40 @@ function toPoolEntries(proxies, config) {
   }));
 }
 
-export async function refreshProxyScrapePool({ config, validateFirst = true, fetchImpl = fetch } = {}) {
+async function validateProxyList(proxies, config) {
+  const results = new Array(proxies.length);
+  const queue = proxies.map((proxy, index) => ({ proxy, index }));
+
+  const worker = async () => {
+    while (queue.length > 0) {
+      const item = queue.shift();
+      if (!item) break;
+      const validation = await testProxyUrl({
+        proxyUrl: item.proxy.proxyUrl,
+        testUrl: "https://api.ipify.org/",
+        method: "GET",
+        timeoutMs: Math.min(config.timeoutMs, 15000),
+      });
+      results[item.index] = {
+        ...item.proxy,
+        validation,
+      };
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(config.validationConcurrency, proxies.length) }, worker));
+
+  const working = results.filter((entry) => entry?.validation?.ok);
+  return {
+    checkedCount: results.filter(Boolean).length,
+    workingCount: working.length,
+    failedCount: results.filter((entry) => entry && !entry.validation?.ok).length,
+    working,
+    results,
+  };
+}
+
+export async function refreshProxyScrapePool({ config, fetchImpl = fetch } = {}) {
   const normalized = normalizeProxyScrapeConfig(config || (await getSettings()).proxyscrapeProxyPool);
   const url = buildProxyScrapeUrl(normalized);
   const res = await fetchImpl(url, { cache: "no-store" });
@@ -144,16 +187,31 @@ export async function refreshProxyScrapePool({ config, validateFirst = true, fet
   }
 
   let validation = null;
-  if (validateFirst) {
-    validation = await testProxyUrl({
-      proxyUrl: proxies[0].proxyUrl,
-      testUrl: "https://api.ipify.org/",
-      method: "GET",
-      timeoutMs: Math.min(normalized.timeoutMs, 15000),
-    });
+  let validationSummary = null;
+  let importProxies = proxies;
+
+  if (normalized.validateImported) {
+    validationSummary = await validateProxyList(proxies, normalized);
+    if (validationSummary.workingCount < normalized.minWorkingProxies) {
+      throw new Error(`Only ${validationSummary.workingCount} ProxyScrape proxies passed validation; minimum required is ${normalized.minWorkingProxies}`);
+    }
+    importProxies = validationSummary.working;
   }
 
-  const pools = toPoolEntries(proxies, normalized);
+  const pools = toPoolEntries(importProxies, normalized);
+  if (validationSummary) {
+    for (let i = 0; i < pools.length; i += 1) {
+      const item = importProxies[i];
+      pools[i] = {
+        ...pools[i],
+        testStatus: "active",
+        lastTestedAt: new Date().toISOString(),
+        lastError: null,
+        validationStatus: item.validation?.status || null,
+        validationElapsedMs: item.validation?.elapsedMs || 0,
+      };
+    }
+  }
   if (validation) {
     pools[0] = {
       ...pools[0],
@@ -170,6 +228,8 @@ export async function refreshProxyScrapePool({ config, validateFirst = true, fet
       ? `Imported, but first proxy failed validation: ${validation.error || validation.statusText || validation.status}`
       : null,
     lastImportedCount: replaced.length,
+    lastCheckedCount: validationSummary?.checkedCount || (validation ? 1 : 0),
+    lastWorkingCount: validationSummary?.workingCount || (validation?.ok ? 1 : 0),
   };
 
   await updateSettings({ proxyscrapeProxyPool: nextConfig });
@@ -179,5 +239,6 @@ export async function refreshProxyScrapePool({ config, validateFirst = true, fet
     importedCount: replaced.length,
     firstProxy: proxies[0].proxyUrl,
     validation,
+    validationSummary,
   };
 }

@@ -13,6 +13,8 @@ describe("ProxyScrape integration helpers", () => {
       country: "in",
       timeoutMs: 999999,
       limit: -5,
+      minWorkingProxies: -1,
+      validationConcurrency: 999,
       intervalMinutes: 1,
     });
 
@@ -21,6 +23,9 @@ describe("ProxyScrape integration helpers", () => {
     expect(config.country).toBe("IN");
     expect(config.timeoutMs).toBe(60000);
     expect(config.limit).toBe(1);
+    expect(config.validateImported).toBe(true);
+    expect(config.minWorkingProxies).toBe(0);
+    expect(config.validationConcurrency).toBe(50);
     expect(config.intervalMinutes).toBe(5);
   });
 

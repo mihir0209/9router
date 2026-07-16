@@ -56,10 +56,15 @@ const DEFAULT_SETTINGS = {
     anonymity: "all",
     timeoutMs: 10000,
     limit: 100,
+    validateImported: true,
+    minWorkingProxies: 1,
+    validationConcurrency: 10,
     intervalMinutes: 60,
     lastRefreshAt: null,
     lastError: null,
     lastImportedCount: 0,
+    lastCheckedCount: 0,
+    lastWorkingCount: 0,
   },
 };
 

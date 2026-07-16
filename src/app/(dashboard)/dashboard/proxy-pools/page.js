@@ -36,10 +36,15 @@ function normalizeProxyScrapeForm(data = {}) {
     anonymity: data.anonymity || "all",
     timeoutMs: data.timeoutMs || 10000,
     limit: data.limit || 100,
+    validateImported: data.validateImported !== false,
+    minWorkingProxies: data.minWorkingProxies ?? 1,
+    validationConcurrency: data.validationConcurrency || 10,
     intervalMinutes: data.intervalMinutes || 60,
     lastRefreshAt: data.lastRefreshAt || null,
     lastError: data.lastError || null,
     lastImportedCount: data.lastImportedCount || 0,
+    lastCheckedCount: data.lastCheckedCount || 0,
+    lastWorkingCount: data.lastWorkingCount || 0,
   };
 }
 
@@ -745,7 +750,7 @@ export default function ProxyPoolsPage() {
                 <Badge variant="default" size="sm">{proxyScrapeCount} managed</Badge>
               </div>
               <p className="mt-1 text-xs text-text-muted">
-                Fetches fresh proxies from ProxyScrape, validates the first result, then replaces only ProxyScrape-managed rows.
+                Fetches fresh proxies from ProxyScrape, optionally keeps only working proxies, then replaces only ProxyScrape-managed rows.
               </p>
             </div>
             <Toggle
@@ -833,11 +838,39 @@ export default function ProxyPoolsPage() {
                 <option value="no">Non-SSL</option>
               </select>
             </label>
+            <label className="flex items-center gap-2 rounded-[10px] bg-surface-2 px-3 py-2.5">
+              <input
+                type="checkbox"
+                checked={proxyScrapeForm.validateImported === true}
+                onChange={(e) => setProxyScrapeForm((prev) => ({ ...prev, validateImported: e.target.checked }))}
+                className="size-4 rounded border-black/20 dark:border-white/20"
+              />
+              <span className="text-sm font-medium text-text-main">Keep only working proxies</span>
+            </label>
+            <Input
+              label="Min working proxies"
+              type="number"
+              min="0"
+              max="5000"
+              value={String(proxyScrapeForm.minWorkingProxies)}
+              onChange={(e) => setProxyScrapeForm((prev) => ({ ...prev, minWorkingProxies: e.target.value }))}
+              placeholder="1"
+            />
+            <Input
+              label="Validation concurrency"
+              type="number"
+              min="1"
+              max="50"
+              value={String(proxyScrapeForm.validationConcurrency)}
+              onChange={(e) => setProxyScrapeForm((prev) => ({ ...prev, validationConcurrency: e.target.value }))}
+              placeholder="10"
+            />
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
             <span>Last refresh: {formatDateTime(proxyScrapeForm.lastRefreshAt)}</span>
             <span>Imported: {proxyScrapeForm.lastImportedCount || 0}</span>
+            <span>Working: {proxyScrapeForm.lastWorkingCount || 0}/{proxyScrapeForm.lastCheckedCount || 0}</span>
             {proxyScrapeForm.lastError ? <span className="text-red-500">Last error: {proxyScrapeForm.lastError}</span> : null}
           </div>
 
