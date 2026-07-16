@@ -1,9 +1,5 @@
 import { NextResponse } from "next/server";
 import { getSettings, updateSettings } from "@/lib/localDb";
-import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
-import { resetComboRotation } from "open-sse/services/combo.js";
-import { runQuotaAutoPingTick } from "@/shared/services/quotaAutoPing";
-import bcrypt from "bcryptjs";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -53,6 +49,7 @@ export async function PATCH(request) {
         if (!body.currentPassword) {
           return NextResponse.json({ error: "Current password required" }, { status: 400 });
         }
+        const { default: bcrypt } = await import("bcryptjs");
         const isValid = await bcrypt.compare(body.currentPassword, currentHash);
         if (!isValid) {
           return NextResponse.json({ error: "Invalid current password" }, { status: 401 });
@@ -65,6 +62,7 @@ export async function PATCH(request) {
         }
       }
 
+      const { default: bcrypt } = await import("bcryptjs");
       const salt = await bcrypt.genSalt(10);
       body.password = await bcrypt.hash(body.newPassword, salt);
       delete body.newPassword;
@@ -85,6 +83,7 @@ export async function PATCH(request) {
       Object.prototype.hasOwnProperty.call(body, "outboundProxyUrl") ||
       Object.prototype.hasOwnProperty.call(body, "outboundNoProxy")
     ) {
+      const { applyOutboundProxyEnv } = await import("@/lib/network/outboundProxy");
       applyOutboundProxyEnv(settings);
     }
 
@@ -94,6 +93,7 @@ export async function PATCH(request) {
       Object.prototype.hasOwnProperty.call(body, "comboStickyRoundRobinLimit") ||
       Object.prototype.hasOwnProperty.call(body, "comboStrategies")
     ) {
+      const { resetComboRotation } = await import("open-sse/services/combo.js");
       resetComboRotation();
     }
 
@@ -102,6 +102,7 @@ export async function PATCH(request) {
       Object.prototype.hasOwnProperty.call(body, "codexAutoPing")
     ) {
       // Run once immediately after opt-in changes so users don't wait for the next scheduler tick.
+      const { runQuotaAutoPingTick } = await import("@/shared/services/quotaAutoPing");
       runQuotaAutoPingTick().catch((error) => {
         console.warn("[AutoPing] settings-triggered tick failed:", error.message);
       });

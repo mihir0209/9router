@@ -1,5 +1,4 @@
 import { SignJWT, jwtVerify } from "jose";
-import bcrypt from "bcryptjs";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -10,6 +9,9 @@ const DEFAULT_PASSWORD = "123456";
 
 function loadJwtSecret() {
   if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
+    throw new Error("JWT_SECRET is required when running on Cloudflare Workers");
+  }
   const file = path.join(DATA_DIR, "jwt-secret");
   try {
     return fs.readFileSync(file, "utf8").trim();
@@ -20,7 +22,12 @@ function loadJwtSecret() {
   return generated;
 }
 
-const SECRET = new TextEncoder().encode(loadJwtSecret());
+let secretBytes = null;
+
+function getSecretBytes() {
+  if (!secretBytes) secretBytes = new TextEncoder().encode(loadJwtSecret());
+  return secretBytes;
+}
 
 export function shouldUseSecureCookie(request) {
   const forceSecureCookie = process.env.AUTH_COOKIE_SECURE === "true";
@@ -34,13 +41,13 @@ export async function createDashboardAuthToken(claims = {}) {
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("24h")
-    .sign(SECRET);
+    .sign(getSecretBytes());
 }
 
 export async function verifyDashboardAuthToken(token) {
   if (!token) return false;
   try {
-    await jwtVerify(token, SECRET);
+    await jwtVerify(token, getSecretBytes());
     return true;
   } catch {
     return false;
@@ -50,7 +57,7 @@ export async function verifyDashboardAuthToken(token) {
 export async function getDashboardAuthSession(token) {
   if (!token) return null;
   try {
-    const { payload } = await jwtVerify(token, SECRET);
+    const { payload } = await jwtVerify(token, getSecretBytes());
     return payload;
   } catch {
     return null;
@@ -76,7 +83,10 @@ export async function verifyDashboardPassword(password) {
   if (typeof password !== "string" || !password) return false;
   const settings = await getSettings();
   const storedHash = settings?.password;
-  if (storedHash) return bcrypt.compare(password, storedHash);
+  if (storedHash) {
+    const { default: bcrypt } = await import("bcryptjs");
+    return bcrypt.compare(password, storedHash);
+  }
   const initialPassword = process.env.INITIAL_PASSWORD || DEFAULT_PASSWORD;
   return password === initialPassword;
 }

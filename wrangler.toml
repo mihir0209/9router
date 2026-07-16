@@ -1,62 +1,28 @@
-# 9Router Cloudflare Workers Deployment Configuration
-# Uses @cloudflare/next-on-pages for Next.js support
-# Requires: npm install -D @cloudflare/next-on-pages wrangler
+name = "mihir-router"
+main = ".open-next/worker.js"
+workers_dev = true
+compatibility_date = "2024-12-30"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 
-name = "9router"
-compatibility_date = "2024-09-25"
-compatibility_flags = ["nodejs_compat"]
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
 
-# Main entry point for the worker
-main = ".worker/index.js"
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "mihir-router"
 
-# Build command for Next.js
-[build]
-command = "npx @cloudflare/next-on-pages"
-
-# Build output directory
-[build.cwd]
-
-# Static assets
-[site]
-bucket = ".worker/static"
-
-# Environment variables
 [vars]
 NODE_ENV = "production"
+NEXTJS_ENV = "production"
+NINEROUTER_RUNTIME = "cloudflare"
 
-# D1 Database binding (replaces SQLite for Cloudflare)
 [[d1_databases]]
 binding = "DB"
-database_name = "9router-db"
-database_id = "YOUR_D1_DATABASE_ID_HERE"
+database_name = "mihir-router-db"
+database_id = "3fd32503-00aa-4de3-9118-50169a43476f"
 
-# KV Namespace for rate limiting and caching (optional but recommended)
-[[kv_namespaces]]
-binding = "RATE_LIMIT_KV"
-id = "YOUR_KV_NAMESPACE_ID_HERE"
-
-# KV Namespace for session storage
-[[kv_namespaces]]
-binding = "SESSION_KV"
-id = "YOUR_KV_NAMESPACE_ID_HERE"
-
-# Secrets (set via wrangler secret put)
-# JWT_SECRET = "your-jwt-secret"
-# INITIAL_PASSWORD = "your-initial-password"
-# API_KEY_SECRET = "your-api-key-secret"
-# MACHINE_ID_SALT = "your-machine-id-salt"
-
-# Routes (optional - for custom domain routing)
-# routes = [
-#   { pattern = "your-domain.com/v1/*", zone_name = "your-domain.com" },
-#   { pattern = "your-domain.com/dashboard/*", zone_name = "your-domain.com" },
-# ]
-
-# limits
-[limits]
-cpu_ms = 30000
-memory_mb = 128
-
-# Tail Workers for observability (optional)
-# [tail_consumers]
-# service = "9router-tail"
+# Optional cache bucket for OpenNext incremental cache.
+# [[r2_buckets]]
+# binding = "NEXT_INC_CACHE_R2_BUCKET"
+# bucket_name = "9router-next-cache"

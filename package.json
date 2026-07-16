@@ -13,10 +13,12 @@
     "start:bun": "bun ./.next/standalone/server.js",
     "cli:pack": "npm --prefix cli run pack:cli",
     "cli:publish": "npm --prefix cli run publish:cli",
-    "dev:cloudflare": "npx wrangler pages dev . --port 20128",
-    "build:cloudflare": "npx wrangler pages build .",
-    "deploy:cloudflare": "npx wrangler pages deploy .worker/output",
-    "db:init:cloudflare": "npx wrangler d1 create 9router-db"
+    "preview:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare preview",
+    "build:cloudflare": "node scripts/build-cloudflare.mjs",
+    "deploy:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare deploy",
+    "upload:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare upload",
+    "cf:typegen": "wrangler types --env-interface CloudflareEnv",
+    "db:init:cloudflare": "wrangler d1 create 9router-db"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -55,11 +57,12 @@
   },
   "comment_better_sqlite3": "kept in optionalDependencies so npm install doesn't fail on systems without build tools — sql.js is used as fallback at runtime",
   "devDependencies": {
+    "@opennextjs/cloudflare": "^1.20.1",
     "@tailwindcss/postcss": "^4.1.18",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "postcss": "^8.5.6",
     "tailwindcss": "^4",
-    "wrangler": "^3.60.0"
+    "wrangler": "^4.111.0"
   }
 }

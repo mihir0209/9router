@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
+const isCloudflareBuild = process.env.NINEROUTER_RUNTIME === "cloudflare";
 // CLI bundling needs workspace root so tracing includes hoisted node_modules (slim ~50MB).
 // Docker / default uses projectRoot so server.js lands at /app/server.js (not nested).
 const tracingRoot = process.env.NEXT_TRACING_ROOT_MODE === "workspace"
@@ -13,7 +14,7 @@ const proxyClientMaxBodySize = process.env.NINEROUTER_PROXY_CLIENT_MAX_BODY_SIZE
 const nextConfig = {
   distDir: process.env.NEXT_DIST_DIR || ".next",
   output: "standalone",
-  serverExternalPackages: ["better-sqlite3", "sql.js", "node:sqlite", "bun:sqlite"],
+  serverExternalPackages: isCloudflareBuild ? [] : ["better-sqlite3", "sql.js", "node:sqlite", "bun:sqlite"],
   turbopack: {
     root: tracingRoot
   },

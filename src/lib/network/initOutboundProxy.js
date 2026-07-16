@@ -4,6 +4,7 @@ import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
 let initialized = false;
 
 export async function ensureOutboundProxyInitialized() {
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare") return false;
   if (initialized) return true;
 
   try {
@@ -18,8 +19,10 @@ export async function ensureOutboundProxyInitialized() {
 }
 
 // Defer init so HTTP server accepts connections first
-setImmediate(() => {
-  ensureOutboundProxyInitialized().catch(console.log);
-});
+if (process.env.NINEROUTER_RUNTIME !== "cloudflare") {
+  setImmediate(() => {
+    ensureOutboundProxyInitialized().catch(console.log);
+  });
+}
 
 export default ensureOutboundProxyInitialized;
