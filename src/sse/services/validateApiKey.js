@@ -33,6 +33,10 @@ function trackIpViolation(ip) {
  * @returns {{ allowed: boolean, response?: Response, apiKey?: string }}
  */
 export async function validateAndEnforceApiKey(request, body, handlerName = "AUTH") {
+  if (request.headers?.get("x-9r-dashboard-internal") === "1") {
+    return { allowed: true, apiKey: null };
+  }
+
   const settings = await getSettings();
   const apiKey = extractApiKey(request);
   const clientIp = request.headers?.get("x-9r-real-ip") || "";

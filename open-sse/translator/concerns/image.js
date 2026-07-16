@@ -12,9 +12,9 @@ export function parseDataUri(url) {
   return m ? { mimeType: m[1], base64: m[2] } : null;
 }
 
-import { lookup } from "node:dns/promises";
-import { Agent } from "undici";
 import { MAX_IMAGE_BYTES, FETCH_TIMEOUT_MS, IMAGE_SIGNATURES, BLOCKED_HOSTS } from "../../config/mediaConfig.js";
+
+const isCloudflareRuntime = process.env.NINEROUTER_RUNTIME === "cloudflare";
 
 // True if an IPv4/IPv6 address is private/reserved (SSRF target).
 function isPrivateIp(ip) {
@@ -37,8 +37,10 @@ function isPrivateIp(ip) {
 // Resolve host once and return only public IPs (SSRF guard).
 // Rejects if any resolved record is private/reserved (defeats multi-A tricks).
 async function resolvePinnedIps(hostname) {
+  if (isCloudflareRuntime) return null;
   if (!hostname || BLOCKED_HOSTS.has(hostname.toLowerCase())) return null;
   try {
+    const { lookup } = await import("node:dns/promises");
     const records = await lookup(hostname, { all: true });
     if (!records.length || records.some((r) => isPrivateIp(r.address))) return null;
     return records;
@@ -74,6 +76,8 @@ function detectImageMime(buf) {
  * @returns {Promise<{url: string, mimeType: string}|null>}
  */
 export async function fetchImageAsBase64(imageUrl, options = {}) {
+  if (isCloudflareRuntime) return null;
+
   const { signal, timeoutMs = FETCH_TIMEOUT_MS, maxBytes = MAX_IMAGE_BYTES } = options;
   if (!imageUrl || (!imageUrl.startsWith("http://") && !imageUrl.startsWith("https://"))) {
     return null;
@@ -89,6 +93,7 @@ export async function fetchImageAsBase64(imageUrl, options = {}) {
   const fetchSignal = signal || controller.signal;
 
   // Pin connect to the validated IP so no second DNS resolution can rebind (TOCTOU fix).
+  const { Agent } = await import("undici");
   const dispatcher = new Agent({
     connect: { lookup: (_h, _o, cb) => cb(null, [{ address: pinnedIps[0].address, family: pinnedIps[0].family }]) },
   });

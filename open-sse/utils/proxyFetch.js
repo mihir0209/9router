@@ -3,6 +3,7 @@ import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
 
 const originalFetch = globalThis.fetch;
+const isCloudflareRuntime = process.env.NINEROUTER_RUNTIME === "cloudflare";
 const proxyDispatchers = new Map();
 
 // ─── TLS fingerprinting via got-scraping (browser-like JA3) ───────────────
@@ -292,6 +293,10 @@ async function createBypassRequest(parsedUrl, realIP, options) {
 }
 
 export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
+  if (isCloudflareRuntime) {
+    return originalFetch(url, options);
+  }
+
   const targetUrl = typeof url === "string" ? url : url.toString();
 
   // Vercel relay: forward request via relay headers
@@ -361,7 +366,7 @@ async function patchedFetch(url, options = {}) {
 }
 
 // Idempotency guard — only patch once to avoid wrapping multiple times
-if (globalThis.fetch !== patchedFetch) {
+if (!isCloudflareRuntime && globalThis.fetch !== patchedFetch) {
   globalThis.fetch = patchedFetch;
 }
 
