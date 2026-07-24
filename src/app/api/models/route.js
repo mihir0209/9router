@@ -19,13 +19,22 @@ export async function GET() {
       })
       .map((m) => {
         const fullModel = `${m.provider}/${m.model}`;
+        const providerAlias = getProviderAlias(m.provider) || m.provider;
+        const routedModel = `${providerAlias}/${m.model}`;
         const c = getCapabilitiesForModel(m.provider, m.model);
         const aliasForModel = Object.entries(modelAliases).find(([, v]) => v === fullModel)?.[0];
         return {
           ...m,
           fullModel,
+          routedModel,
           alias: aliasForModel || m.model,
-          caps: { vision: c.vision, search: c.search, reasoning: c.reasoning },
+          caps: {
+            vision: c.vision,
+            search: c.search,
+            reasoning: c.reasoning,
+            contextWindow: c.contextWindow,
+            maxOutput: c.maxOutput,
+          },
         };
       });
 

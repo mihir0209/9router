@@ -99,23 +99,28 @@ async function runHeavyStartup() {
     safeRestartTailscale("startup").catch((e) => console.log("[InitApp] Tailscale resume failed:", e.message));
   }
 
-  ensureCloudflared().catch(() => {});
+  if (settings.tunnelEnabled) ensureCloudflared().catch(() => {});
 
-  // Sync mitmAlias DB → JSON cache so standalone MITM server can read it
-  syncMitmAliasCache().catch(() => {});
+  if (settings.mitmEnabled) {
+    // Sync mitmAlias DB → JSON cache so standalone MITM server can read it.
+    syncMitmAliasCache().catch(() => {});
+    autoStartMitm(settings);
+  }
 
-  startWatchdog();
-  startNetworkMonitor();
-  autoStartMitm();
+  configureTunnelMonitoring(settings);
   startQuotaAutoPing();
   startProxyScrapeScheduler();
 }
 
-async function autoStartMitm() {
+function hasQuotaAutoPingEnabled(settings) {
+  return [settings?.claudeAutoPing, settings?.codexAutoPing]
+    .some((config) => Object.values(config?.connections || {}).some(Boolean));
+}
+
+async function autoStartMitm(settings) {
   if (g.mitmStartInProgress) return;
   g.mitmStartInProgress = true;
   try {
-    const settings = await getSettings();
     if (!settings.mitmEnabled) return;
     const mitmStatus = await getMitmStatus();
     if (mitmStatus.running) return;
@@ -234,6 +239,12 @@ function startWatchdog() {
   if (g.watchdogInterval.unref) g.watchdogInterval.unref();
 }
 
+function stopWatchdog() {
+  if (!g.watchdogInterval) return;
+  clearInterval(g.watchdogInterval);
+  g.watchdogInterval = null;
+}
+
 // ─── Network monitor: detect IPv4 fingerprint change + sleep/wake ────────────
 
 function getNetworkFingerprint() {
@@ -293,6 +304,25 @@ function startNetworkMonitor() {
   }, NETWORK_CHECK_INTERVAL_MS);
 
   if (g.networkMonitorInterval.unref) g.networkMonitorInterval.unref();
+}
+
+
+function stopNetworkMonitor() {
+  if (!g.networkMonitorInterval) return;
+  clearInterval(g.networkMonitorInterval);
+  g.networkMonitorInterval = null;
+  g.lastNetworkFingerprint = null;
+  g.lastOnline = null;
+}
+
+export function configureTunnelMonitoring(settings) {
+  if (settings?.tunnelEnabled || settings?.tailscaleEnabled) {
+    startWatchdog();
+    startNetworkMonitor();
+    return;
+  }
+  stopWatchdog();
+  stopNetworkMonitor();
 }
 
 export default initializeApp;

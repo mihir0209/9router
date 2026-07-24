@@ -115,10 +115,14 @@ export async function PATCH(request) {
       Object.prototype.hasOwnProperty.call(body, "codexAutoPing")
     ) {
       // Run once immediately after opt-in changes so users don't wait for the next scheduler tick.
-      const { runQuotaAutoPingTick } = await import("@/shared/services/quotaAutoPing");
-      runQuotaAutoPingTick().catch((error) => {
-        console.warn("[AutoPing] settings-triggered tick failed:", error.message);
-      });
+      import("@/shared/services/quotaAutoPing")
+        .then(({ runQuotaAutoPingTick, configureQuotaAutoPing }) => {
+          configureQuotaAutoPing(settings);
+          runQuotaAutoPingTick().catch((error) => {
+            console.warn("[AutoPing] settings-triggered tick failed:", error.message);
+          });
+        })
+        .catch((error) => console.warn("[AutoPing] settings update failed:", error.message));
     }
 
     const { password, oidcClientSecret, ...safeSettings } = settings;
