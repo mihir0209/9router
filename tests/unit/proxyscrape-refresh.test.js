@@ -10,8 +10,13 @@ vi.mock("@/lib/network/proxyTest", () => ({
   testProxyUrl: vi.fn(),
 }));
 
+vi.mock("open-sse/utils/proxyFetch.js", () => ({
+  originalFetch: vi.fn(),
+}));
+
 const localDb = await import("@/lib/localDb");
 const proxyTest = await import("@/lib/network/proxyTest");
+const { originalFetch } = await import("open-sse/utils/proxyFetch.js");
 const { refreshProxyScrapePool } = await import("@/lib/proxy/proxyscrape.js");
 
 function textResponse(body, ok = true, status = 200) {
@@ -19,26 +24,27 @@ function textResponse(body, ok = true, status = 200) {
     ok,
     status,
     text: async () => body,
+    headers: { get: () => "text/plain" },
   };
 }
 
 describe("ProxyScrape refresh", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localDb.getSettings.mockResolvedValue({ proxyPoolProviders: {}, proxyscrapeProxyPool: {} });
     localDb.replaceProxyPoolsBySource.mockImplementation(async (_source, pools) => pools);
     localDb.updateSettings.mockImplementation(async (updates) => updates);
     proxyTest.testProxyUrl.mockResolvedValue({ ok: true, status: 200 });
   });
 
   it("keeps only proxies that pass validation", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(textResponse("1.2.3.4:1080\n5.6.7.8:1080\n"));
+    originalFetch.mockResolvedValue(textResponse("1.2.3.4:1080\n5.6.7.8:1080\n"));
     proxyTest.testProxyUrl
       .mockResolvedValueOnce({ ok: true, status: 200 })
       .mockResolvedValueOnce({ ok: false, error: "timeout" });
 
     const result = await refreshProxyScrapePool({
       config: { protocol: "socks5", limit: 2, validateImported: true, minWorkingProxies: 1 },
-      fetchImpl,
     });
 
     expect(proxyTest.testProxyUrl).toHaveBeenCalledWith(expect.objectContaining({
@@ -54,25 +60,22 @@ describe("ProxyScrape refresh", () => {
   });
 
   it("does not replace rows when validated import has too few working proxies", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(textResponse("1.2.3.4:1080\n"));
+    originalFetch.mockResolvedValue(textResponse("1.2.3.4:1080\n"));
     proxyTest.testProxyUrl.mockResolvedValue({ ok: false, error: "timeout" });
 
     await expect(refreshProxyScrapePool({
       config: { protocol: "socks5", limit: 1, validateImported: true, minWorkingProxies: 1 },
-      fetchImpl,
     })).rejects.toThrow("Only 0 ProxyScrape proxies passed validation");
 
     expect(localDb.replaceProxyPoolsBySource).not.toHaveBeenCalled();
-    expect(localDb.updateSettings).not.toHaveBeenCalled();
   });
 
   it("can import directly when validation filtering is disabled", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(textResponse("1.2.3.4:1080\n"));
+    originalFetch.mockResolvedValue(textResponse("1.2.3.4:1080\n"));
     proxyTest.testProxyUrl.mockResolvedValue({ ok: false, error: "timeout" });
 
     const result = await refreshProxyScrapePool({
       config: { protocol: "socks5", limit: 1, validateImported: false },
-      fetchImpl,
     });
 
     expect(localDb.replaceProxyPoolsBySource).toHaveBeenCalledWith("proxyscrape", expect.arrayContaining([

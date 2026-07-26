@@ -67,6 +67,7 @@ const DEFAULT_SETTINGS = {
     lastCheckedCount: 0,
     lastWorkingCount: 0,
   },
+  proxyPoolProviders: {},
   proxyPoolQuarantine: { global: {}, scoped: {} },
   proxyPoolRateLimitCooldownMinutes: 30,
   proxyPoolNetworkCooldownMinutes: 10,
