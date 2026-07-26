@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import PropTypes from "prop-types";
-import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal } from "@/shared/components";
+import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal, ModelSelectModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import {
   TUNNEL_BENEFITS,
@@ -43,6 +43,12 @@ export default function APIPageClient({ machineId }) {
 
   // Blocked IPs state
   const [blockedIPs, setBlockedIPs] = useState([]);
+
+  // Model selector state
+  const [showAllowedModelSelect, setShowAllowedModelSelect] = useState(false);
+  const [showBlockedModelSelect, setShowBlockedModelSelect] = useState(false);
+  const [activeProviders, setActiveProviders] = useState([]);
+  const [modelAliases, setModelAliases] = useState({});
 
   const [requireApiKey, setRequireApiKey] = useState(false);
   const [requireLogin, setRequireLogin] = useState(true);
@@ -285,6 +291,15 @@ export default function APIPageClient({ machineId }) {
       if (blockedRes.ok) {
         setBlockedIPs(blockedData.blockedIPs || []);
       }
+      // Load providers and model aliases for model selector
+      const [providersRes, aliasesRes] = await Promise.all([
+        fetch("/api/providers"),
+        fetch("/api/models/alias"),
+      ]);
+      const providersData = await providersRes.json();
+      const aliasesData = await aliasesRes.json();
+      if (providersRes.ok) setActiveProviders(providersData.activeProviders || providersData || []);
+      if (aliasesRes.ok) setModelAliases(aliasesData || {});
     } catch (error) {
       console.log("Error fetching data:", error);
     } finally {
@@ -1311,19 +1326,26 @@ export default function APIPageClient({ machineId }) {
 
           <div className="border-t border-border pt-4">
             <p className="text-sm font-medium text-text-main mb-3">Model Restrictions</p>
-            <Input
-              label="Allowed Models"
-              value={keyForm.allowedModels}
-              onChange={(e) => setKeyForm({ ...keyForm, allowedModels: e.target.value })}
-              placeholder="gpt-4,claude-3-opus (* for all)"
-            />
-            <Input
-              label="Blocked Models"
-              value={keyForm.blockedModels}
-              onChange={(e) => setKeyForm({ ...keyForm, blockedModels: e.target.value })}
-              placeholder="gpt-3.5-turbo"
-              className="mt-3"
-            />
+            <div className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-text-main">Allowed Models</span>
+              <button
+                type="button"
+                onClick={() => setShowAllowedModelSelect(true)}
+                className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-left text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+              >
+                {keyForm.allowedModels || <span className="text-text-muted">Click to select models (* for all)</span>}
+              </button>
+            </div>
+            <div className="flex flex-col gap-1.5 mt-3">
+              <span className="text-sm font-medium text-text-main">Blocked Models</span>
+              <button
+                type="button"
+                onClick={() => setShowBlockedModelSelect(true)}
+                className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-left text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+              >
+                {keyForm.blockedModels || <span className="text-text-muted">Click to select models</span>}
+              </button>
+            </div>
           </div>
 
           <div className="border-t border-border pt-4">
@@ -1432,19 +1454,26 @@ export default function APIPageClient({ machineId }) {
 
           <div className="border-t border-border pt-4">
             <p className="text-sm font-medium text-text-main mb-3">Model Restrictions</p>
-            <Input
-              label="Allowed Models"
-              value={keyForm.allowedModels}
-              onChange={(e) => setKeyForm({ ...keyForm, allowedModels: e.target.value })}
-              placeholder="gpt-4,claude-3-opus (* for all)"
-            />
-            <Input
-              label="Blocked Models"
-              value={keyForm.blockedModels}
-              onChange={(e) => setKeyForm({ ...keyForm, blockedModels: e.target.value })}
-              placeholder="gpt-3.5-turbo"
-              className="mt-3"
-            />
+            <div className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-text-main">Allowed Models</span>
+              <button
+                type="button"
+                onClick={() => setShowAllowedModelSelect(true)}
+                className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-left text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+              >
+                {keyForm.allowedModels || <span className="text-text-muted">Click to select models (* for all)</span>}
+              </button>
+            </div>
+            <div className="flex flex-col gap-1.5 mt-3">
+              <span className="text-sm font-medium text-text-main">Blocked Models</span>
+              <button
+                type="button"
+                onClick={() => setShowBlockedModelSelect(true)}
+                className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-left text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+              >
+                {keyForm.blockedModels || <span className="text-text-muted">Click to select models</span>}
+              </button>
+            </div>
           </div>
 
           <div className="border-t border-border pt-4">
@@ -1672,6 +1701,56 @@ export default function APIPageClient({ machineId }) {
           </div>
         </div>
       </Modal>
+
+      {/* Model Select Modals */}
+      <ModelSelectModal
+        isOpen={showAllowedModelSelect}
+        onClose={() => setShowAllowedModelSelect(false)}
+        onSelect={(model) => {
+          setKeyForm((prev) => {
+            const current = prev.allowedModels ? prev.allowedModels.split(",").map(s => s.trim()).filter(Boolean) : [];
+            if (!current.includes(model.value)) {
+              return { ...prev, allowedModels: [...current, model.value].join(",") };
+            }
+            return prev;
+          });
+        }}
+        onDeselect={(model) => {
+          setKeyForm((prev) => {
+            const current = prev.allowedModels ? prev.allowedModels.split(",").map(s => s.trim()).filter(Boolean) : [];
+            return { ...prev, allowedModels: current.filter(m => m !== model.value).join(",") };
+          });
+        }}
+        activeProviders={activeProviders}
+        modelAliases={modelAliases}
+        addedModelValues={keyForm.allowedModels ? keyForm.allowedModels.split(",").map(s => s.trim()).filter(Boolean) : []}
+        title="Select Allowed Models"
+        closeOnSelect={false}
+      />
+      <ModelSelectModal
+        isOpen={showBlockedModelSelect}
+        onClose={() => setShowBlockedModelSelect(false)}
+        onSelect={(model) => {
+          setKeyForm((prev) => {
+            const current = prev.blockedModels ? prev.blockedModels.split(",").map(s => s.trim()).filter(Boolean) : [];
+            if (!current.includes(model.value)) {
+              return { ...prev, blockedModels: [...current, model.value].join(",") };
+            }
+            return prev;
+          });
+        }}
+        onDeselect={(model) => {
+          setKeyForm((prev) => {
+            const current = prev.blockedModels ? prev.blockedModels.split(",").map(s => s.trim()).filter(Boolean) : [];
+            return { ...prev, blockedModels: current.filter(m => m !== model.value).join(",") };
+          });
+        }}
+        activeProviders={activeProviders}
+        modelAliases={modelAliases}
+        addedModelValues={keyForm.blockedModels ? keyForm.blockedModels.split(",").map(s => s.trim()).filter(Boolean) : []}
+        title="Select Blocked Models"
+        closeOnSelect={false}
+      />
 
       {/* Confirm Modal */}
       <ConfirmModal

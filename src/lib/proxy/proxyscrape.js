@@ -174,90 +174,25 @@ async function validateProxyList(proxies, config) {
 }
 
 export async function refreshProxyScrapePool({ config, fetchImpl } = {}) {
-  const normalized = normalizeProxyScrapeConfig(config || (await getSettings()).proxyscrapeProxyPool);
-  const url = buildProxyScrapeUrl(normalized);
-
-  // Use original native fetch to bypass env-proxy routing and add a timeout.
-  // The patched global fetch may route through HTTP_PROXY/HTTPS_PROXY which
-  // causes "fetch failed" when the proxy is down.
-  const doFetch = fetchImpl || originalFetch;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let res;
+  // Delegate to the new provider system
+  const { refreshProviderPool } = await import("./refreshPool.js");
+  const settings = await getSettings();
+  const mergedConfig = { ...normalizeProxyScrapeConfig(config || settings.proxyscrapeProxyPool) };
+  
   try {
-    res = await doFetch(url, { cache: "no-store", signal: controller.signal });
-  } catch (err) {
-    const cause = err?.cause?.code || err?.name || "";
-    const detail = cause ? ` (${cause})` : "";
-    throw new Error(`ProxyScrape fetch failed${detail}: ${err?.message || err}`);
-  } finally {
-    clearTimeout(timer);
+    const result = await refreshProviderPool("proxyscrape", mergedConfig);
+    // Update legacy settings for backward compat
+    await updateSettings({ proxyscrapeProxyPool: result.config });
+    return result;
+  } catch (error) {
+    // Update legacy settings with error
+    await updateSettings({
+      proxyscrapeProxyPool: {
+        ...mergedConfig,
+        lastError: error.message,
+        lastRefreshAt: new Date().toISOString(),
+      },
+    });
+    throw error;
   }
-
-  if (!res.ok) {
-    throw new Error(`ProxyScrape returned ${res.status}`);
-  }
-
-  const text = await res.text();
-  const proxies = parseProxyScrapeList(text, normalized.protocol).slice(0, normalized.limit);
-
-  if (proxies.length === 0) {
-    throw new Error("ProxyScrape returned no parseable proxies");
-  }
-
-  let validation = null;
-  let validationSummary = null;
-  let importProxies = proxies;
-
-  if (normalized.validateImported) {
-    validationSummary = await validateProxyList(proxies, normalized);
-    if (validationSummary.workingCount < normalized.minWorkingProxies) {
-      throw new Error(`Only ${validationSummary.workingCount} ProxyScrape proxies passed validation; minimum required is ${normalized.minWorkingProxies}`);
-    }
-    importProxies = validationSummary.working;
-  }
-
-  const pools = toPoolEntries(importProxies, normalized);
-  if (validationSummary) {
-    for (let i = 0; i < pools.length; i += 1) {
-      const item = importProxies[i];
-      pools[i] = {
-        ...pools[i],
-        testStatus: "active",
-        lastTestedAt: new Date().toISOString(),
-        lastError: null,
-        validationStatus: item.validation?.status || null,
-        validationElapsedMs: item.validation?.elapsedMs || 0,
-      };
-    }
-  }
-  if (validation) {
-    pools[0] = {
-      ...pools[0],
-      testStatus: validation.ok ? "active" : "unknown",
-      lastTestedAt: new Date().toISOString(),
-      lastError: validation.ok ? null : (validation.error || validation.statusText || `Proxy test failed with status ${validation.status}`),
-    };
-  }
-  const replaced = await replaceProxyPoolsBySource(PROXYSCRAPE_SOURCE, pools);
-  const nextConfig = {
-    ...normalized,
-    lastRefreshAt: new Date().toISOString(),
-    lastError: validation && !validation.ok
-      ? `Imported, but first proxy failed validation: ${validation.error || validation.statusText || validation.status}`
-      : null,
-    lastImportedCount: replaced.length,
-    lastCheckedCount: validationSummary?.checkedCount || (validation ? 1 : 0),
-    lastWorkingCount: validationSummary?.workingCount || (validation?.ok ? 1 : 0),
-  };
-
-  await updateSettings({ proxyscrapeProxyPool: nextConfig });
-
-  return {
-    config: nextConfig,
-    importedCount: replaced.length,
-    firstProxy: proxies[0].proxyUrl,
-    validation,
-    validationSummary,
-  };
 }

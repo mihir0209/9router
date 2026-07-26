@@ -15,7 +15,7 @@ import {
 } from "@/lib/tunnel";
 import { getMitmStatus, startMitm, loadEncryptedPassword, initDbHooks, restoreToolDNS, removeAllDNSEntriesSync } from "@/mitm/manager";
 import { startQuotaAutoPing } from "@/shared/services/quotaAutoPing";
-import { startProxyScrapeScheduler } from "@/shared/services/proxyScrapeScheduler";
+import { startProxyScrapeScheduler } from "@/shared/services/proxyPoolScheduler";
 import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
 import { killAllBridges } from "@/lib/mcp/stdioSseBridge";
 

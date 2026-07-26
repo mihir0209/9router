@@ -88,6 +88,11 @@ export default function ProxyPoolsPage() {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [proxyScrapeBusy, setProxyScrapeBusy] = useState(false);
   const [confirmState, setConfirmState] = useState(null);
+  const [providers, setProviders] = useState([]);
+  const [providersLoading, setProvidersLoading] = useState(true);
+  const [providerConfigModal, setProviderConfigModal] = useState(null);
+  const [providerConfigForm, setProviderConfigForm] = useState({});
+  const [providerBusy, setProviderBusy] = useState(null);
   const relayMenuRef = useRef(null);
   const notify = useNotificationStore();
 
@@ -127,10 +132,24 @@ export default function ProxyPoolsPage() {
     }
   }, []);
 
+  const fetchProviders = useCallback(async () => {
+    try {
+      setProvidersLoading(true);
+      const res = await fetch("/api/proxy-pools/providers", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) setProviders(data);
+    } catch (error) {
+      console.log("Error fetching providers:", error);
+    } finally {
+      setProvidersLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchProxyPools();
     fetchProxyScrapeConfig();
-  }, [fetchProxyPools, fetchProxyScrapeConfig]);
+    fetchProviders();
+  }, [fetchProxyPools, fetchProxyScrapeConfig, fetchProviders]);
 
   const resetForm = () => {
     setEditingProxyPool(null);
@@ -640,6 +659,77 @@ export default function ProxyPoolsPage() {
     }
   };
 
+  const saveProviderConfig = async (providerId, config) => {
+    setProviderBusy(providerId);
+    try {
+      const res = await fetch(`/api/proxy-pools/providers/${providerId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        notify.error(data.error || `Failed to save ${providerId} settings`);
+        return false;
+      }
+      await fetchProviders();
+      notify.success(`${providerId} settings saved`);
+      return true;
+    } catch (error) {
+      console.log(`Error saving ${providerId} config:`, error);
+      notify.error(`Failed to save ${providerId} settings`);
+      return false;
+    } finally {
+      setProviderBusy(null);
+    }
+  };
+
+  const refreshProvider = async (providerId) => {
+    setProviderBusy(providerId);
+    try {
+      const res = await fetch(`/api/proxy-pools/providers/${providerId}/refresh`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        notify.error(data.error || `${providerId} refresh failed`);
+        return;
+      }
+      await fetchProviders();
+      await fetchProxyPools();
+      notify.success(`Imported ${data.importedCount || 0} proxies from ${providerId}`);
+    } catch (error) {
+      console.log(`Error refreshing ${providerId}:`, error);
+      notify.error(`${providerId} refresh failed`);
+    } finally {
+      setProviderBusy(null);
+    }
+  };
+
+  const refreshAllProviders = async () => {
+    setProviderBusy("all");
+    try {
+      const res = await fetch("/api/proxy-pools/providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "refresh-all" }),
+      });
+      const data = await res.json();
+      await fetchProviders();
+      await fetchProxyPools();
+      const imported = data.results?.reduce((sum, r) => sum + (r.importedCount || 0), 0) || 0;
+      notify.success(`Refresh complete: ${imported} proxies imported`);
+    } catch (error) {
+      console.log("Error refreshing all providers:", error);
+      notify.error("Refresh failed");
+    } finally {
+      setProviderBusy(null);
+    }
+  };
+
+  const openProviderConfig = (provider) => {
+    setProviderConfigModal(provider);
+    setProviderConfigForm({ ...provider.config });
+  };
+
   const activeCount = useMemo(
     () => proxyPools.filter((pool) => pool.isActive === true).length,
     [proxyPools]
@@ -721,6 +811,144 @@ export default function ProxyPoolsPage() {
           <Button size="sm" icon="add" onClick={openCreateModal}>Add Proxy Pool</Button>
         </div>
       </div>
+
+      {/* Provider Grid Section */}
+      <Card>
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-base font-semibold">Free Proxy Providers</h2>
+                <Badge variant="default" size="sm">{providers.filter(p => p.enabled).length} active</Badge>
+              </div>
+              <p className="mt-1 text-xs text-text-muted">
+                Configure multiple free proxy sources. Each provider fetches and validates proxies independently.
+              </p>
+            </div>
+            <Button size="sm" variant="secondary" icon="sync" onClick={refreshAllProviders} disabled={providerBusy === "all"}>
+              {providerBusy === "all" ? "Refreshing..." : "Refresh All"}
+            </Button>
+          </div>
+
+          {providersLoading ? (
+            <div className="text-sm text-text-muted">Loading providers...</div>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {providers.map((provider) => (
+                <div
+                  key={provider.id}
+                  className={`rounded-[10px] border p-3 transition-colors ${
+                    provider.enabled
+                      ? "border-green-500/30 bg-green-500/5"
+                      : "border-border bg-surface-2"
+                  }`}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">{provider.name}</span>
+                        {provider.enabled && <Badge variant="success" size="sm">on</Badge>}
+                      </div>
+                      <p className="mt-0.5 text-xs text-text-muted line-clamp-2">{provider.description}</p>
+                    </div>
+                    <Toggle
+                      checked={provider.enabled}
+                      onChange={() => saveProviderConfig(provider.id, { ...provider.config, enabled: !provider.enabled })}
+                      title={`Enable ${provider.name}`}
+                    />
+                  </div>
+
+                  {provider.config.lastRefreshAt && (
+                    <div className="mt-2 flex flex-wrap gap-2 text-xs text-text-muted">
+                      <span>Imported: {provider.config.lastImportedCount || 0}</span>
+                      <span>Working: {provider.config.lastWorkingCount || 0}/{provider.config.lastCheckedCount || 0}</span>
+                    </div>
+                  )}
+                  {provider.config.lastError && (
+                    <p className="mt-1 text-xs text-red-500 line-clamp-1">{provider.config.lastError}</p>
+                  )}
+
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" variant="secondary" onClick={() => openProviderConfig(provider)}>
+                      Configure
+                    </Button>
+                    <Button
+                      size="sm"
+                      icon="sync"
+                      onClick={() => refreshProvider(provider.id)}
+                      disabled={providerBusy === provider.id}
+                    >
+                      {providerBusy === provider.id ? "..." : "Refresh"}
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </Card>
+
+      {/* Provider Config Modal */}
+      {providerConfigModal && (
+        <Modal onClose={() => setProviderConfigModal(null)} title={`Configure ${providerConfigModal.name}`}>
+          <div className="flex flex-col gap-3">
+            {providerConfigModal.configFields?.map((field) => (
+              <label key={field.name} className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium text-text-main">{field.label}</span>
+                {field.type === "select" ? (
+                  <select
+                    value={providerConfigForm[field.name] || ""}
+                    onChange={(e) => setProviderConfigForm((prev) => ({ ...prev, [field.name]: e.target.value }))}
+                    className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+                  >
+                    {field.options?.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                ) : field.type === "boolean" ? (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={providerConfigForm[field.name] === true}
+                      onChange={(e) => setProviderConfigForm((prev) => ({ ...prev, [field.name]: e.target.checked }))}
+                      className="h-4 w-4 rounded border-border text-brand-500 focus:ring-brand-500/30"
+                    />
+                    <span className="text-sm text-text-muted">Enabled</span>
+                  </div>
+                ) : field.type === "number" ? (
+                  <input
+                    type="number"
+                    value={providerConfigForm[field.name] ?? ""}
+                    min={field.min}
+                    max={field.max}
+                    onChange={(e) => setProviderConfigForm((prev) => ({ ...prev, [field.name]: Number(e.target.value) }))}
+                    className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+                  />
+                ) : (
+                  <input
+                    type="text"
+                    value={providerConfigForm[field.name] || ""}
+                    onChange={(e) => setProviderConfigForm((prev) => ({ ...prev, [field.name]: e.target.value }))}
+                    className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+                  />
+                )}
+              </label>
+            ))}
+            <div className="flex gap-2 mt-2">
+              <Button
+                onClick={() => saveProviderConfig(providerConfigModal.id, providerConfigForm)}
+                disabled={providerBusy === providerConfigModal.id}
+                fullWidth
+              >
+                Save
+              </Button>
+              <Button variant="secondary" onClick={() => setProviderConfigModal(null)} fullWidth>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       <Card>
         <div className="flex flex-col gap-4">
