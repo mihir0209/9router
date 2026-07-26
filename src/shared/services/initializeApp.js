@@ -16,6 +16,7 @@ import {
 import { getMitmStatus, startMitm, loadEncryptedPassword, initDbHooks, restoreToolDNS, removeAllDNSEntriesSync } from "@/mitm/manager";
 import { startQuotaAutoPing } from "@/shared/services/quotaAutoPing";
 import { startProxyScrapeScheduler } from "@/shared/services/proxyPoolScheduler";
+import { migrateLegacyProxyScrape } from "@/lib/proxy/migrateLegacyProxyScrape";
 import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
 import { killAllBridges } from "@/lib/mcp/stdioSseBridge";
 
@@ -110,6 +111,11 @@ async function runHeavyStartup() {
   configureTunnelMonitoring(settings);
   startQuotaAutoPing();
   startProxyScrapeScheduler();
+
+  // Migrate legacy ProxyScrape config to unified provider system
+  migrateLegacyProxyScrape().then((migrated) => {
+    if (migrated) console.log("[InitApp] Migrated legacy ProxyScrape config to unified provider system");
+  }).catch(() => {});
 }
 
 function hasQuotaAutoPingEnabled(settings) {
