@@ -8,7 +8,21 @@ const PASSWORD_HEADER = "x-9r-password";
 
 // CLI token requests are already trusted (local machine); skip password re-auth.
 function isCliRequest(request) {
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare") return false;
   return Boolean(request.headers.get(CLI_TOKEN_HEADER));
+}
+
+function preserveProtectedSettings(importedSettings, currentSettings) {
+  if (!importedSettings || typeof importedSettings !== "object") return importedSettings;
+  const next = { ...importedSettings };
+
+  if (currentSettings?.password) next.password = currentSettings.password;
+  else delete next.password;
+
+  if (currentSettings?.oidcClientSecret) next.oidcClientSecret = currentSettings.oidcClientSecret;
+  else delete next.oidcClientSecret;
+
+  return next;
 }
 
 export async function GET(request) {
@@ -27,9 +41,12 @@ export async function GET(request) {
 export async function POST(request) {
   try {
     const { password, ...payload } = await request.json();
+    const currentSettings = await getSettings();
     if (!isCliRequest(request) && !(await verifyDashboardPassword(password))) {
       return NextResponse.json({ error: "Invalid password" }, { status: 401 });
     }
+
+    payload.settings = preserveProtectedSettings(payload.settings, currentSettings);
     await importDb(payload);
 
     // Ensure proxy settings take effect immediately after a DB import.

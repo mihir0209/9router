@@ -185,19 +185,57 @@ function getEnvProxyUrl(targetUrl) {
 }
 
 /**
- * Normalize proxy URL (allow host:port)
+ * Normalize proxy URL.
+ * Supports full URLs, host:port, user:pass@host:port, and host:port:user:pass
+ * (password may contain extra ":").
  */
 function normalizeProxyUrl(proxyUrl) {
   const normalizedInput = normalizeString(proxyUrl);
   if (!normalizedInput) return null;
 
-  try {
+  // Full URL with scheme
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(normalizedInput)) {
+    try {
+      new URL(normalizedInput);
+      return normalizedInput;
+    } catch {
+      return null;
+    }
+  }
 
-    new URL(normalizedInput);
-    return normalizedInput;
-  } catch {
-    // Allow "127.0.0.1:7890" style values
+  // user:pass@host:port
+  if (normalizedInput.includes("@")) {
+    try {
+      return new URL(`http://${normalizedInput}`).href;
+    } catch {
+      return null;
+    }
+  }
+
+  // host:port  OR  host:port:user:pass (password = everything after 3rd colon)
+  const c1 = normalizedInput.indexOf(":");
+  if (c1 <= 0) return `http://${normalizedInput}`;
+  const c2 = normalizedInput.indexOf(":", c1 + 1);
+  if (c2 < 0) {
+    // host:port
     return `http://${normalizedInput}`;
+  }
+  const c3 = normalizedInput.indexOf(":", c2 + 1);
+  if (c3 < 0) {
+    // ambiguous host:port:extra — treat as bare host:port:something (invalid auth)
+    return `http://${normalizedInput}`;
+  }
+  const host = normalizedInput.slice(0, c1);
+  const port = normalizedInput.slice(c1 + 1, c2);
+  const username = normalizedInput.slice(c2 + 1, c3);
+  const password = normalizedInput.slice(c3 + 1);
+  if (!host || !port || !username || password === "") return `http://${normalizedInput}`;
+  try {
+    return new URL(
+      `http://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}`
+    ).href;
+  } catch {
+    return null;
   }
 }
 
@@ -370,4 +408,5 @@ if (!isCloudflareRuntime && globalThis.fetch !== patchedFetch) {
   globalThis.fetch = patchedFetch;
 }
 
+export { originalFetch };
 export default patchedFetch;

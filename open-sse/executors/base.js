@@ -1,8 +1,13 @@
-import { HTTP_STATUS, RETRY_CONFIG, DEFAULT_RETRY_CONFIG, resolveRetryEntry, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { HTTP_STATUS, DEFAULT_RETRY_CONFIG, resolveRetryEntry, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { shouldRefreshCredentials } from "../services/oauthCredentialManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { dbg } from "../utils/debugLog.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE } from "../providers/shared.js";
+import {
+  resolveRetryPlugin,
+  resolveHttpTextRetry,
+  getRetryComputeDelayHook,
+} from "../retry/index.js";
 
 /**
  * BaseExecutor - Base class for provider executors
@@ -96,24 +101,50 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
+  isClientRetryableText(errorText) {
+    const text = String(errorText || "").toLowerCase();
+    return text.includes("temporarily unavailable") || text.includes("service unavailable");
+  }
+
+  retryableClientHeaders(headers) {
+    const next = new Headers();
+    if (headers?.forEach) {
+      headers.forEach((value, key) => next.set(key, value));
+    } else {
+      const contentType = headers?.get?.("content-type");
+      if (contentType) next.set("content-type", contentType);
+    }
+    return next;
+  }
+
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
     let lastStatus = 0;
     const retryAttemptsByUrl = {};
 
-    // Merge default retry config with provider-specific config
-    const retryConfig = { ...DEFAULT_RETRY_CONFIG, ...this.config.retry };
+    // Merge: defaults → executor/registry config → plugin/node/settings overlays
+    // includeRegistry:false — this.config.retry already is PROVIDERS[id].retry
+    const plugin = resolveRetryPlugin(this.provider, credentials, null, { includeRegistry: false });
+    const retryConfig = {
+      ...DEFAULT_RETRY_CONFIG,
+      ...this.config.retry,
+      ...plugin.httpRetry,
+    };
+    const pluginDelayHook = typeof plugin.computeRetryDelay === "function"
+      ? plugin.computeRetryDelay
+      : getRetryComputeDelayHook(this.provider, credentials);
 
     // Schedule retry via retryConfig[statusKey]. Returns true when caller should `urlIndex--; continue`
-    // response (optional) lets a subclass hook compute a dynamic delay (e.g. antigravity Retry-After).
-    const tryRetry = async (urlIndex, statusKey, reason, response = null) => {
-      const { attempts, delayMs } = resolveRetryEntry(retryConfig[statusKey]);
+    // response (optional) lets a subclass/plugin hook compute a dynamic delay (e.g. antigravity Retry-After).
+    const tryRetry = async (urlIndex, statusKey, reason, response = null, overrideEntry = null) => {
+      const { attempts, delayMs } = resolveRetryEntry(overrideEntry || retryConfig[statusKey]);
       if (attempts <= 0 || retryAttemptsByUrl[urlIndex] >= attempts) return false;
       // Hook: subclass may derive delay from the response (headers/body). null → skip retry, use fallback.
       let waitMs = delayMs;
-      if (response && this.computeRetryDelay) {
-        const dynamic = await this.computeRetryDelay(response, retryAttemptsByUrl[urlIndex] + 1, delayMs);
+      const delayHook = this.computeRetryDelay || pluginDelayHook;
+      if (response && delayHook) {
+        const dynamic = await delayHook.call(this, response, retryAttemptsByUrl[urlIndex] + 1, delayMs);
         if (dynamic === false) return false; // hook vetoes retry (e.g. Retry-After too long)
         if (dynamic != null) waitMs = dynamic;
       }
@@ -138,9 +169,18 @@ export class BaseExecutor {
 
       try {
         const bodyStr = JSON.stringify(transformedBody);
+        // DEBUG: dump upstream request when KIRO_DEBUG is set
+        if (process.env.KIRO_DEBUG && this.provider === "kiro") {
+          try {
+            const { writeFileSync } = await import("node:fs");
+            const dump = JSON.stringify({ provider: this.provider, url, headers, body: transformedBody }, null, 2);
+            writeFileSync("/tmp/kiro-debug-upstream-request.json", dump);
+            console.error("[KIRO_DEBUG] upstream request → /tmp/kiro-debug-upstream-request.json");
+          } catch (e) { console.error(`[KIRO_DEBUG] dump failed: ${e.message}`); }
+        }
         const fetchT0 = Date.now();
         dbg("FETCH", `${this.provider.toUpperCase()} → ${url} | body=${bodyStr.length}B | connectTimeout=${timeoutMs}ms`);
-        const response = await proxyAwareFetch(url, {
+        let response = await proxyAwareFetch(url, {
           method: "POST",
           headers,
           body: bodyStr,
@@ -152,6 +192,33 @@ export class BaseExecutor {
         dbg("FETCH", `${this.provider.toUpperCase()} ← ${response.status} | ttft=${Date.now() - fetchT0}ms | ct=${ct} | cl=${cl}`);
 
         if (await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) { urlIndex--; continue; }
+
+        // Plugin text rules: plain-text match on error body → same-account HTTP retry
+        if (response.status >= 400) {
+          let errBody = "";
+          try { errBody = await response.clone().text(); } catch { /* ignore */ }
+          // DEBUG: dump upstream error response when KIRO_DEBUG is set
+          if (process.env.KIRO_DEBUG && this.provider === "kiro") {
+            try {
+              const { writeFileSync } = await import("node:fs");
+              const dump = JSON.stringify({ status: response.status, headers: Object.fromEntries(response.headers?.entries?.() || []), body: errBody }, null, 2);
+              writeFileSync("/tmp/kiro-debug-upstream-response.json", dump);
+              console.error("[KIRO_DEBUG] upstream response → /tmp/kiro-debug-upstream-response.json");
+            } catch (e) { console.error(`[KIRO_DEBUG] response dump failed: ${e.message}`); }
+          }
+          const textRetry = resolveHttpTextRetry(this.provider, response.status, errBody, credentials);
+          if (textRetry && await tryRetry(urlIndex, response.status, `text "${textRetry.rule?.text || "match"}"`, response, textRetry)) {
+            urlIndex--;
+            continue;
+          }
+          if (textRetry && this.isClientRetryableText(errBody) && response.status !== HTTP_STATUS.RATE_LIMITED) {
+            response = new Response(errBody, {
+              status: HTTP_STATUS.RATE_LIMITED,
+              statusText: "Too Many Requests",
+              headers: this.retryableClientHeaders(response.headers),
+            });
+          }
+        }
 
         if (this.shouldRetry(response.status, urlIndex)) {
           log?.debug?.("RETRY", `${response.status} on ${url}, trying fallback ${urlIndex + 1}`);

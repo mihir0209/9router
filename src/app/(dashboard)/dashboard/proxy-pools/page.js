@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Badge, Button, Card, CardSkeleton, Input, Modal, Toggle, ConfirmModal } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
+import { normalizeProxyUrl } from "@/lib/network/normalizeProxyUrl";
 
 function getStatusVariant(status) {
   if (status === "active") return "success";
@@ -498,31 +499,14 @@ export default function ProxyPoolsPage() {
     const trimmed = line.trim();
     if (!trimmed) return null;
 
-    if (trimmed.includes("://")) {
-      const parsed = new URL(trimmed);
-      const hostLabel = parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
-      return {
-        proxyUrl: parsed.toString(),
-        name: `Imported ${hostLabel}`,
-      };
+    const result = normalizeProxyUrl(trimmed);
+    if (!result.ok) {
+      throw new Error(result.error || "Unsupported format");
     }
-
-    const parts = trimmed.split(":");
-    if (parts.length === 4) {
-      const [host, port, username, password] = parts;
-      if (!host || !port || !username || !password) {
-        throw new Error("Invalid host:port:user:pass format");
-      }
-
-      const proxyUrl = `http://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}`;
-      const parsed = new URL(proxyUrl);
-      return {
-        proxyUrl: parsed.toString(),
-        name: `Imported ${host}:${port}`,
-      };
-    }
-
-    throw new Error("Unsupported format");
+    return {
+      proxyUrl: result.url,
+      name: `Imported ${result.hostLabel}`,
+    };
   };
 
   const handleBatchImport = async () => {
@@ -1041,11 +1025,11 @@ export default function ProxyPoolsPage() {
             <textarea
               value={batchImportText}
               onChange={(e) => setBatchImportText(e.target.value)}
-              placeholder={"http://user:pass@127.0.0.1:7897\n127.0.0.1:7897:user:pass"}
+              placeholder={"http://user:pass@127.0.0.1:7897\n127.0.0.1:7897:user:pass\n5.42.206.146:8081:user:token=="}
               className="w-full min-h-[180px] py-2 px-3 text-sm text-text-main bg-white dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-md focus:ring-1 focus:ring-primary/30 focus:border-primary/50 focus:outline-none transition-all"
             />
             <p className="text-xs text-text-muted mt-1">
-              Supported formats: protocol://user:pass@host:port, host:port:user:pass
+              Supported: protocol://user:pass@host:port · host:port · host:port:user:pass (password may contain :)
             </p>
           </div>
 
@@ -1252,7 +1236,8 @@ export default function ProxyPoolsPage() {
             label="Proxy URL"
             value={formData.proxyUrl}
             onChange={(e) => setFormData((prev) => ({ ...prev, proxyUrl: e.target.value }))}
-            placeholder="http://127.0.0.1:7897"
+            placeholder="http://user:pass@host:port  or  host:port:user:pass"
+            hint="Also accepts host:port and host:port:user:pass (password may include : or =)"
           />
           <Input
             label="No Proxy"

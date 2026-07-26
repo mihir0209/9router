@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import PropTypes from "prop-types";
-import { Badge, Button, Input, Modal, Select } from "@/shared/components";
+import { Badge, Button, Input, Modal, Select, RetryRulesEditor } from "@/shared/components";
 
 const VARIANT_CONFIG = {
   openai: {
@@ -44,6 +44,7 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
   });
 
   const [formData, setFormData] = useState(initialFormData);
+  const [retry, setRetry] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [checkKey, setCheckKey] = useState("");
   const [checkModelId, setCheckModelId] = useState("");
@@ -74,12 +75,14 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
           ...(config.hasApiType ? { apiType: formData.apiType } : {}),
           baseUrl: formData.baseUrl,
           type: config.type,
+          ...(retry ? { retry } : {}),
         }),
       });
       const data = await res.json();
       if (res.ok) {
         onCreated(data.node);
         setFormData(initialFormData());
+        setRetry(null);
         setCheckKey("");
         setValidationResult(null);
       }
@@ -178,6 +181,7 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
           placeholder={config.modelIdPlaceholder}
           hint="If provider lacks /models endpoint, enter a model ID to validate via chat/completions instead."
         />
+        <RetryRulesEditor value={retry} onChange={setRetry} />
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <Button
             onClick={handleValidate}

@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
-import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal } from "@/shared/components";
+import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal, RetryRulesEditor } from "@/shared/components";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
@@ -65,6 +65,7 @@ export default function ProviderDetailPage() {
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
+  const [providerRetry, setProviderRetry] = useState(null);
   const [thinkingMode, setThinkingMode] = useState("auto");
   const [kiroAgenticPromptMode, setKiroAgenticPromptMode] = useState("always");
   const [autoPing, setAutoPing] = useState({ enabled: false, connections: {} });
@@ -369,6 +370,11 @@ export default function ProviderDetailPage() {
         }
 
         setProviderNode(node);
+        // Compatible nodes store retry on the node; built-ins use providerStrategies
+        if (node?.retry) setProviderRetry(node.retry);
+        else setProviderRetry(override.retry || null);
+      } else {
+        setProviderRetry(override.retry || null);
       }
     } catch (error) {
       console.log("Error fetching connections:", error);
@@ -387,6 +393,7 @@ export default function ProviderDetailPage() {
       const data = await res.json();
       if (res.ok) {
         setProviderNode(data.node);
+        setProviderRetry(data.node?.retry || null);
         await fetchConnections();
         setShowEditNodeModal(false);
       }
@@ -395,17 +402,25 @@ export default function ProviderDetailPage() {
     }
   };
 
-  const saveProviderStrategy = async (strategy, stickyLimit) => {
+  const saveProviderStrategy = async (strategy, stickyLimit, retryOverride) => {
     try {
       const settingsRes = await fetch("/api/settings", { cache: "no-store" });
       const settingsData = settingsRes.ok ? await settingsRes.json() : {};
       const current = settingsData.providerStrategies || {};
+      const prev = current[providerId] || {};
 
-      // Build override: null strategy means remove override, use global
-      const override = {};
+      // Merge: keep existing fields (incl. retry) unless explicitly overridden
+      const override = { ...prev };
       if (strategy) override.fallbackStrategy = strategy;
+      else delete override.fallbackStrategy;
       if (strategy === "round-robin" && stickyLimit !== "") {
         override.stickyRoundRobinLimit = Number(stickyLimit) || 3;
+      } else if (strategy !== "round-robin") {
+        delete override.stickyRoundRobinLimit;
+      }
+      if (retryOverride !== undefined) {
+        if (retryOverride) override.retry = retryOverride;
+        else delete override.retry;
       }
 
       const updated = { ...current };
@@ -423,6 +438,33 @@ export default function ProviderDetailPage() {
     } catch (error) {
       console.log("Error saving provider strategy:", error);
     }
+  };
+
+  const handleSaveRetry = async (retry) => {
+    setProviderRetry(retry);
+    if (isCompatible && providerNode) {
+      try {
+        const res = await fetch(`/api/provider-nodes/${providerId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: providerNode.name,
+            prefix: providerNode.prefix,
+            baseUrl: providerNode.baseUrl,
+            ...(providerNode.apiType ? { apiType: providerNode.apiType } : {}),
+            retry: retry || null,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setProviderNode(data.node);
+        }
+      } catch (error) {
+        console.log("Error saving node retry:", error);
+      }
+      return;
+    }
+    await saveProviderStrategy(providerStrategy, providerStickyLimit, retry || null);
   };
 
   const handleRoundRobinToggle = (enabled) => {
@@ -1490,6 +1532,13 @@ export default function ProviderDetailPage() {
         </Card>
       )}
 
+      {/* Error retry rules — always visible for every provider */}
+      {isFreeNoAuth && (
+        <Card>
+          <RetryRulesEditor value={providerRetry} onChange={handleSaveRetry} />
+        </Card>
+      )}
+
       {/* Connections */}
       {isFreeNoAuth ? (
         <NoAuthProxyCard providerId={providerId} />
@@ -1564,6 +1613,10 @@ export default function ProviderDetailPage() {
                 )}
               </div>
             </div>
+          </div>
+
+          <div className="mb-4">
+            <RetryRulesEditor value={providerRetry} onChange={handleSaveRetry} />
           </div>
 
           {connections.length === 0 ? (

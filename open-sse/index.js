@@ -43,6 +43,20 @@ export {
 } from "./services/accountFallback.js";
 
 export {
+  registerRetryPlugin,
+  resolveRetryPlugin,
+  resolveHttpRetryConfig,
+  resolveFallbackDecision,
+  resolveHttpTextRetry,
+  listRetryPlugins,
+  clearRetryPlugins,
+  normalizeUserRetryConfig,
+  normalizeErrorText,
+  errorTextIncludes,
+  findMatchingErrorText,
+} from "./retry/index.js";
+
+export {
   TOKEN_EXPIRY_BUFFER_MS,
   refreshAccessToken,
   refreshClaudeOAuthToken,

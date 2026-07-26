@@ -25,12 +25,17 @@ export default async function handler(req) {
   headers.delete("x-relay-path");
   headers.delete("host");
 
-  const response = await fetch(targetUrl, {
+  const hasBody = req.method !== "GET" && req.method !== "HEAD";
+  const fetchOpts = {
     method: req.method,
     headers,
-    body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
-    duplex: "half",
-  });
+  };
+  if (hasBody) {
+    fetchOpts.body = req.body;
+    fetchOpts.duplex = "half";
+  }
+
+  const response = await fetch(targetUrl, fetchOpts);
 
   return new Response(response.body, {
     status: response.status,

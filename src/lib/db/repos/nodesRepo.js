@@ -65,6 +65,7 @@ export async function createProviderNode(data) {
     createdAt: now,
     updatedAt: now,
   };
+  if (data.retry != null) node.retry = data.retry;
   upsert(db, node);
   return node;
 }

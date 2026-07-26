@@ -135,14 +135,14 @@ export function fixMissingToolResponses(body) {
 
     // Check if next message has tool_result
     if (nextMsg && !hasToolResults(nextMsg, toolCallIds)) {
-      // Insert tool responses for each tool_call
-      for (const id of toolCallIds) {
-        // OpenAI format: role = "tool"
-        newMessages.push({
-          role: "tool",
-          tool_call_id: id,
-          content: ""
-        });
+        // Insert tool responses for each tool_call
+        for (const id of toolCallIds) {
+          // OpenAI format: role = "tool"
+          newMessages.push({
+            role: "tool",
+            tool_call_id: id,
+            content: "[No response received]"
+          });
       }
     }
   }

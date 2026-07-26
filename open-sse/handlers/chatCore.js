@@ -294,6 +294,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Most executors return their registry format. Cursor AgentService is an
   // exception: it is decoded by the executor into OpenAI-compatible output.
   let providerResponseFormat = targetFormat;
+  // DEBUG: dump translated body when KIRO_DEBUG is set
+  if (process.env.KIRO_DEBUG && provider === "kiro") {
+    try {
+      const { writeFileSync } = await import("node:fs");
+      const dump = JSON.stringify({ sourceFormat, targetFormat, provider, model, sourceModel: body.model, translatedBody }, null, 2);
+      writeFileSync("/tmp/kiro-debug-translated-body.json", dump);
+      log?.debug?.("CHAT", "[KIRO_DEBUG] translated body → /tmp/kiro-debug-translated-body.json");
+    } catch (e) { log?.debug?.("CHAT", `[KIRO_DEBUG] dump failed: ${e.message}`); }
+  }
   try {
     const result = await executor.execute({ model, body: translatedBody, stream, credentials, signal: streamController.signal, log, proxyOptions });
     providerResponse = result.response;

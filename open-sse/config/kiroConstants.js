@@ -201,6 +201,35 @@ export function supportsKiroAdditionalModelRequestFields(model) {
   return resolveKiroEffortPath(model) !== null;
 }
 
+/**
+ * Detect whether a model is a legacy Claude model that needs the thinking schema
+ * in additionalModelRequestFields when thinking is enabled, even though
+ * resolveKiroEffortPath returns null for it. Covers legacy Claude 4.x models
+ * (major=4, minor<=5 or null) where Kiro upstream now requires the thinking fields
+ * when thinking mode is active in the system prompt.
+ *
+ * Returns true for models where resolveKiroEffortPath returns null AND the model
+ * is a legacy Claude model (not pre-4, not date-suffixed). These models reject
+ * additionalModelRequestFields, so thinking is enabled via system prompt only.
+ *
+ * @param {string} model Model id (upstream, after agentic/thinking suffix stripped)
+ * @returns {boolean}
+ */
+export function supportsLegacy45ThinkingFields(model) {
+  if (typeof model !== "string") return false;
+  const normalized = model.toLowerCase().replace(/-/g, ".");
+  if (!normalized.includes("claude")) return false;
+  const match = normalized.match(/(?:^|[/.])claude(?:[/.][a-z]+)*[/.](\d+)(?:[/.](\d+))?(?:[/.]|$)/);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = match[2] === undefined ? null : Number(match[2]);
+  const dateSuffixMinor = minor !== null && minor >= 1000;
+  // Legacy Claude models where resolveKiroEffortPath returns null:
+  // pre-4, legacy 4.x (minor<=5), and date-suffixed (minor>=1000).
+  // These reject additionalModelRequestFields.
+  return major < 4 || (major === 4 && (minor === null || minor <= 5 || dateSuffixMinor));
+}
+
 export function usesKiroNativeGptEffort(body, model) {
   return resolveKiroEffortPath(model) === "reasoning"
     && extractKiroGptEffortLevel(body) !== null;

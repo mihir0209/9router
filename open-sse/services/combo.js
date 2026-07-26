@@ -4,6 +4,8 @@
 
 import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
 import { unavailableResponse } from "../utils/error.js";
+import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { resolveHttpTextRetry } from "../retry/index.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
 
@@ -14,6 +16,84 @@ const HARD_CAPS = new Set(["vision", "pdf", "audioInput", "videoInput"]);
 // Prefixes used when flattening tool turns into plain prose for panel models.
 const TOOL_CALL_PREFIX = "[Called tools: ";
 const TOOL_RESULT_PREFIX = "[Tool result: ";
+
+const STREAM_PROBE_TIMEOUT_MS = 1500;
+const STREAM_PROBE_MAX_BYTES = 16 * 1024;
+const STREAM_TRANSIENT_RETRY_STATUS = HTTP_STATUS.RATE_LIMITED;
+
+function responseFromTee(response, body) {
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+function providerFromModelStr(modelStr) {
+  return typeof modelStr === "string" && modelStr.includes("/")
+    ? modelStr.split("/")[0]
+    : null;
+}
+
+function isRetryableStreamError(errorText) {
+  const text = String(errorText || "").toLowerCase();
+  return text.includes("temporarily unavailable") || text.includes("service unavailable");
+}
+
+function extractStreamErrorText(buffer) {
+  const lines = buffer.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(data);
+      const message = parsed?.error?.message || parsed?.error || parsed?.message;
+      if (message) return typeof message === "string" ? message : JSON.stringify(message);
+      if (parsed?.choices?.[0]?.delta?.content || parsed?.choices?.[0]?.message?.content) return null;
+      if (parsed?.response?.output_text || parsed?.output_text) return null;
+    } catch {
+      // Plain text data lines can be upstream error messages before any content.
+      return data;
+    }
+  }
+  return undefined;
+}
+
+async function probeInitialStreamError(response) {
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  if (!response.body || !contentType.includes("text/event-stream")) return { response, errorText: null };
+
+  const [probeBody, clientBody] = response.body.tee();
+  const reader = probeBody.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let bytes = 0;
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; reader.cancel().catch(() => {}); }, STREAM_PROBE_TIMEOUT_MS);
+
+  try {
+    while (!timedOut && bytes < STREAM_PROBE_MAX_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value?.byteLength || 0;
+      buffer += decoder.decode(value, { stream: true });
+      const detected = extractStreamErrorText(buffer);
+      if (detected !== undefined) {
+        if (detected) return { response: responseFromTee(response, clientBody), errorText: detected };
+        break;
+      }
+    }
+  } catch {
+    // Probe is best-effort; return the unconsumed tee to the client.
+  } finally {
+    clearTimeout(timeout);
+    reader.cancel().catch(() => {});
+  }
+
+  return { response: responseFromTee(response, clientBody), errorText: null };
+}
 
 // Flatten tool turns into prose so panel models keep the context but can't loop
 // on tools: drop the request's tools, turn tool/function results into assistant
@@ -248,15 +328,48 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
 
   for (let i = 0; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
+    const comboProvider = providerFromModelStr(modelStr);
+    let sameModelAttempts = 0;
     log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
 
-    try {
+    while (true) try {
       const result = await handleSingleModel(body, modelStr);
       
       // Success (2xx) - return response
       if (result.ok) {
+        const probed = await probeInitialStreamError(result);
+        if (probed.errorText) {
+          const retry = resolveHttpTextRetry(comboProvider, HTTP_STATUS.SERVICE_UNAVAILABLE, probed.errorText);
+          if (retry && sameModelAttempts < retry.attempts) {
+            sameModelAttempts++;
+            log.info("COMBO", `Model ${modelStr} stream transient error, retrying same model ${sameModelAttempts}/${retry.attempts}`);
+            if (retry.delayMs > 0) await new Promise(r => setTimeout(r, retry.delayMs));
+            continue;
+          }
+
+          const { shouldFallback, cooldownMs } = checkFallbackError(HTTP_STATUS.SERVICE_UNAVAILABLE, probed.errorText, 0, comboProvider);
+          if (!shouldFallback) {
+            log.warn("COMBO", `Model ${modelStr} stream failed (no fallback)`, { error: probed.errorText });
+            return new Response(JSON.stringify({ error: { message: probed.errorText } }), {
+              status: isRetryableStreamError(probed.errorText) ? STREAM_TRANSIENT_RETRY_STATUS : HTTP_STATUS.SERVICE_UNAVAILABLE,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000) {
+            log.info("COMBO", `Model ${modelStr} stream transient error, waiting ${cooldownMs}ms before next`);
+            await new Promise(r => setTimeout(r, cooldownMs));
+          }
+          lastError = probed.errorText;
+          if (!lastStatus) {
+            lastStatus = isRetryableStreamError(probed.errorText)
+              ? STREAM_TRANSIENT_RETRY_STATUS
+              : HTTP_STATUS.SERVICE_UNAVAILABLE;
+          }
+          log.warn("COMBO", `Model ${modelStr} stream failed, trying next`, { error: probed.errorText });
+          break;
+        }
         log.info("COMBO", `Model ${modelStr} succeeded`);
-        return result;
+        return probed.response;
       }
 
       // Extract error info from response
@@ -280,8 +393,8 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         try { errorText = JSON.stringify(errorText); } catch { errorText = String(errorText); }
       }
 
-      // Check if should fallback to next model
-      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
+      // Check if should fallback to next model (providerId from modelStr when "provider/model")
+      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText, 0, comboProvider);
 
       if (!shouldFallback) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
@@ -301,11 +414,13 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
+      break;
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues
       lastError = error.message || String(error);
       if (!lastStatus) lastStatus = 500;
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
+      break;
     }
   }
 

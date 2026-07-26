@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import PropTypes from "prop-types";
-import { Button, Badge, Input, Modal, Select } from "@/shared/components";
+import { Button, Badge, Input, Modal, Select, RetryRulesEditor } from "@/shared/components";
 
 export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose, isAnthropic }) {
   const [formData, setFormData] = useState({
@@ -11,6 +11,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
     apiType: "chat",
     baseUrl: "https://api.openai.com/v1",
   });
+  const [retry, setRetry] = useState(null);
   const [saving, setSaving] = useState(false);
   const [checkKey, setCheckKey] = useState("");
   const [checkModelId, setCheckModelId] = useState("");
@@ -25,6 +26,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
         apiType: node.apiType || "chat",
         baseUrl: node.baseUrl || (isAnthropic ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1"),
       });
+      setRetry(node.retry || null);
     }
   }, [node, isAnthropic]);
 
@@ -41,6 +43,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
         name: formData.name,
         prefix: formData.prefix,
         baseUrl: formData.baseUrl,
+        retry: retry || null,
       };
       if (!isAnthropic) {
         payload.apiType = formData.apiType;
@@ -128,6 +131,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
           placeholder="e.g. my-model-id"
           hint="If provider lacks /models endpoint, enter a model ID to validate via chat/completions instead."
         />
+        <RetryRulesEditor value={retry} onChange={setRetry} />
         {validationResult && (
           <Badge variant={validationResult === "success" ? "success" : "error"}>
             {validationResult === "success" ? "Valid" : "Invalid"}

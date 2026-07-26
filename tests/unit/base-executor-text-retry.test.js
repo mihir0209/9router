@@ -94,7 +94,10 @@ describe("BaseExecutor — plugin text HTTP retry", () => {
 
     fetchMock.mockResolvedValue(res(503, "Upstream service temporarily unavailable"));
 
-    const executor = new BaseExecutor("testprov", { baseUrl: "http://localhost:9999/v1" });
+    const executor = new BaseExecutor("testprov", {
+      baseUrl: "http://localhost:9999/v1",
+      retry: { 502: { attempts: 0 }, 503: { attempts: 0 }, 504: { attempts: 0 }, 429: { attempts: 0 } },
+    });
     const out = await executor.execute({
       model: "some-model",
       body: { messages: [] },

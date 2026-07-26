@@ -1,4 +1,5 @@
 import { ProxyAgent, fetch as undiciFetch } from "undici";
+import { normalizeProxyUrl } from "./normalizeProxyUrl.js";
 
 const DEFAULT_TEST_URL = "https://google.com/";
 const DEFAULT_TIMEOUT_MS = 8000;
@@ -26,10 +27,11 @@ function normalizeString(value) {
 }
 
 export async function testProxyUrl({ proxyUrl, testUrl, timeoutMs, method: methodRaw } = {}) {
-  const normalizedProxyUrl = normalizeString(proxyUrl);
-  if (!normalizedProxyUrl) {
-    return { ok: false, status: 400, error: "proxyUrl is required" };
+  const parsedProxy = normalizeProxyUrl(proxyUrl);
+  if (!parsedProxy.ok) {
+    return { ok: false, status: 400, error: parsedProxy.error || "proxyUrl is required" };
   }
+  const normalizedProxyUrl = parsedProxy.url;
 
   const normalizedTestUrl = normalizeString(testUrl) || DEFAULT_TEST_URL;
   const method = normalizeString(methodRaw).toUpperCase() || "HEAD";

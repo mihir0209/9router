@@ -1,4 +1,5 @@
-import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS } from "../config/errorConfig.js";
+import { BACKOFF_CONFIG } from "../config/errorConfig.js";
+import { resolveFallbackDecision } from "../retry/index.js";
 
 /**
  * Calculate exponential backoff cooldown for rate limits (429)
@@ -13,40 +14,21 @@ export function getQuotaCooldown(backoffLevel = 0) {
 }
 
 /**
- * Check if error should trigger account fallback (switch to next account)
- * Config-driven: matches ERROR_RULES top-to-bottom (text rules first, then status)
+ * Check if error should trigger account fallback (switch to next account).
+ * Always goes through the central retry matcher:
+ *   lower = errorText.toLowerCase(); if (lower.includes(rule.text)) …
+ * Plugin rules (per-provider) first, then global ERROR_RULES, then status.
+ *
  * @param {number} status - HTTP status code
  * @param {string} errorText - Error message text
  * @param {number} backoffLevel - Current backoff level for exponential backoff
+ * @param {string|null} [providerId] - Provider id for plugin resolution
+ * @param {object|null} [credentials] - Credentials (node retry in providerSpecificData.retry)
+ * @param {object|null} [settingsOverride] - providerStrategies[id].retry
  * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
  */
-export function checkFallbackError(status, errorText, backoffLevel = 0) {
-  const lowerError = errorText
-    ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
-    : "";
-
-  for (const rule of ERROR_RULES) {
-    // Text-based rule: match substring in error message
-    if (rule.text && lowerError && lowerError.includes(rule.text)) {
-      if (rule.backoff) {
-        const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
-        return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
-      }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
-    }
-
-    // Status-based rule: match HTTP status code
-    if (rule.status && rule.status === status) {
-      if (rule.backoff) {
-        const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
-        return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
-      }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
-    }
-  }
-
-  // Default: transient cooldown for any unmatched error
-  return { shouldFallback: true, cooldownMs: TRANSIENT_COOLDOWN_MS };
+export function checkFallbackError(status, errorText, backoffLevel = 0, providerId = null, credentials = null, settingsOverride = null) {
+  return resolveFallbackDecision(status, errorText, backoffLevel, providerId, credentials, settingsOverride);
 }
 
 /**
@@ -203,7 +185,9 @@ export function applyErrorState(account, status, errorText) {
   if (!account) return account;
 
   const backoffLevel = account.backoffLevel || 0;
-  const { cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel);
+  const providerId = account.provider || null;
+  const credentials = account.providerSpecificData ? { providerSpecificData: account.providerSpecificData } : null;
+  const { cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel, providerId, credentials);
 
   return {
     ...account,

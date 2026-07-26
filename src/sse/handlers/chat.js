@@ -39,6 +39,16 @@ export async function handleChat(request, clientRawRequest = null) {
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }
 
+  // DEBUG: dump incoming client request when KIRO_DEBUG is set
+  if (process.env.KIRO_DEBUG && body?.model?.startsWith("kr/")) {
+    try {
+      const fs = await import("fs");
+      const dump = JSON.stringify({ url: request.url, headers: Object.fromEntries(request.headers.entries()), body }, null, 2);
+      fs.default.writeFileSync("/tmp/kiro-debug-client-request.json", dump);
+      log.debug("CHAT", "[KIRO_DEBUG] client request → /tmp/kiro-debug-client-request.json");
+    } catch (e) { log.debug("CHAT", `[KIRO_DEBUG] dump failed: ${e.message}`); }
+  }
+
   // Build clientRawRequest for logging (if not provided)
   if (!clientRawRequest) {
     const url = new URL(request.url);

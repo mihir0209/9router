@@ -147,6 +147,15 @@ function inferKindFromUnknownModelId(modelId) {
   return LLM_KIND;
 }
 
+function stripProviderPrefix(modelId, aliases) {
+  const value = typeof modelId === "string" ? modelId.trim() : "";
+  if (!value) return "";
+  for (const alias of aliases) {
+    if (alias && value.startsWith(`${alias}/`)) return value.slice(alias.length + 1);
+  }
+  return value;
+}
+
 async function fetchCompatibleModelIds(connection) {
   if (!connection?.apiKey) return [];
 
@@ -382,18 +391,7 @@ export async function buildModelsList(kindFilter, options = {}) {
       }
 
       const modelIds = rawModelIds
-        .map((modelId) => {
-          if (modelId.startsWith(`${outputAlias}/`)) {
-            return modelId.slice(outputAlias.length + 1);
-          }
-          if (modelId.startsWith(`${staticAlias}/`)) {
-            return modelId.slice(staticAlias.length + 1);
-          }
-          if (modelId.startsWith(`${providerId}/`)) {
-            return modelId.slice(providerId.length + 1);
-          }
-          return modelId;
-        })
+        .map((modelId) => stripProviderPrefix(modelId, [outputAlias, staticAlias, providerId]))
         .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "");
 
       const customModelKindById = new Map();
@@ -408,7 +406,7 @@ export async function buildModelsList(kindFilter, options = {}) {
           return alias === staticAlias || alias === outputAlias || alias === providerId;
         })
         .map((m) => {
-          const modelId = String(m.id).trim();
+          const modelId = stripProviderPrefix(m.id, [outputAlias, staticAlias, providerId]);
           if (modelId) customModelKindById.set(modelId, getModelKind(m) || LLM_KIND);
           return modelId;
         })

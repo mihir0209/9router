@@ -172,6 +172,10 @@ export async function importDb(payload) {
     }
   });
 
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
+    return { success: true };
+  }
+
   return await exportDb();
 }
 

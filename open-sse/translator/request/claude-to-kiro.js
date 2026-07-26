@@ -30,9 +30,7 @@ import {
   resolveKiroModel,
   resolveKiroThinkingBudget,
   buildThinkingSystemPrefix,
-  KIRO_AGENTIC_SYSTEM_PROMPT,
   resolveDefaultProfileArn,
-  buildKiroAdditionalModelRequestFieldsForModel,
   usesKiroNativeGptEffort,
 } from "../../config/kiroConstants.js";
 import { DEFAULT_IMAGE_MIME } from "../schema/index.js";
@@ -391,8 +389,11 @@ export function claudeToKiroRequest(model, body, stream, credentials) {
 
   const { upstream: upstreamModel, agentic } = resolveKiroModel(model);
   const thinkingBudget = resolveKiroThinkingBudget(body, credentials?.rawHeaders, model);
-  const additionalModelRequestFields = buildKiroAdditionalModelRequestFieldsForModel(body, upstreamModel);
   const usesNativeGptEffort = usesKiroNativeGptEffort(body, upstreamModel);
+
+  // NOTE: The Kiro upstream runtime API (runtime.us-east-1.kiro.dev) rejects
+  // both `systemPrompt` and `additionalModelRequestFields` for builder-id accounts.
+  // Thinking mode tags are injected into message content instead.
 
   // Guard 1: no client tools → flatten all tool interactions to text.
   if (!clientProvidedTools) {
@@ -504,9 +505,9 @@ export function claudeToKiroRequest(model, body, stream, credentials) {
   };
 
   if (profileArn) payload.profileArn = profileArn;
-  if (additionalModelRequestFields) {
-    payload.additionalModelRequestFields = additionalModelRequestFields;
-  }
+
+  // NOTE: systemPrompt and additionalModelRequestFields are intentionally NOT sent.
+  // The Kiro upstream runtime API rejects these fields for builder-id accounts.
 
   if (maxTokens || temperature !== undefined || topP !== undefined) {
     payload.inferenceConfig = {};

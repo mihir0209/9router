@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createProxyPool, getProviderConnections, getProxyPools } from "@/models";
+import { normalizeProxyUrl } from "@/lib/network/normalizeProxyUrl";
 
 function toBoolean(value) {
   if (value === "true") return true;
@@ -11,7 +12,7 @@ const VALID_PROXY_TYPES = ["http", "vercel", "cloudflare", "deno"];
 
 function normalizeProxyPoolInput(body = {}) {
   const name = typeof body?.name === "string" ? body.name.trim() : "";
-  const proxyUrl = typeof body?.proxyUrl === "string" ? body.proxyUrl.trim() : "";
+  const proxyUrlRaw = typeof body?.proxyUrl === "string" ? body.proxyUrl.trim() : "";
   const noProxy = typeof body?.noProxy === "string" ? body.noProxy.trim() : "";
   const isActive = body?.isActive === undefined ? true : body.isActive === true;
   const strictProxy = body?.strictProxy === true;
@@ -21,11 +22,21 @@ function normalizeProxyPoolInput(body = {}) {
     return { error: "Name is required" };
   }
 
-  if (!proxyUrl) {
+  if (!proxyUrlRaw) {
     return { error: "Proxy URL is required" };
   }
 
-  return { name, proxyUrl, noProxy, isActive, strictProxy, type };
+  // Relay types keep the deploy URL as-is; HTTP proxies accept host:port:user:pass
+  if (type !== "http") {
+    return { name, proxyUrl: proxyUrlRaw, noProxy, isActive, strictProxy, type };
+  }
+
+  const normalized = normalizeProxyUrl(proxyUrlRaw);
+  if (!normalized.ok) {
+    return { error: normalized.error };
+  }
+
+  return { name, proxyUrl: normalized.url, noProxy, isActive, strictProxy, type };
 }
 
 function buildUsageMap(connections = []) {

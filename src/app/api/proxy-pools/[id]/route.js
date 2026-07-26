@@ -5,8 +5,9 @@ import {
   getProxyPoolById,
   updateProxyPool,
 } from "@/models";
+import { normalizeProxyUrl } from "@/lib/network/normalizeProxyUrl";
 
-function normalizeProxyPoolUpdate(body = {}) {
+function normalizeProxyPoolUpdate(body = {}, existing = {}) {
   const updates = {};
 
   if (Object.prototype.hasOwnProperty.call(body, "name")) {
@@ -22,7 +23,16 @@ function normalizeProxyPoolUpdate(body = {}) {
     if (!proxyUrl) {
       return { error: "Proxy URL is required" };
     }
-    updates.proxyUrl = proxyUrl;
+    const type = Object.prototype.hasOwnProperty.call(body, "type")
+      ? body.type
+      : existing.type || "http";
+    if (type === "http" || !type) {
+      const normalized = normalizeProxyUrl(proxyUrl);
+      if (!normalized.ok) return { error: normalized.error };
+      updates.proxyUrl = normalized.url;
+    } else {
+      updates.proxyUrl = proxyUrl;
+    }
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "noProxy")) {
@@ -77,7 +87,7 @@ export async function PUT(request, { params }) {
     }
 
     const body = await request.json();
-    const normalized = normalizeProxyPoolUpdate(body);
+    const normalized = normalizeProxyPoolUpdate(body, existing);
 
     if (normalized.error) {
       return NextResponse.json({ error: normalized.error }, { status: 400 });

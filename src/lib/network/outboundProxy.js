@@ -1,3 +1,5 @@
+import { normalizeProxyUrl as normalizeProxyUrlInput } from "./normalizeProxyUrl.js";
+
 function normalizeString(value) {
   if (value === undefined || value === null) return "";
   return String(value).trim();
@@ -7,9 +9,10 @@ const ALLOWED_PROXY_SCHEMES = ["http:", "https:", "socks5:", "socks4:", "socks5h
 
 function validateProxyUrl(url) {
   if (!url) return null;
-  if (/[\n\r`$]/.test(url)) return null;
+  const normalized = normalizeProxyUrlInput(url);
+  if (!normalized.ok) return null;
   try {
-    const parsed = new URL(url);
+    const parsed = new URL(normalized.url);
     if (!ALLOWED_PROXY_SCHEMES.includes(parsed.protocol)) return null;
     return parsed.href;
   } catch {

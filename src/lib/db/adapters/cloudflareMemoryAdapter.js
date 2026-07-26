@@ -172,6 +172,8 @@ export async function createCloudflareMemoryAdapter() {
   const state = createState();
   const context = await getD1Context();
   const d1 = context?.env?.DB || null;
+  let transactionDepth = 0;
+  const dirtyTables = new Set();
 
   async function initializeD1() {
     if (!d1) return;
@@ -200,20 +202,53 @@ export async function createCloudflareMemoryAdapter() {
 
   function persistTable(table) {
     if (!d1 || !state.tables[table]) return;
+    if (transactionDepth > 0) {
+      dirtyTables.add(table);
+      return;
+    }
     const rows = state.tables[table].map((row) => ({ key: primaryKeyFor(table, row), data: JSON.stringify(row) }));
     const task = (async () => {
-      const statements = [d1.prepare(`DELETE FROM ${D1_TABLE} WHERE table_name = ?`).bind(table)];
-      for (const row of rows) {
-        statements.push(
+      await d1.prepare(`DELETE FROM ${D1_TABLE} WHERE table_name = ?`).bind(table).run();
+      const chunkSize = 50;
+      // Persist in small batches to stay comfortably below D1 statement limits.
+      for (let i = 0; i < rows.length; i += chunkSize) {
+        await d1.batch(rows.slice(i, i + chunkSize).map((row) =>
           d1.prepare(
             `INSERT INTO ${D1_TABLE}(table_name, row_key, data, updated_at) ` +
             `VALUES(?, ?, ?, CURRENT_TIMESTAMP) ` +
             `ON CONFLICT(table_name, row_key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`
           ).bind(table, row.key, row.data)
-        );
+        ));
       }
-      await d1.batch(statements);
     })().catch((error) => console.warn(`[DB] D1 persist failed for ${table}: ${error.message}`));
+    context?.ctx?.waitUntil?.(task);
+  }
+
+  function persistRow(table, row) {
+    if (!d1 || !state.tables[table]) return;
+    if (transactionDepth > 0) {
+      dirtyTables.add(table);
+      return;
+    }
+    const task = d1.prepare(
+      `INSERT INTO ${D1_TABLE}(table_name, row_key, data, updated_at) ` +
+      `VALUES(?, ?, ?, CURRENT_TIMESTAMP) ` +
+      `ON CONFLICT(table_name, row_key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`
+    ).bind(table, primaryKeyFor(table, row), JSON.stringify(row)).run()
+      .catch((error) => console.warn(`[DB] D1 row persist failed for ${table}: ${error.message}`));
+    context?.ctx?.waitUntil?.(task);
+  }
+
+  function deletePersistedRows(table, rows) {
+    if (!d1 || !state.tables[table] || !rows.length) return;
+    if (transactionDepth > 0) {
+      dirtyTables.add(table);
+      return;
+    }
+    const task = d1.batch(rows.map((row) =>
+      d1.prepare(`DELETE FROM ${D1_TABLE} WHERE table_name = ? AND row_key = ?`)
+        .bind(table, primaryKeyFor(table, row))
+    )).catch((error) => console.warn(`[DB] D1 row delete failed for ${table}: ${error.message}`));
     context?.ctx?.waitUntil?.(task);
   }
 
@@ -253,10 +288,11 @@ export async function createCloudflareMemoryAdapter() {
     const replace = /^INSERT\s+OR\s+REPLACE/i.test(sql);
     if (index >= 0) {
       rowsFor(table)[index] = replace ? row : { ...rowsFor(table)[index], ...row };
+      persistRow(table, rowsFor(table)[index]);
     } else {
       rowsFor(table).push(row);
+      persistRow(table, row);
     }
-    persistTable(table);
     return { changes: 1, lastInsertRowid: row.id ?? null };
   }
 
@@ -275,12 +311,14 @@ export async function createCloudflareMemoryAdapter() {
     const whereParams = params.slice(setCursor.value);
     const where = buildWhere(whereSql, whereParams);
     let changes = 0;
+    const changedRows = [];
     for (const row of rowsFor(table)) {
       if (!where(row)) continue;
       Object.assign(row, updates);
+      changedRows.push(row);
       changes++;
     }
-    if (changes) persistTable(table);
+    for (const row of changedRows) persistRow(table, row);
     return { changes, lastInsertRowid: null };
   }
 
@@ -289,10 +327,15 @@ export async function createCloudflareMemoryAdapter() {
     if (!match) return { changes: 0, lastInsertRowid: null };
     const [, table, whereSql] = match;
     const where = buildWhere(whereSql, params);
-    const before = rowsFor(table).length;
-    state.tables[table] = rowsFor(table).filter((row) => !where(row));
+    const existingRows = rowsFor(table);
+    const deletedRows = existingRows.filter((row) => where(row));
+    const before = existingRows.length;
+    state.tables[table] = existingRows.filter((row) => !where(row));
     const changes = before - state.tables[table].length;
-    if (changes) persistTable(table);
+    if (changes) {
+      if (transactionDepth > 0) persistTable(table);
+      else deletePersistedRows(table, deletedRows);
+    }
     return { changes, lastInsertRowid: null };
   }
 
@@ -343,7 +386,17 @@ export async function createCloudflareMemoryAdapter() {
   }
 
   function transaction(fn) {
-    return fn();
+    transactionDepth++;
+    try {
+      return fn();
+    } finally {
+      transactionDepth--;
+      if (transactionDepth === 0 && dirtyTables.size) {
+        const tables = [...dirtyTables];
+        dirtyTables.clear();
+        for (const table of tables) persistTable(table);
+      }
+    }
   }
 
   return {

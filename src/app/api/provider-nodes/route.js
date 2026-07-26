@@ -2,8 +2,15 @@ import { NextResponse } from "next/server";
 import { createProviderNode, getProviderNodes } from "@/models";
 import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX } from "@/shared/constants/providers";
 import { generateId } from "@/shared/utils";
+import { normalizeUserRetryConfig } from "open-sse/retry/index.js";
 
 export const dynamic = "force-dynamic";
+
+function sanitizeRetry(raw) {
+  if (raw == null) return undefined;
+  if (raw === false || raw === "") return null;
+  return normalizeUserRetryConfig(raw) || null;
+}
 
 const OPENAI_COMPATIBLE_DEFAULTS = {
   baseUrl: "https://api.openai.com/v1",
@@ -32,7 +39,8 @@ export async function GET() {
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { name, prefix, apiType, baseUrl, type } = body;
+    const { name, prefix, apiType, baseUrl, type, retry } = body;
+    const retryConfig = sanitizeRetry(retry);
 
     if (!name?.trim()) {
       return NextResponse.json({ error: "Name is required" }, { status: 400 });
@@ -44,6 +52,7 @@ export async function POST(request) {
 
     // Determine type
     const nodeType = type || "openai-compatible";
+    const retryFields = retryConfig ? { retry: retryConfig } : {};
 
     if (nodeType === "openai-compatible") {
       if (!apiType || !["chat", "responses"].includes(apiType)) {
@@ -57,6 +66,7 @@ export async function POST(request) {
         apiType,
         baseUrl: (baseUrl || OPENAI_COMPATIBLE_DEFAULTS.baseUrl).trim(),
         name: name.trim(),
+        ...retryFields,
       });
       return NextResponse.json({ node }, { status: 201 });
     }
@@ -74,6 +84,7 @@ export async function POST(request) {
         prefix: prefix.trim(),
         baseUrl: sanitizedBaseUrl,
         name: name.trim(),
+        ...retryFields,
       });
       return NextResponse.json({ node }, { status: 201 });
     }
@@ -92,6 +103,7 @@ export async function POST(request) {
         prefix: prefix.trim(),
         baseUrl: sanitizedBaseUrl,
         name: name.trim(),
+        ...retryFields,
       });
       return NextResponse.json({ node }, { status: 201 });
     }

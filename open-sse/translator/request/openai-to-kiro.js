@@ -11,10 +11,8 @@ import {
   resolveKiroModel,
   resolveKiroThinkingBudget,
   buildThinkingSystemPrefix,
-  KIRO_AGENTIC_SYSTEM_PROMPT,
   resolveDefaultProfileArn,
-  buildKiroAdditionalModelRequestFieldsForModel,
-  usesKiroNativeGptEffort
+  usesKiroNativeGptEffort,
 } from "../../config/kiroConstants.js";
 import { parseDataUri } from "../concerns/image.js";
 import { DEFAULT_IMAGE_MIME } from "../schema/index.js";
@@ -526,8 +524,14 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
 
   const { upstream: upstreamModel, agentic } = resolveKiroModel(model);
   const thinkingBudget = resolveKiroThinkingBudget(body, credentials?.rawHeaders, model);
-  const additionalModelRequestFields = buildKiroAdditionalModelRequestFieldsForModel(body, upstreamModel);
   const usesNativeGptEffort = usesKiroNativeGptEffort(body, upstreamModel);
+
+  // NOTE: The Kiro upstream runtime API (runtime.us-east-1.kiro.dev) rejects
+  // both `systemPrompt` and `additionalModelRequestFields` for builder-id accounts:
+  // - systemPrompt → 400 REQUEST_BODY_INVALID (any value, even empty string)
+  // - additionalModelRequestFields → 400 "not supported for this model"
+  // These fields are not sent in the payload. Thinking mode tags are
+  // injected into message content instead.
 
   const { history, currentMessage } = convertMessages(messages, tools, upstreamModel);
 
@@ -628,9 +632,10 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
   if (profileArn) {
     payload.profileArn = profileArn;
   }
-  if (additionalModelRequestFields) {
-    payload.additionalModelRequestFields = additionalModelRequestFields;
-  }
+
+  // NOTE: systemPrompt and additionalModelRequestFields are intentionally NOT sent.
+  // The Kiro upstream runtime API rejects these fields for builder-id accounts.
+  // Thinking tags are injected into message content instead.
 
   if (maxTokens || temperature !== undefined || topP !== undefined) {
     payload.inferenceConfig = {};
@@ -644,6 +649,50 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
     value: upstreamModel,
     enumerable: false
   });
+
+  // Debug: log payload structure for troubleshooting REQUEST_BODY_INVALID
+  if (process.env.DEBUG_KIRO_PAYLOAD) {
+    const historyToolUseIds = new Set();
+    const historyToolResultIds = new Set();
+    for (const h of replay.history || []) {
+      const arm = h?.assistantResponseMessage;
+      if (arm?.toolUses) {
+        for (const tu of arm.toolUses) {
+          if (tu.toolUseId) historyToolUseIds.add(tu.toolUseId);
+        }
+      }
+      const uim = h?.userInputMessage;
+      const ctx = uim?.userInputMessageContext;
+      if (ctx?.toolResults) {
+        for (const tr of ctx.toolResults) {
+          if (tr.toolUseId) historyToolResultIds.add(tr.toolUseId);
+        }
+      }
+    }
+    const currentCtx = replayCurrent?.userInputMessageContext;
+    const currentToolResultIds = new Set();
+    if (currentCtx?.toolResults) {
+      for (const tr of currentCtx.toolResults) {
+        if (tr.toolUseId) currentToolResultIds.add(tr.toolUseId);
+      }
+    }
+    const currentTools = currentCtx?.tools?.length || 0;
+    const allToolUseIds = new Set([...historyToolUseIds]);
+    const orphanedInHistory = [...historyToolResultIds].filter(id => !historyToolUseIds.has(id));
+    const orphanedInCurrent = [...currentToolResultIds].filter(id => !allToolUseIds.has(id));
+
+    console.log('[KIRO-DEBUG] model:', model, '->', upstreamModel);
+    console.log('[KIRO-DEBUG] thinkingBudget:', thinkingBudget);
+    console.log('[KIRO-DEBUG] history items:', replay.history.length);
+    console.log('[KIRO-DEBUG] history toolUse IDs:', [...historyToolUseIds]);
+    console.log('[KIRO-DEBUG] history toolResult IDs:', [...historyToolResultIds]);
+    console.log('[KIRO-DEBUG] currentMessage toolResult IDs:', [...currentToolResultIds]);
+    console.log('[KIRO-DEBUG] currentMessage tools count:', currentTools);
+    console.log('[KIRO-DEBUG] orphaned in history:', orphanedInHistory);
+    console.log('[KIRO-DEBUG] orphaned in current:', orphanedInCurrent);
+    console.log('[KIRO-DEBUG] contentPrefix length:', contentPrefix?.length || 0);
+    console.log('[KIRO-DEBUG] conversationId:', conversationId);
+  }
 
   return payload;
 }

@@ -49,12 +49,16 @@ const COOLDOWN = {
 
 /**
  * Unified error classification rules.
+ * Evaluated only via open-sse/retry (normalizeErrorText + errorTextIncludes):
+ *   const lower = errorText.toLowerCase();
+ *   if (lower.includes(rule.text)) => match
  * Checked top-to-bottom: text rules first (by order), then status rules.
- * Each rule: { text?, status?, cooldownMs?, backoff? }
- *   - text: substring match (case-insensitive) on error message
+ * Each rule: { text?, status?, cooldownMs?, backoff?, retryHttp?, shouldFallback? }
+ *   - text: substring match via lower.includes (case-insensitive)
  *   - status: HTTP status code match
  *   - cooldownMs: fixed cooldown duration
  *   - backoff: true = use exponential backoff (rate limit)
+ *   - retryHttp: same-account HTTP retry before fallback
  */
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
@@ -66,6 +70,8 @@ export const ERROR_RULES = [
   { text: "quota exceeded",           backoff: true },
   { text: "capacity",                 backoff: true },
   { text: "overloaded",               backoff: true },
+  { text: "temporarily unavailable",  backoff: true, retryHttp: true, attempts: 3, delayMs: 2000 },
+  { text: "service unavailable",      backoff: true, retryHttp: true, attempts: 3, delayMs: 2000 },
 
   // --- Status-based rules (fallback when text doesn't match) ---
   { status: 401, cooldownMs: COOLDOWN.long },

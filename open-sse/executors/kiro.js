@@ -126,9 +126,14 @@ async function readResponsePrefix(response, signal, maxBytes, timeoutMs) {
 function appendRepairInstruction(body, kind) {
   const repaired = structuredClone(body || {});
   const instruction = REPAIR_INSTRUCTIONS[kind] || "Retry the previous incomplete Kiro response.";
-  repaired.systemPrompt = repaired.systemPrompt
-    ? `${repaired.systemPrompt}\n\n${instruction}`
-    : instruction;
+  // Inject repair instruction into the message content instead of systemPrompt,
+  // because the Kiro upstream runtime API rejects the systemPrompt field.
+  const cs = repaired.conversationState;
+  if (cs?.currentMessage?.userInputMessage?.content != null) {
+    cs.currentMessage.userInputMessage.content = `${cs.currentMessage.userInputMessage.content}\n\n${instruction}`;
+  } else if (cs?.currentMessage?.userInputMessage) {
+    cs.currentMessage.userInputMessage.content = instruction;
+  }
   return repaired;
 }
 
@@ -311,6 +316,53 @@ export class KiroExecutor extends BaseExecutor {
    * classify the status, and trigger account fallback/cooldown.
    */
   async execute(args) {
+    // Debug: log request body for troubleshooting REQUEST_BODY_INVALID
+    if (process.env.DEBUG_KIRO_PAYLOAD) {
+      const body = args.body;
+      const cs = body?.conversationState;
+      console.log('[KIRO-EXEC] === REQUEST BODY ===');
+      console.log('[KIRO-EXEC] model:', args.model);
+      console.log('[KIRO-EXEC] url:', this.buildUrl(args.model, args.stream, 0, args.credentials));
+      console.log('[KIRO-EXEC] conversationId:', cs?.conversationId);
+      console.log('[KIRO-EXEC] history length:', cs?.history?.length);
+      console.log('[KIRO-EXEC] currentMessage content length:', cs?.currentMessage?.userInputMessage?.content?.length);
+      console.log('[KIRO-EXEC] currentMessage has tools:', !!cs?.currentMessage?.userInputMessage?.userInputMessageContext?.tools);
+      console.log('[KIRO-EXEC] currentMessage tools count:', cs?.currentMessage?.userInputMessage?.userInputMessageContext?.tools?.length);
+      console.log('[KIRO-EXEC] currentMessage has toolResults:', !!cs?.currentMessage?.userInputMessage?.userInputMessageContext?.toolResults);
+      console.log('[KIRO-EXEC] currentMessage toolResults count:', cs?.currentMessage?.userInputMessage?.userInputMessageContext?.toolResults?.length);
+      console.log('[KIRO-EXEC] systemPrompt:', body?.systemPrompt?.substring(0, 200));
+      console.log('[KIRO-EXEC] has additionalModelRequestFields:', !!body?.additionalModelRequestFields);
+      console.log('[KIRO-EXEC] profileArn:', body?.profileArn);
+
+      // Check history structure
+      for (let i = 0; i < (cs?.history?.length || 0); i++) {
+        const h = cs.history[i];
+        const isUser = !!h?.userInputMessage;
+        const isAssistant = !!h?.assistantResponseMessage;
+        const toolUses = h?.assistantResponseMessage?.toolUses?.length || 0;
+        const toolResults = h?.userInputMessage?.userInputMessageContext?.toolResults?.length || 0;
+        console.log(`[KIRO-EXEC] history[${i}]:`, isUser ? 'user' : isAssistant ? 'assistant' : 'unknown', '| toolUses:', toolUses, '| toolResults:', toolResults);
+      }
+
+      // Check for orphaned toolResults
+      const allToolUseIds = new Set();
+      for (const h of cs?.history || []) {
+        for (const tu of h?.assistantResponseMessage?.toolUses || []) {
+          if (tu.toolUseId) allToolUseIds.add(tu.toolUseId);
+        }
+      }
+      const orphanedToolResultIds = [];
+      for (const h of [...(cs?.history || []), cs?.currentMessage]) {
+        for (const tr of h?.userInputMessage?.userInputMessageContext?.toolResults || []) {
+          if (tr.toolUseId && !allToolUseIds.has(tr.toolUseId)) {
+            orphanedToolResultIds.push(tr.toolUseId);
+          }
+        }
+      }
+      console.log('[KIRO-EXEC] orphaned toolResult IDs:', orphanedToolResultIds);
+      console.log('[KIRO-EXEC] === END REQUEST BODY ===');
+    }
+
     const result = await super.execute(args);
     if (result?.response?.ok) this.attachIntegrityGate(result, args);
     return result;

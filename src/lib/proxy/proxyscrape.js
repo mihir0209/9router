@@ -1,6 +1,9 @@
 import { createHash } from "crypto";
 import { testProxyUrl } from "@/lib/network/proxyTest";
 import { getSettings, replaceProxyPoolsBySource, updateSettings } from "@/lib/localDb";
+import { originalFetch } from "../../../open-sse/utils/proxyFetch.js";
+
+const FETCH_TIMEOUT_MS = 30000;
 
 export const PROXYSCRAPE_SOURCE = "proxyscrape";
 
@@ -170,10 +173,26 @@ async function validateProxyList(proxies, config) {
   };
 }
 
-export async function refreshProxyScrapePool({ config, fetchImpl = fetch } = {}) {
+export async function refreshProxyScrapePool({ config, fetchImpl } = {}) {
   const normalized = normalizeProxyScrapeConfig(config || (await getSettings()).proxyscrapeProxyPool);
   const url = buildProxyScrapeUrl(normalized);
-  const res = await fetchImpl(url, { cache: "no-store" });
+
+  // Use original native fetch to bypass env-proxy routing and add a timeout.
+  // The patched global fetch may route through HTTP_PROXY/HTTPS_PROXY which
+  // causes "fetch failed" when the proxy is down.
+  const doFetch = fetchImpl || originalFetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let res;
+  try {
+    res = await doFetch(url, { cache: "no-store", signal: controller.signal });
+  } catch (err) {
+    const cause = err?.cause?.code || err?.name || "";
+    const detail = cause ? ` (${cause})` : "";
+    throw new Error(`ProxyScrape fetch failed${detail}: ${err?.message || err}`);
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     throw new Error(`ProxyScrape returned ${res.status}`);

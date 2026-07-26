@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
 import PropTypes from "prop-types";
-import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal, ConfirmModal } from "@/shared/components";
+import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal, ConfirmModal, RetryRulesEditor } from "@/shared/components";
 
 // ── CooldownTimer ──────────────────────────────────────────────
 function CooldownTimer({ until }) {
@@ -304,6 +304,7 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
   const [selectedConnection, setSelectedConnection] = useState(null);
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("1");
+  const [providerRetry, setProviderRetry] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
 
   const fetch_ = useCallback(async () => {
@@ -321,25 +322,41 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProviderStrategy(override.fallbackStrategy || null);
       setProviderStickyLimit(override.stickyRoundRobinLimit != null ? String(override.stickyRoundRobinLimit) : "1");
+      setProviderRetry(override.retry || null);
     } catch (e) { console.log("ConnectionsCard fetch error:", e); }
     finally { setLoading(false); }
   }, [providerId]);
 
   useEffect(() => { fetch_(); }, [fetch_]);
 
-  const saveStrategy = async (strategy, stickyLimit) => {
+  const saveProviderOverride = async (partial) => {
     try {
       const res = await fetch("/api/settings", { cache: "no-store" });
       const data = res.ok ? await res.json() : {};
       const current = data.providerStrategies || {};
-      const override = {};
-      if (strategy) override.fallbackStrategy = strategy;
-      if (strategy === "round-robin" && stickyLimit !== "") override.stickyRoundRobinLimit = Number(stickyLimit) || 3;
+      const prev = current[providerId] || {};
+      const next = { ...prev, ...partial };
+      if (!next.fallbackStrategy) delete next.fallbackStrategy;
+      if (next.fallbackStrategy !== "round-robin") delete next.stickyRoundRobinLimit;
+      if (!next.retry) delete next.retry;
       const updated = { ...current };
-      if (Object.keys(override).length === 0) delete updated[providerId];
-      else updated[providerId] = override;
+      if (Object.keys(next).length === 0) delete updated[providerId];
+      else updated[providerId] = next;
       await fetch("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ providerStrategies: updated }) });
-    } catch (e) { console.log("saveStrategy error:", e); }
+    } catch (e) { console.log("saveProviderOverride error:", e); }
+  };
+
+  const saveStrategy = async (strategy, stickyLimit) => {
+    const partial = { fallbackStrategy: strategy || null };
+    if (strategy === "round-robin" && stickyLimit !== "") {
+      partial.stickyRoundRobinLimit = Number(stickyLimit) || 3;
+    }
+    await saveProviderOverride(partial);
+  };
+
+  const saveRetry = async (retry) => {
+    setProviderRetry(retry);
+    await saveProviderOverride({ retry: retry || null });
   };
 
   const handleSwapPriority = async (i1, i2) => {
@@ -425,6 +442,10 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
               </div>
             )}
           </div>
+        </div>
+
+        <div className="mb-4">
+          <RetryRulesEditor value={providerRetry} onChange={saveRetry} />
         </div>
 
         {connections.length === 0 ? (

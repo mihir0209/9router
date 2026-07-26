@@ -178,6 +178,18 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       { provider: providerId, model, quarantine: await getProxyPoolQuarantine() }
     );
 
+    // Settings retry wins over connection/node retry; BaseExecutor reads credentials.providerSpecificData.retry
+    const effectiveRetry = providerOverride.retry ?? connection.providerSpecificData?.retry;
+    const providerSpecificData = {
+      ...(connection.providerSpecificData || {}),
+      connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
+      connectionProxyUrl: resolvedProxy.connectionProxyUrl,
+      connectionNoProxy: resolvedProxy.connectionNoProxy,
+      connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
+      vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+    };
+    if (effectiveRetry) providerSpecificData.retry = effectiveRetry;
+
     return {
       authType: connection.authType,
       apiKey: connection.apiKey,
@@ -235,7 +247,17 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     cooldownMs = Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
     newBackoffLevel = 0;
   } else {
-    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel));
+    let settingsOverride = null;
+    try {
+      const settings = await getSettings();
+      settingsOverride = (settings.providerStrategies || {})[provider || conn?.provider]?.retry || null;
+    } catch { /* ignore */ }
+    const credentials = conn?.providerSpecificData
+      ? { providerSpecificData: conn.providerSpecificData }
+      : null;
+    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(
+      status, errorText, backoffLevel, provider || conn?.provider, credentials, settingsOverride
+    ));
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 
