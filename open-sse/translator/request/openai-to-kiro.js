@@ -551,19 +551,35 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
 
   const timestamp = new Date().toISOString();
 
-  // Kiro CLI/KAS sends these as top-level systemPrompt. Keep a content fallback
-  // too because the CodeWhisperer surface does not always enforce top-level
-  // systemPrompt for direct calls.
-  const systemPromptParts = [];
-  if (thinkingBudget !== null && !usesNativeGptEffort) {
-    systemPromptParts.push(buildThinkingSystemPrefix(thinkingBudget));
-  }
-  if (agentic) {
-    systemPromptParts.push(KIRO_AGENTIC_SYSTEM_PROMPT);
-  }
-  const systemPrompt = systemPromptParts.filter(Boolean).join("\n\n");
+  // Kiro CLI/KAS sends system prompt as top-level `systemPrompt`, but the
+  // runtime API rejects it for builder-id accounts. We always inject into
+  // user message content instead.
+  
+  // Kiro agentic prompt injection mode: "always", "once", or "never"
+  // - "always": inject into currentContentPrefix (every turn)
+  // - "once": inject into contentPrefix (frozen in first message by session replay)
+  // - "never": don't inject custom prompt
+  const agenticPromptMode = credentials?.providerSpecificData?.kiroAgenticPromptMode || "always";
+  const shouldInjectAgentic = agentic && agenticPromptMode !== "never";
+  
   const currentTimeContext = `[Context: Current time is ${timestamp}]`;
-  const contentPrefix = [systemPrompt, currentTimeContext].filter(Boolean).join("\n\n");
+  
+  // contentPrefix: frozen into first message by session replay
+  const contentPrefixParts = [];
+  if (thinkingBudget !== null && !usesNativeGptEffort) {
+    contentPrefixParts.push(buildThinkingSystemPrefix(thinkingBudget));
+  }
+  if (shouldInjectAgentic && agenticPromptMode === "once") {
+    contentPrefixParts.push(KIRO_AGENTIC_SYSTEM_PROMPT);
+  }
+  const contentPrefix = [...contentPrefixParts, currentTimeContext].filter(Boolean).join("\n\n");
+  
+  // currentContentPrefix: applied to every turn
+  const currentContentPrefixParts = [];
+  if (shouldInjectAgentic && agenticPromptMode === "always") {
+    currentContentPrefixParts.push(KIRO_AGENTIC_SYSTEM_PROMPT);
+  }
+  const currentContentPrefix = [...currentContentPrefixParts, currentTimeContext].filter(Boolean).join("\n\n");
 
   const sessionIdentity = resolveSessionIdentity({ headers: credentials?.rawHeaders, body, connectionId: credentials?.connectionId, scope: "kiro" });
   const conversationId = sessionIdentity.sessionId;
@@ -577,9 +593,9 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
     conversationId,
     connectionId: credentials?.connectionId,
     modelId: upstreamModel,
-    systemPrompt,
+    systemPrompt: "",  // Not sent in payload; use contentPrefix for injection
     contentPrefix,
-    currentContentPrefix: currentTimeContext,
+    currentContentPrefix,
     history,
     currentMessage,
   });
@@ -612,7 +628,6 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
   if (profileArn) {
     payload.profileArn = profileArn;
   }
-  if (systemPrompt) payload.systemPrompt = systemPrompt;
   if (additionalModelRequestFields) {
     payload.additionalModelRequestFields = additionalModelRequestFields;
   }

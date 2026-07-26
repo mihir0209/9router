@@ -66,6 +66,7 @@ export default function ProviderDetailPage() {
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
   const [thinkingMode, setThinkingMode] = useState("auto");
+  const [kiroAgenticPromptMode, setKiroAgenticPromptMode] = useState("always");
   const [autoPing, setAutoPing] = useState({ enabled: false, connections: {} });
   const [suggestedModels, setSuggestedModels] = useState([]);
   const [liveModels, setLiveModels] = useState([]);
@@ -341,6 +342,10 @@ export default function ProviderDetailPage() {
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProviderStrategy(override.fallbackStrategy || null);
       setProviderStickyLimit(override.stickyRoundRobinLimit != null ? String(override.stickyRoundRobinLimit) : "1");
+      // Load Kiro-specific agentic prompt mode
+      if (providerId === "kiro") {
+        setKiroAgenticPromptMode(override.kiroAgenticPromptMode || "always");
+      }
       // Load per-provider thinking config
       const thinkingCfg = (settingsData.providerThinking || {})[providerId] || {};
       setThinkingMode(thinkingCfg.mode || "auto");
@@ -457,6 +462,25 @@ export default function ProviderDetailPage() {
   const handleThinkingModeChange = (mode) => {
     setThinkingMode(mode);
     saveThinkingConfig(mode);
+  };
+
+  const handleKiroAgenticPromptModeChange = async (mode) => {
+    setKiroAgenticPromptMode(mode);
+    try {
+      const settingsRes = await fetch("/api/settings", { cache: "no-store" });
+      const settingsData = settingsRes.ok ? await settingsRes.json() : {};
+      const current = settingsData.providerStrategies || {};
+      const updated = { ...current };
+      if (!updated[providerId]) updated[providerId] = {};
+      updated[providerId].kiroAgenticPromptMode = mode;
+      await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerStrategies: updated }),
+      });
+    } catch (error) {
+      console.log("Error saving Kiro agentic prompt mode:", error);
+    }
   };
 
   const saveAutoPing = async (next) => {
@@ -1682,6 +1706,39 @@ export default function ProviderDetailPage() {
               )}
             </>
           )}
+        </Card>
+      )}
+
+      {/* Kiro-specific settings - single dropdown at top */}
+      {providerId === "kiro" && connections.length > 0 && (
+        <Card>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-primary/10 text-primary shrink-0">
+                <span className="material-symbols-outlined text-[18px]">settings</span>
+              </div>
+              <div>
+                <h2 className="text-sm font-semibold">Agentic Prompt Mode</h2>
+                <p className="text-xs text-text-muted">Configure how 9Router's custom prompt is injected for Kiro requests</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                value={kiroAgenticPromptMode}
+                onChange={(e) => handleKiroAgenticPromptModeChange(e.target.value)}
+                className="px-3 py-2 text-sm border border-border rounded-md bg-background focus:outline-none focus:border-primary"
+              >
+                <option value="always">Always (every message)</option>
+                <option value="once">Once per session (first message only)</option>
+                <option value="never">Never (user system prompt only)</option>
+              </select>
+            </div>
+          </div>
+          <div className="mt-3 text-xs text-text-muted">
+            {kiroAgenticPromptMode === "always" && "Custom 9Router prompt for fixing delays (chunked protocol) is injected on every message"}
+            {kiroAgenticPromptMode === "once" && "Custom prompt is injected only once at session start, then cached for prompt cacheability"}
+            {kiroAgenticPromptMode === "never" && "No custom prompt injection, only user's system prompt is used"}
+          </div>
         </Card>
       )}
 

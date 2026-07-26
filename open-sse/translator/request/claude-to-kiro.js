@@ -419,20 +419,39 @@ export function claudeToKiroRequest(model, body, stream, credentials) {
     ? (credentials?.providerSpecificData?.profileArn || "")
     : (credentials?.providerSpecificData?.profileArn || resolveDefaultProfileArn(authMethod));
 
-  // Kiro CLI/KAS sends system prompt as top-level `systemPrompt`. Keep a
-  // content fallback too because the CodeWhisperer surface does not always
-  // enforce top-level systemPrompt for direct calls.
+  // Kiro CLI/KAS sends system prompt as top-level `systemPrompt`, but the
+  // runtime API rejects it for builder-id accounts. We always inject into
+  // user message content instead.
   const timestamp = new Date().toISOString();
-  const systemPromptParts = [];
-  if (thinkingBudget !== null && !usesNativeGptEffort) {
-    systemPromptParts.push(buildThinkingSystemPrefix(thinkingBudget));
-  }
-  if (agentic) systemPromptParts.push(KIRO_AGENTIC_SYSTEM_PROMPT);
-  const systemInstruction = extractClaudeSystemText(body.system);
-  if (systemInstruction) systemPromptParts.push(systemInstruction);
-  const systemPrompt = systemPromptParts.filter(Boolean).join("\n\n");
+  
+  // Kiro agentic prompt injection mode: "always", "once", or "never"
+  // - "always": inject into currentContentPrefix (every turn)
+  // - "once": inject into contentPrefix (frozen in first message by session replay)
+  // - "never": don't inject custom prompt
+  const agenticPromptMode = credentials?.providerSpecificData?.kiroAgenticPromptMode || "always";
+  const shouldInjectAgentic = agentic && agenticPromptMode !== "never";
+  
   const currentTimeContext = `[Context: Current time is ${timestamp}]`;
-  const contentPrefix = [systemPrompt, currentTimeContext].filter(Boolean).join("\n\n");
+  
+  // contentPrefix: frozen into first message by session replay
+  // Includes thinking prefix and user's system instruction
+  const contentPrefixParts = [];
+  if (thinkingBudget !== null && !usesNativeGptEffort) {
+    contentPrefixParts.push(buildThinkingSystemPrefix(thinkingBudget));
+  }
+  const systemInstruction = extractClaudeSystemText(body.system);
+  if (systemInstruction) contentPrefixParts.push(systemInstruction);
+  if (shouldInjectAgentic && agenticPromptMode === "once") {
+    contentPrefixParts.push(KIRO_AGENTIC_SYSTEM_PROMPT);
+  }
+  const contentPrefix = [...contentPrefixParts, currentTimeContext].filter(Boolean).join("\n\n");
+  
+  // currentContentPrefix: applied to every turn
+  const currentContentPrefixParts = [];
+  if (shouldInjectAgentic && agenticPromptMode === "always") {
+    currentContentPrefixParts.push(KIRO_AGENTIC_SYSTEM_PROMPT);
+  }
+  const currentContentPrefix = [...currentContentPrefixParts, currentTimeContext].filter(Boolean).join("\n\n");
 
   const sessionIdentity = resolveSessionIdentity({
     headers: credentials?.rawHeaders,
@@ -451,9 +470,9 @@ export function claudeToKiroRequest(model, body, stream, credentials) {
     conversationId,
     connectionId: credentials?.connectionId,
     modelId: upstreamModel,
-    systemPrompt,
+    systemPrompt: "",  // Not sent in payload; use contentPrefix for injection
     contentPrefix,
-    currentContentPrefix: currentTimeContext,
+    currentContentPrefix,
     history,
     currentMessage,
   });
@@ -485,7 +504,6 @@ export function claudeToKiroRequest(model, body, stream, credentials) {
   };
 
   if (profileArn) payload.profileArn = profileArn;
-  if (systemPrompt) payload.systemPrompt = systemPrompt;
   if (additionalModelRequestFields) {
     payload.additionalModelRequestFields = additionalModelRequestFields;
   }
