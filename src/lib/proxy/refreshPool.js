@@ -9,7 +9,7 @@ import { replaceProxyPoolsBySource, getSettings, updateSettings } from "@/lib/lo
  * @returns {{ config, importedCount, firstProxy, validationSummary }}
  */
 export async function refreshProviderPool(providerId, config) {
-  const provider = getProvider(providerId);
+  const provider = await getProvider(providerId);
   if (!provider) throw new Error(`Unknown provider: ${providerId}`);
 
   const normalized = provider.normalizeConfig(config);

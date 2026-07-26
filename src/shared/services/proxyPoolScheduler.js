@@ -30,7 +30,7 @@ export async function runProxyPoolSchedulerTick() {
       if (!isDue(config)) continue;
 
       try {
-        const provider = getProvider(providerId);
+        const provider = await getProvider(providerId);
         if (!provider) continue;
 
         const result = await refreshProviderPool(providerId, config);

@@ -8,7 +8,7 @@ import { getProviderConfigs, updateProviderConfig, refreshProviderPool, refreshA
  */
 export async function GET() {
   try {
-    const providers = getAllProviders();
+    const providers = await getAllProviders();
     const configs = await getProviderConfigs();
 
     const result = providers.map((p) => ({

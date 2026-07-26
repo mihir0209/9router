@@ -9,7 +9,7 @@ import { getProviderConfigs, updateProviderConfig } from "@/lib/proxy/refreshPoo
 export async function GET(_req, { params }) {
   try {
     const { id } = params;
-    const provider = getProvider(id);
+    const provider = await getProvider(id);
     if (!provider) return NextResponse.json({ error: "Unknown provider" }, { status: 404 });
 
     const configs = await getProviderConfigs();
@@ -36,7 +36,7 @@ export async function GET(_req, { params }) {
 export async function PUT(req, { params }) {
   try {
     const { id } = params;
-    const provider = getProvider(id);
+    const provider = await getProvider(id);
     if (!provider) return NextResponse.json({ error: "Unknown provider" }, { status: 404 });
 
     const body = await req.json();
