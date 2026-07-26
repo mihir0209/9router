@@ -108,6 +108,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Per-provider strategy overrides global setting
     const providerOverride = (settings.providerStrategies || {})[providerId] || {};
     const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
+    
+    // Kiro-specific: agentic prompt injection mode (provider-level setting)
+    const kiroAgenticPromptMode = providerOverride.kiroAgenticPromptMode || "always";
 
     let connection;
     // Pin to preferred connection if specified and available
@@ -184,6 +187,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connectionNoProxy: resolvedProxy.connectionNoProxy,
         connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
         vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+        // Include provider-level kiroAgenticPromptMode setting
+        kiroAgenticPromptMode: providerId === "kiro" ? kiroAgenticPromptMode : undefined,
       },
       connectionId: connection.id,
       // Include current status for optimization check
