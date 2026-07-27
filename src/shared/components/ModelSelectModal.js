@@ -217,7 +217,7 @@ export default function ModelSelectModal({
 
       if (providerInfo.passthroughModels) {
         const aliasModels = Object.entries(modelAliases)
-          .filter(([, fullModel]) => fullModel.startsWith(`${alias}/`))
+          .filter(([, fullModel]) => typeof fullModel === "string" && fullModel.startsWith(`${alias}/`))
           .map(([aliasName, fullModel]) => ({
             id: fullModel.replace(`${alias}/`, ""),
             name: aliasName,
