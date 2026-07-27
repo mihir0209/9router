@@ -890,7 +890,7 @@ export default function ProxyPoolsPage() {
 
       {/* Provider Config Modal */}
       {providerConfigModal && (
-        <Modal onClose={() => setProviderConfigModal(null)} title={`Configure ${providerConfigModal.name}`}>
+        <Modal isOpen={true} onClose={() => setProviderConfigModal(null)} title={`Configure ${providerConfigModal.name}`}>
           <div className="flex flex-col gap-3">
             {providerConfigModal.configFields?.map((field) => (
               <label key={field.name} className="flex flex-col gap-1.5">

@@ -31,6 +31,7 @@ export default function ModelSelectModal({
   modelAliases = {},
   kindFilter = null,
   addedModelValues = [],
+  excludeModelValues = [],
   closeOnSelect = true,
 }) {
   // Filter activeProviders by serviceKinds when kindFilter set (e.g. "webSearch", "webFetch")
@@ -403,10 +404,13 @@ export default function ModelSelectModal({
     return combos.filter(c => c.name.toLowerCase().includes(query));
   }, [combos, searchQuery, kindFilter]);
 
-  // Sort models alphabetically, with added models floated to top
+  // Sort models alphabetically, with added models floated to top; exclude models in excludeModelValues
   const sortModels = (models) => {
-    const added = models.filter(m => addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
-    const rest = models.filter(m => !addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
+    const available = excludeModelValues.length > 0
+      ? models.filter(m => !excludeModelValues.includes(m.value))
+      : models;
+    const added = available.filter(m => addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
+    const rest = available.filter(m => !addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
     return [...added, ...rest];
   };
 
@@ -433,7 +437,7 @@ export default function ModelSelectModal({
     });
 
     return filtered;
-  }, [groupedModels, searchQuery, addedModelValues]);
+  }, [groupedModels, searchQuery, addedModelValues, excludeModelValues]);
 
   const handleSelect = (model) => {
     const value = model?.value || model?.name || model;

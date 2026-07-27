@@ -43,7 +43,7 @@ registerProvider({
   },
   async fetch(config) {
     const normalized = this.normalizeConfig(config);
-    const url = `https://stormsia.github.io/proxy-list/list_${normalized.protocol}.txt`;
+    const url = `https://raw.githubusercontent.com/stormsia/proxy-list/main/${normalized.protocol}.txt`;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);

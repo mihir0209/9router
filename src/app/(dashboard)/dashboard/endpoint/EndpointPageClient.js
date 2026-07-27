@@ -1724,6 +1724,7 @@ export default function APIPageClient({ machineId }) {
         activeProviders={activeProviders}
         modelAliases={modelAliases}
         addedModelValues={keyForm.allowedModels ? keyForm.allowedModels.split(",").map(s => s.trim()).filter(Boolean) : []}
+        excludeModelValues={keyForm.blockedModels ? keyForm.blockedModels.split(",").map(s => s.trim()).filter(Boolean) : []}
         title="Select Allowed Models"
         closeOnSelect={false}
       />
@@ -1748,6 +1749,7 @@ export default function APIPageClient({ machineId }) {
         activeProviders={activeProviders}
         modelAliases={modelAliases}
         addedModelValues={keyForm.blockedModels ? keyForm.blockedModels.split(",").map(s => s.trim()).filter(Boolean) : []}
+        excludeModelValues={keyForm.allowedModels ? keyForm.allowedModels.split(",").map(s => s.trim()).filter(Boolean) : []}
         title="Select Blocked Models"
         closeOnSelect={false}
       />
