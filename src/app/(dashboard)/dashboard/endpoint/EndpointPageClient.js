@@ -298,7 +298,7 @@ export default function APIPageClient({ machineId }) {
       ]);
       const providersData = await providersRes.json();
       const aliasesData = await aliasesRes.json();
-      if (providersRes.ok) setActiveProviders(providersData.activeProviders || providersData || []);
+      if (providersRes.ok) setActiveProviders(providersData.connections || providersData.activeProviders || []);
       if (aliasesRes.ok) setModelAliases(aliasesData || {});
     } catch (error) {
       console.log("Error fetching data:", error);

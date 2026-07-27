@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getProvider, getAllProviders } from "@/lib/proxy/providers/registry.js";
+import { getProvider } from "@/lib/proxy/providers/registry.js";
 import { getProviderConfigs, updateProviderConfig } from "@/lib/proxy/refreshPool.js";
 
 /**
@@ -8,7 +8,7 @@ import { getProviderConfigs, updateProviderConfig } from "@/lib/proxy/refreshPoo
  */
 export async function GET(_req, { params }) {
   try {
-    const { id } = params;
+    const { id } = await params;
     const provider = await getProvider(id);
     if (!provider) return NextResponse.json({ error: "Unknown provider" }, { status: 404 });
 
@@ -35,7 +35,7 @@ export async function GET(_req, { params }) {
  */
 export async function PUT(req, { params }) {
   try {
-    const { id } = params;
+    const { id } = await params;
     const provider = await getProvider(id);
     if (!provider) return NextResponse.json({ error: "Unknown provider" }, { status: 404 });
 
@@ -55,7 +55,7 @@ export async function PUT(req, { params }) {
  */
 export async function DELETE(_req, { params }) {
   try {
-    const { id } = params;
+    const { id } = await params;
     const configs = await getProviderConfigs();
     if (configs[id]) {
       configs[id].enabled = false;

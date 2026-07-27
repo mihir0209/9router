@@ -8,7 +8,7 @@ import { getProviderConfigs, refreshProviderPool } from "@/lib/proxy/refreshPool
  */
 export async function POST(_req, { params }) {
   try {
-    const { id } = params;
+    const { id } = await params;
     const provider = await getProvider(id);
     if (!provider) return NextResponse.json({ error: "Unknown provider" }, { status: 404 });
 

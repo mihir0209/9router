@@ -32,6 +32,7 @@ import {
   buildThinkingSystemPrefix,
   resolveDefaultProfileArn,
   usesKiroNativeGptEffort,
+  KIRO_AGENTIC_SYSTEM_PROMPT,
 } from "../../config/kiroConstants.js";
 import { DEFAULT_IMAGE_MIME } from "../schema/index.js";
 import { ROLE, CLAUDE_BLOCK } from "../schema/index.js";
