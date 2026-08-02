@@ -101,7 +101,19 @@ describe("Claude → Kiro (direct route)", () => {
     expect(contentOf(out)).toContain("<max_thinking_length>24576</max_thinking_length>");
   });
 
-  it("does not send additionalModelRequestFields for effort models", () => {
+  it("normalizes an unsupported Kiro intensity suffix while preserving agentic behavior", () => {
+    const out = C2K(
+      { messages: [{ role: "user", content: "hello" }] },
+      null,
+      "claude-sonnet-4.5-thinking-agentic(high)",
+    );
+
+    expect(out.conversationState.currentMessage.userInputMessage.modelId).toBe("claude-sonnet-4.5");
+    expect(out.additionalModelRequestFields).toBeUndefined();
+    expect(out.systemPrompt).toContain("CHUNKED WRITE PROTOCOL");
+  });
+
+  it("maps output_config.effort high to Kiro CLI-style additionalModelRequestFields for effort models", () => {
     const out = C2K({
       output_config: { effort: "high" },
       messages: [{ role: "user", content: "think with adaptive effort" }],
