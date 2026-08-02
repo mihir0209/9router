@@ -394,6 +394,35 @@ export default function ProxyPoolsPage() {
     }
   };
 
+  const handleRemoveDead = async () => {
+    const inactive = proxyPools.filter(p => !p.isActive);
+    if (inactive.length === 0) {
+      notify.info("No inactive proxies to remove");
+      return;
+    }
+    setConfirmState({
+      title: "Remove Dead Proxies",
+      message: `This will permanently delete ${inactive.length} inactive proxy entries.\n\nThis cannot be undone.`,
+      onConfirm: async () => {
+        setConfirmState(null);
+        setBulkBusy(true);
+        try {
+          let deleted = 0;
+          for (const pool of inactive) {
+            try {
+              const res = await fetch(`/api/proxy-pools/${pool.id}`, { method: "DELETE" });
+              if (res.ok) deleted++;
+            } catch {}
+          }
+          await fetchProxyPools();
+          notify.success(`Removed ${deleted} dead proxies`);
+        } finally {
+          setBulkBusy(false);
+        }
+      }
+    });
+  };
+
   // Cleanup selectedIds when pools change
   useEffect(() => {
     setSelectedIds((prev) => prev.filter((id) => proxyPools.some((p) => p.id === id)));
@@ -981,6 +1010,15 @@ export default function ProxyPoolsPage() {
                 disabled={healthChecking || bulkBusy || proxyPools.length === 0}
               >
                 {healthChecking ? `Checking ${healthProgress.current}/${healthProgress.total}` : "Health Check"}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon="delete_sweep"
+                onClick={handleRemoveDead}
+                disabled={healthChecking || bulkBusy || proxyPools.filter(p => !p.isActive).length === 0}
+              >
+                Remove Dead
               </Button>
               {selectedIds.length > 0 && (
                 <>

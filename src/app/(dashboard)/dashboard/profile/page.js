@@ -9,6 +9,7 @@ import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG } from "@/shared/constants/config";
 import { LOCALE_COOKIE, normalizeLocale } from "@/i18n/config";
 import { LOCALE_FLAGS } from "@/shared/constants/locales";
+import { validateBackup, previewMerge, mergeBackups } from "@/lib/db/mergeBackups";
 
 function getLocaleFromCookie() {
   if (typeof document === "undefined") return "en";
@@ -49,6 +50,10 @@ export default function ProfilePage() {
   const [oidcRedirectUri, setOidcRedirectUri] = useState("/api/auth/oidc/callback");
   const [oidcExpanded, setOidcExpanded] = useState(false);
   const importFileRef = useRef(null);
+  const mergeFileRef = useRef(null);
+  const pendingMergeRef = useRef(null);
+  const [mergePreview, setMergePreview] = useState(null);
+  const [mergeStrategy, setMergeStrategy] = useState("newer-wins");
   const [proxyForm, setProxyForm] = useState({
     outboundProxyEnabled: false,
     outboundProxyUrl: "",
@@ -542,12 +547,68 @@ export default function ProfilePage() {
     }
   };
 
-  // Confirm password modal, then run export or import.
+  const handleMergeFileSelect = async (event) => {
+    const file = event.target.files?.[0];
+    if (mergeFileRef.current) mergeFileRef.current.value = "";
+    if (!file) return;
+    setDbStatus({ type: "", message: "" });
+    try {
+      const raw = await file.text();
+      const incoming = JSON.parse(raw);
+      const error = validateBackup(incoming);
+      if (error) {
+        setDbStatus({ type: "error", message: `Invalid backup: ${error}` });
+        return;
+      }
+      pendingMergeRef.current = incoming;
+      setDbAuth({ open: true, mode: "merge", password: "" });
+    } catch {
+      setDbStatus({ type: "error", message: "Failed to parse backup file" });
+    }
+  };
+
+  const runMergeDatabase = async (password) => {
+    const incoming = pendingMergeRef.current;
+    if (!incoming) return;
+    setDbLoading(true);
+    try {
+      const baseRes = await fetch("/api/settings/database", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "export", password }),
+      });
+      if (!baseRes.ok) throw new Error("Failed to load current database");
+      const base = await baseRes.json();
+
+      const preview = previewMerge(base, incoming, mergeStrategy);
+      setMergePreview(preview);
+
+      const merged = mergeBackups(base, incoming, mergeStrategy);
+      const res = await fetch("/api/settings/database", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...merged, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to import merged database");
+
+      await reloadSettings();
+      setDbStatus({ type: "success", message: `Merge complete: ${preview.added} added, ${preview.updated} updated, ${preview.unchanged} unchanged` });
+    } catch (err) {
+      setDbStatus({ type: "error", message: err.message || "Merge failed" });
+    } finally {
+      pendingMergeRef.current = null;
+      setDbLoading(false);
+    }
+  };
+
+  // Confirm password modal, then run export, import, or merge.
   const handleDbAuthConfirm = async () => {
     const { mode, password } = dbAuth;
     setDbAuth({ open: false, mode: "", password: "" });
     if (mode === "export") await handleExportDatabase(password);
     else if (mode === "import") await runImportDatabase(password);
+    else if (mode === "merge") await runMergeDatabase(password);
   };
 
   const observabilityEnabled = settings.enableObservability === true;
@@ -636,12 +697,28 @@ export default function ProfilePage() {
               >
                 Import Backup
               </Button>
+              <Button
+                variant="outline"
+                icon="merge"
+                onClick={() => mergeFileRef.current?.click()}
+                disabled={dbLoading}
+                className="w-full sm:w-auto"
+              >
+                Merge Backup
+              </Button>
               <input
                 ref={importFileRef}
                 type="file"
                 accept="application/json,.json"
                 className="hidden"
                 onChange={handleImportDatabase}
+              />
+              <input
+                ref={mergeFileRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={handleMergeFileSelect}
               />
             </div>
             {dbStatus.message && (
@@ -1166,8 +1243,20 @@ export default function ProfilePage() {
         }
       >
         <p className="text-text-muted mb-3 text-sm">
-          Enter your current password to {dbAuth.mode === "export" ? "export" : "import"} the database.
+          Enter your current password to {dbAuth.mode === "export" ? "export" : dbAuth.mode === "merge" ? "merge" : "import"} the database.
         </p>
+        {dbAuth.mode === "merge" && (
+          <div className="mb-3">
+            <label className="block text-sm font-medium mb-1">Conflict Strategy</label>
+            <select value={mergeStrategy} onChange={e => setMergeStrategy(e.target.value)}
+              className="w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm">
+              <option value="newer-wins">Newer Wins (recommended)</option>
+              <option value="incoming-wins">Incoming Wins (overwrite)</option>
+              <option value="base-wins">Keep Current</option>
+              <option value="older-wins">Older Wins</option>
+            </select>
+          </div>
+        )}
         <Input
           type="password"
           value={dbAuth.password}
