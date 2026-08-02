@@ -82,6 +82,12 @@ export class DefaultExecutor extends BaseExecutor {
     super(provider, PROVIDERS[provider] || PROVIDERS.openai);
   }
 
+  // Newer OpenAI models (gpt-5+, o1, o3, o4) require max_completion_tokens instead of max_tokens.
+  // This also covers Azure OpenAI which enforces this for the same model families.
+  requiresMaxCompletionTokens(model) {
+    return /gpt-5|o[134]-/i.test(model);
+  }
+
   transformRequest(model, body) {
     const transformed = this.applyJsonSchemaFallback(body);
 
@@ -89,6 +95,11 @@ export class DefaultExecutor extends BaseExecutor {
       // quirk: some openai-compatible providers reject Anthropic's client_metadata field
       if (this.config.quirks?.dropClientMetadata) {
         delete transformed.client_metadata;
+      }
+      // Azure OpenAI and newer OpenAI models require max_completion_tokens instead of max_tokens
+      if (this.requiresMaxCompletionTokens(model) && transformed.max_tokens !== undefined) {
+        transformed.max_completion_tokens = transformed.max_tokens;
+        delete transformed.max_tokens;
       }
       stripUnsupportedParams(this.provider, model, transformed);
     }
