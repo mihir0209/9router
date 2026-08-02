@@ -52,6 +52,6 @@ export class AzureExecutor extends DefaultExecutor {
   }
 
   transformRequest(model, body, stream, credentials) {
-    return body;
+    return super.transformRequest(model, body, stream, credentials);
   }
 }
