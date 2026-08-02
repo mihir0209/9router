@@ -15,6 +15,7 @@ import {
   resolveDefaultProfileArn,
   usesKiroNativeGptEffort,
   KIRO_AGENTIC_SYSTEM_PROMPT,
+  buildKiroAdditionalModelRequestFieldsForModel,
 } from "../../config/kiroConstants.js";
 import { parseDataUri } from "../concerns/image.js";
 import { DEFAULT_IMAGE_MIME } from "../schema/index.js";
