@@ -113,6 +113,32 @@ describe("claudeHeaderCache", () => {
     expect(cached["x-stainless-os"]).toBeUndefined();
     expect(cached["user-agent"]).toBe("claude-code/2.1.63");
   });
+
+  it("filters Claude identity headers while preserving protocol capabilities", () => {
+    const headers = {
+      "User-Agent": "claude-cli/2.1.221 (external, cli)",
+      "X-Claude-Code-Session-Id": "session-id",
+      "x-stainless-runtime": "node",
+      "X-Stainless-Os": "Linux",
+      "x-app": "cli",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "Anthropic-Version": "2023-06-01",
+      "Anthropic-Beta": "claude-code-20250219,interleaved-thinking-2025-05-14",
+      "Content-Type": "application/json",
+    };
+
+    cacheModule.filterClaudeIdentityHeaders(headers);
+
+    expect(headers["User-Agent"]).toBeUndefined();
+    expect(headers["X-Claude-Code-Session-Id"]).toBeUndefined();
+    expect(headers["x-stainless-runtime"]).toBeUndefined();
+    expect(headers["X-Stainless-Os"]).toBeUndefined();
+    expect(headers["x-app"]).toBeUndefined();
+    expect(headers["anthropic-dangerous-direct-browser-access"]).toBeUndefined();
+    expect(headers["Anthropic-Version"]).toBe("2023-06-01");
+    expect(headers["Anthropic-Beta"]).toBe("interleaved-thinking-2025-05-14");
+    expect(headers["Content-Type"]).toBe("application/json");
+  });
 });
 
 // ─── DefaultExecutor.buildHeaders() ──────────────────────────────────────────
@@ -197,6 +223,23 @@ describe("DefaultExecutor.buildHeaders() — claude provider", () => {
     const executor = new DefaultExecutor("claude");
     const headers = executor.buildHeaders({ apiKey: "k" }, false);
     expect(headers["Accept"]).toBeUndefined();
+  });
+
+  it("removes Claude identity headers when filtering is enabled", () => {
+    const executor = new DefaultExecutor("claude");
+    const headers = executor.buildHeaders({
+      apiKey: "sk-test",
+      filterClaudeIdentityHeaders: true,
+    }, true);
+
+    expect(headers["user-agent"]).toBeUndefined();
+    expect(headers["x-app"]).toBeUndefined();
+    expect(headers["x-stainless-runtime"]).toBeUndefined();
+    expect(headers["anthropic-dangerous-direct-browser-access"]).toBeUndefined();
+    expect(headers["anthropic-version"]).toBe("2023-06-01");
+    expect(headers["anthropic-beta"]).toContain("interleaved-thinking-2025-05-14");
+    expect(headers["anthropic-beta"]).not.toContain("claude-code-20250219");
+    expect(headers["x-api-key"]).toBe("sk-test");
   });
 });
 

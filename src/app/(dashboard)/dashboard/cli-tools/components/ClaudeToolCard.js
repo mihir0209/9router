@@ -49,6 +49,7 @@ export default function ClaudeToolCard({
   const [showManualConfigModal, setShowManualConfigModal] = useState(false);
   const [customBaseUrl, setCustomBaseUrl] = useState("");
   const [ccFilterNaming, setCcFilterNaming] = useState(false);
+  const [filterClaudeIdentityHeaders, setFilterClaudeIdentityHeaders] = useState(false);
   const [exaMcpEnabled, setExaMcpEnabled] = useState(false);
   const [maxContextTokens, setMaxContextTokens] = useState("");
   const hasInitializedModels = useRef(false);
@@ -91,6 +92,7 @@ export default function ClaudeToolCard({
   useEffect(() => {
     fetch("/api/settings").then(r => r.json()).then(data => {
       setCcFilterNaming(!!data.ccFilterNaming);
+      setFilterClaudeIdentityHeaders(!!data.filterClaudeIdentityHeaders);
     }).catch(() => {});
   }, []);
 
@@ -101,6 +103,16 @@ export default function ClaudeToolCard({
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ccFilterNaming: value }),
+    }).catch(() => {});
+  };
+
+  const handleHeaderFilterToggle = async (e) => {
+    const value = e.target.checked;
+    setFilterClaudeIdentityHeaders(value);
+    await fetch("/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filterClaudeIdentityHeaders: value }),
     }).catch(() => {});
   };
 
@@ -387,6 +399,19 @@ export default function ClaudeToolCard({
                     <input type="checkbox" checked={ccFilterNaming} onChange={handleCcFilterNamingToggle} className="w-3.5 h-3.5 accent-primary cursor-pointer" />
                     <span className="text-xs text-text-muted">Filter naming requests</span>
                     <Tooltip text="Intercepts Claude Code's topic-naming requests and returns a fake response locally, saving API tokens.">
+                      <span className="material-symbols-outlined text-text-muted text-[14px] cursor-help">info</span>
+                    </Tooltip>
+                  </label>
+                </div>
+
+                {/* Claude client identity header filter */}
+                <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr_auto] sm:items-center sm:gap-2">
+                  <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Header privacy</span>
+                  <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
+                  <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input type="checkbox" checked={filterClaudeIdentityHeaders} onChange={handleHeaderFilterToggle} className="w-3.5 h-3.5 accent-primary cursor-pointer" />
+                    <span className="text-xs text-text-muted">Remove Claude identity headers</span>
+                    <Tooltip text="Removes Claude Code client fingerprint headers before forwarding to providers. Required API protocol headers are preserved.">
                       <span className="material-symbols-outlined text-text-muted text-[14px] cursor-help">info</span>
                     </Tooltip>
                   </label>

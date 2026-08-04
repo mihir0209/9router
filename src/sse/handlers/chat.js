@@ -24,6 +24,7 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { classifyProxyFailure, quarantineProxyPool } from "@/lib/proxy/quarantine";
+import { stripRequestUser } from "@/lib/requestPrivacy.js";
 
 /**
  * Handle chat completion request
@@ -80,6 +81,8 @@ export async function handleChat(request, clientRawRequest = null) {
   if (!keyCheck.allowed) {
     return keyCheck.response;
   }
+  body = stripRequestUser(body, settings.stripRequestUser === true);
+  if (clientRawRequest) clientRawRequest = { ...clientRawRequest, body };
 
   if (!modelStr) {
     log.warn("CHAT", "Missing model");
@@ -251,6 +254,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       userAgent,
       apiKey,
       ccFilterNaming: !!chatSettings.ccFilterNaming,
+      filterClaudeIdentityHeaders: !!chatSettings.filterClaudeIdentityHeaders,
       rtkEnabled: !!chatSettings.rtkEnabled,
       headroomEnabled: !!chatSettings.headroomEnabled,
       headroomUrl: chatSettings.headroomUrl || DEFAULT_HEADROOM_URL,

@@ -22,6 +22,7 @@ import AddApiKeyModal from "./AddApiKeyModal";
 import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
+import CustomHeadersModal from "./CustomHeadersModal";
 
 const ONE_BY_ONE_DELAY_MS = 1000;
 
@@ -51,6 +52,7 @@ export default function ProviderDetailPage() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showEditNodeModal, setShowEditNodeModal] = useState(false);
   const [showBulkProxyModal, setShowBulkProxyModal] = useState(false);
+  const [showCustomHeadersModal, setShowCustomHeadersModal] = useState(false);
   const [selectedConnection, setSelectedConnection] = useState(null);
   const [modelAliases, setModelAliases] = useState({});
   const [customModels, setCustomModels] = useState([]);
@@ -399,6 +401,32 @@ export default function ProviderDetailPage() {
       }
     } catch (error) {
       console.log("Error updating provider node:", error);
+    }
+  };
+
+  const handleSaveCustomHeaders = async ({ customHeaders, headerBlacklist }) => {
+    if (!isCompatible || !providerNode) return;
+    try {
+      const res = await fetch(`/api/provider-nodes/${providerId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: providerNode.name,
+          prefix: providerNode.prefix,
+          baseUrl: providerNode.baseUrl,
+          ...(providerNode.apiType ? { apiType: providerNode.apiType } : {}),
+          retry: providerNode.retry || null,
+          customHeaders: Object.keys(customHeaders).length > 0 ? customHeaders : null,
+          headerBlacklist: headerBlacklist.length > 0 ? headerBlacklist : null,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setProviderNode(data.node);
+        setShowCustomHeadersModal(false);
+      }
+    } catch (error) {
+      console.log("Error saving custom headers:", error);
     }
   };
 
@@ -1505,6 +1533,15 @@ export default function ProviderDetailPage() {
               <Button
                 size="sm"
                 variant="secondary"
+                icon="http"
+                onClick={() => setShowCustomHeadersModal(true)}
+                className="w-full sm:w-auto"
+              >
+                Custom Headers
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
                 icon="delete"
                 onClick={async () => {
                   setConfirmState({
@@ -1915,6 +1952,15 @@ export default function ProviderDetailPage() {
           onSave={handleUpdateNode}
           onClose={() => setShowEditNodeModal(false)}
           isAnthropic={isAnthropicCompatible}
+        />
+      )}
+      {isCompatible && (
+        <CustomHeadersModal
+          isOpen={showCustomHeadersModal}
+          headers={providerNode?.customHeaders || {}}
+          blacklist={providerNode?.headerBlacklist || []}
+          onSave={handleSaveCustomHeaders}
+          onClose={() => setShowCustomHeadersModal(false)}
         />
       )}
       {!isCompatible && (

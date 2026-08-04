@@ -3,7 +3,7 @@ import { PROVIDERS, PROVIDER_OAUTH } from "../config/providers.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE } from "../providers/shared.js";
 import { OAUTH_ENDPOINTS, buildKimiHeaders } from "../config/appConstants.js";
 import { buildClineHeaders } from "../shared/clineAuth.js";
-import { getCachedClaudeHeaders } from "../utils/claudeHeaderCache.js";
+import { filterClaudeIdentityHeaders, getCachedClaudeHeaders } from "../utils/claudeHeaderCache.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
@@ -175,6 +175,14 @@ export class DefaultExecutor extends BaseExecutor {
   buildHeaders(credentials, stream = true) {
     const rt = credentials?.runtimeTransport;
     const headers = { "Content-Type": "application/json", ...(rt ? rt.headers : this.config.headers) };
+
+    // Apply custom headers from provider node configuration (before auth)
+    const customHeaders = credentials?.providerSpecificData?.customHeaders;
+    if (customHeaders && typeof customHeaders === "object") {
+      const resolved = resolveHeaderTemplates(customHeaders);
+      Object.assign(headers, resolved);
+    }
+
     const desc = rt?.auth || AUTH_DESCRIPTORS[this.provider] || this.resolveAuthDescriptor();
     // Hooks run BEFORE auth so dynamic overlays (claude cached headers) can't clobber the token.
     for (const hook of desc.hooks || []) HEADER_HOOKS[hook]?.(headers, credentials);
@@ -214,6 +222,14 @@ export class DefaultExecutor extends BaseExecutor {
     }
 
     if (stream) headers["Accept"] = "text/event-stream";
+    if (credentials.filterClaudeIdentityHeaders) filterClaudeIdentityHeaders(headers);
+
+    // Apply header blacklist (after all headers are set)
+    const blacklist = credentials?.providerSpecificData?.headerBlacklist;
+    if (blacklist && Array.isArray(blacklist) && blacklist.length > 0) {
+      return applyHeaderBlacklist(headers, blacklist);
+    }
+
     return headers;
   }
 

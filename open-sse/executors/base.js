@@ -8,6 +8,7 @@ import {
   resolveHttpTextRetry,
   getRetryComputeDelayHook,
 } from "../retry/index.js";
+import { resolveHeaderTemplates, applyHeaderBlacklist } from "../utils/headerTemplates.js";
 
 /**
  * BaseExecutor - Base class for provider executors
@@ -53,6 +54,13 @@ export class BaseExecutor {
       ...this.config.headers
     };
 
+    // Apply custom headers from provider node configuration (before auth)
+    const customHeaders = credentials?.providerSpecificData?.customHeaders;
+    if (customHeaders && typeof customHeaders === "object") {
+      const resolved = resolveHeaderTemplates(customHeaders);
+      Object.assign(headers, resolved);
+    }
+
     if (this.provider?.startsWith?.("anthropic-compatible-")) {
       // Anthropic-compatible providers use x-api-key header
       if (credentials.apiKey) {
@@ -74,6 +82,12 @@ export class BaseExecutor {
 
     if (stream) {
       headers["Accept"] = "text/event-stream";
+    }
+
+    // Apply header blacklist (after all headers are set)
+    const blacklist = credentials?.providerSpecificData?.headerBlacklist;
+    if (blacklist && Array.isArray(blacklist) && blacklist.length > 0) {
+      return applyHeaderBlacklist(headers, blacklist);
     }
 
     return headers;

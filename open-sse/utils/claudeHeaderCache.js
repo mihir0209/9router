@@ -26,6 +26,17 @@ const CLAUDE_IDENTITY_HEADERS = [
   "arch",
 ];
 
+const CLAUDE_FILTERED_HEADERS = new Set([
+  "user-agent",
+  "anthropic-dangerous-direct-browser-access",
+  "x-app",
+  "x-claude-code-session-id",
+  "package-version",
+  "runtime-version",
+  "os",
+  "arch",
+]);
+
 let cachedHeaders = null;
 
 /**
@@ -67,4 +78,32 @@ export function cacheClaudeHeaders(headers) {
  */
 export function getCachedClaudeHeaders() {
   return cachedHeaders;
+}
+
+/**
+ * Remove Claude Code client fingerprint headers immediately before forwarding.
+ * Required Anthropic protocol headers and non-client beta capabilities remain.
+ */
+export function filterClaudeIdentityHeaders(headers) {
+  if (!headers || typeof headers !== "object") return headers;
+
+  for (const key of Object.keys(headers)) {
+    const normalized = key.toLowerCase();
+    if (CLAUDE_FILTERED_HEADERS.has(normalized) || normalized.startsWith("x-stainless-")) {
+      delete headers[key];
+    }
+  }
+
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() !== "anthropic-beta") continue;
+    const filtered = String(headers[key])
+      .split(",")
+      .map((flag) => flag.trim())
+      .filter((flag) => flag && flag !== "claude-code-20250219")
+      .join(",");
+    if (filtered) headers[key] = filtered;
+    else delete headers[key];
+  }
+
+  return headers;
 }

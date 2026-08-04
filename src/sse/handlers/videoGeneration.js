@@ -12,6 +12,7 @@ import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import * as log from "../utils/logger.js";
+import { stripRequestUser } from "@/lib/requestPrivacy.js";
 
 // Video generation is xAI-only today; requests without a provider prefix
 // (bare model id, or multipart bodies we deliberately don't parse) land here.
@@ -97,6 +98,14 @@ export async function handleVideoCreate(request, action) {
 
   const bodyInfo = await readForwardableBody(request);
   if (bodyInfo.error) return bodyInfo.error;
+  const settings = await getSettings();
+  if (bodyInfo.parsed) {
+    const sanitized = stripRequestUser(bodyInfo.parsed, settings.stripRequestUser === true);
+    if (sanitized !== bodyInfo.parsed) {
+      bodyInfo.parsed = sanitized;
+      bodyInfo.raw = JSON.stringify(sanitized);
+    }
+  }
 
   const resolved = await resolveVideoProvider(bodyInfo.parsed);
   if (resolved.error) return resolved.error;

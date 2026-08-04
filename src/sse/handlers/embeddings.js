@@ -14,6 +14,7 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { saveRequestUsage } from "@/lib/usageDb.js";
+import { stripRequestUser } from "@/lib/requestPrivacy.js";
 
 function exactEmbeddingUsage(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.estimated === true) return null;
@@ -58,6 +59,7 @@ export async function handleEmbeddings(request) {
   if (!keyCheck.allowed) {
     return keyCheck.response;
   }
+  body = stripRequestUser(body, settings.stripRequestUser === true);
 
   if (!modelStr) {
     log.warn("EMBEDDINGS", "Missing model");

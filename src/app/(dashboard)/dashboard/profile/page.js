@@ -465,6 +465,21 @@ export default function ProfilePage() {
     }
   };
 
+  const updateStripRequestUser = async (enabled) => {
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stripRequestUser: enabled }),
+      });
+      if (res.ok) {
+        setSettings((prev) => ({ ...prev, stripRequestUser: enabled }));
+      }
+    } catch (err) {
+      console.error("Failed to update request privacy:", err);
+    }
+  };
+
   const reloadSettings = async () => {
     try {
       const res = await fetch("/api/settings");
@@ -1152,6 +1167,29 @@ export default function ProfilePage() {
                 {proxyStatus.message}
               </p>
             )}
+          </div>
+        </Card>
+
+        {/* Request Privacy */}
+        <Card>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-2 rounded-lg bg-violet-500/10 text-violet-500 shrink-0">
+              <span className="material-symbols-outlined text-[20px]">privacy_tip</span>
+            </div>
+            <h3 className="text-base sm:text-lg font-semibold">Request Privacy</h3>
+          </div>
+          <div className="flex items-start sm:items-center justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-sm sm:text-base">Remove user field</p>
+              <p className="text-xs sm:text-sm text-text-muted">
+                Remove the top-level user identifier from requests before forwarding them to providers
+              </p>
+            </div>
+            <Toggle
+              checked={settings.stripRequestUser === true}
+              onChange={updateStripRequestUser}
+              disabled={loading}
+            />
           </div>
         </Card>
 

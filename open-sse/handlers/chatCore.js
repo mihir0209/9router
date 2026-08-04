@@ -11,6 +11,7 @@ import { PROVIDERS } from "../config/providers.js";
 import { createErrorResult, parseUpstreamError, formatProviderError } from "../utils/error.js";
 import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
 import { handleBypassRequest } from "../utils/bypassHandler.js";
+import { filterClaudeIdentityHeaders as stripClaudeIdentityHeaders } from "../utils/claudeHeaderCache.js";
 import { trackPendingRequest, appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { getExecutor } from "../executors/index.js";
 import { supportsGrokCliReasoningEffort } from "../config/grokCli.js";
@@ -38,7 +39,7 @@ import { resolveSessionId } from "../utils/sessionManager.js";
  * @param {object} options.credentials - Provider credentials
  * @param {string} options.sourceFormatOverride - Override detected source format (e.g. "openai-responses")
  */
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, filterClaudeIdentityHeaders, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -117,7 +118,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const passthrough = isNativePassthrough(clientTool, provider);
 
   // Expose raw client headers to translators/executors for session-id resolution
-  if (credentials) credentials.rawHeaders = clientRawRequest?.headers || {};
+  if (credentials) {
+    const rawHeaders = { ...(clientRawRequest?.headers || {}) };
+    credentials.rawHeaders = filterClaudeIdentityHeaders
+      ? stripClaudeIdentityHeaders(rawHeaders)
+      : rawHeaders;
+    credentials.filterClaudeIdentityHeaders = !!filterClaudeIdentityHeaders;
+  }
 
   // Auto-strip media blocks the model can't read (vision/audio/pdf) before translation.
   if (!passthrough) {

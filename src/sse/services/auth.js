@@ -1,8 +1,9 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
+import { getProviderNodeById } from "@/lib/db/repos/nodesRepo.js";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
-import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
+import { resolveProviderId, FREE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers.js";
 import { getProxyPoolQuarantine, isProxyQuarantined } from "@/lib/proxy/quarantine";
 import * as log from "../utils/logger.js";
 
@@ -178,6 +179,17 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       { provider: providerId, model, quarantine: await getProxyPoolQuarantine() }
     );
 
+    // For compatible providers, merge node's customHeaders and headerBlacklist into providerSpecificData
+    let nodeCustomHeaders = null;
+    let nodeHeaderBlacklist = null;
+    if (isOpenAICompatibleProvider(providerId) || isAnthropicCompatibleProvider(providerId)) {
+      const node = await getProviderNodeById(providerId);
+      if (node) {
+        nodeCustomHeaders = node.customHeaders || null;
+        nodeHeaderBlacklist = node.headerBlacklist || null;
+      }
+    }
+
     // Settings retry wins over connection/node retry; BaseExecutor reads credentials.providerSpecificData.retry
     const effectiveRetry = providerOverride.retry ?? connection.providerSpecificData?.retry;
     const providerSpecificData = {
@@ -189,6 +201,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
     };
     if (effectiveRetry) providerSpecificData.retry = effectiveRetry;
+    if (nodeCustomHeaders) providerSpecificData.customHeaders = nodeCustomHeaders;
+    if (nodeHeaderBlacklist) providerSpecificData.headerBlacklist = nodeHeaderBlacklist;
 
     return {
       authType: connection.authType,
