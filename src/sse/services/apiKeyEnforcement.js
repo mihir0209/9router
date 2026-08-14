@@ -1,5 +1,6 @@
 import { getApiKeyByKey } from "@/lib/localDb";
 import { getUsageStats } from "@/lib/db/repos/usageRepo.js";
+import { checkBudget } from "@/lib/budgetService.js";
 
 // In-memory rate limit tracking: Map<keyId, { count, windowStart }>
 const rateLimitStore = new Map();
@@ -64,19 +65,6 @@ export async function enforceApiKeyRestrictions(apiKey, request, body) {
     }
   }
 
-  // IP blocking
-  const clientIp = request.headers?.get("x-9r-real-ip") || "";
-  const blockedIPs = parseList(keyRecord.blockedIPs);
-  if (blockedIPs.length > 0 && clientIp && ipMatches(clientIp, blockedIPs)) {
-    return { allowed: false, error: "IP address is blocked", status: 403 };
-  }
-
-  // IP allowlist (if set, only these IPs are allowed)
-  const allowedIPs = parseList(keyRecord.allowedIPs);
-  if (allowedIPs.length > 0 && clientIp && !ipMatches(clientIp, allowedIPs)) {
-    return { allowed: false, error: "IP address not in allowlist", status: 403 };
-  }
-
   // Model restrictions
   const model = body?.model;
   if (model) {
@@ -111,6 +99,28 @@ export async function enforceApiKeyRestrictions(apiKey, request, body) {
         };
       }
     }
+  }
+
+  const budget = await checkBudget(apiKey);
+  if (budget.exceeded) {
+    return {
+      allowed: false,
+      error: "Budget exceeded for workspace key. Add credits to continue.",
+      status: 402,
+      budget,
+    };
+  }
+
+  // Credential resolution follows this service; IP policy is the final local gate.
+  const clientIp = request.headers?.get("x-9r-real-ip") || "";
+  const blockedIPs = parseList(keyRecord.blockedIPs);
+  if (blockedIPs.length > 0 && clientIp && ipMatches(clientIp, blockedIPs)) {
+    return { allowed: false, error: "IP address is blocked", status: 403 };
+  }
+
+  const allowedIPs = parseList(keyRecord.allowedIPs);
+  if (allowedIPs.length > 0 && clientIp && !ipMatches(clientIp, allowedIPs)) {
+    return { allowed: false, error: "IP address not in allowlist", status: 403 };
   }
 
   // Token daily limit

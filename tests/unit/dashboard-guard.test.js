@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   validateApiKey: vi.fn(),
   getConsistentMachineId: vi.fn(),
   verifyDashboardAuthToken: vi.fn(),
+  hasValidAdminApiToken: vi.fn(),
 }));
 
 vi.mock("next/server", () => ({
@@ -33,6 +34,10 @@ vi.mock("@/lib/auth/dashboardSession", () => ({
   verifyDashboardAuthToken: mocks.verifyDashboardAuthToken,
 }));
 
+vi.mock("@/lib/auth/adminApiToken", () => ({
+  hasValidAdminApiToken: mocks.hasValidAdminApiToken,
+}));
+
 const { proxy, __test__ } = await import("../../src/dashboardGuard.js");
 
 function request(pathname, headers = {}) {
@@ -52,6 +57,7 @@ describe("dashboard guard public LLM API access", () => {
     mocks.validateApiKey.mockResolvedValue(false);
     mocks.getConsistentMachineId.mockResolvedValue("cli-token");
     mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+    mocks.hasValidAdminApiToken.mockResolvedValue(false);
   });
 
   it("allows loopback public LLM API without API key", async () => {
@@ -195,6 +201,7 @@ describe("dashboard guard local-only access", () => {
     mocks.validateApiKey.mockResolvedValue(false);
     mocks.getConsistentMachineId.mockResolvedValue("cli-token");
     mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+    mocks.hasValidAdminApiToken.mockResolvedValue(false);
   });
 
   it("rejects local-only route from non-loopback host without CLI token", async () => {
@@ -255,6 +262,31 @@ describe("dashboard guard local-only access", () => {
     }));
 
     expect(response).toBe(mocks.nextResponse);
+  });
+});
+
+describe("dashboard guard admin API access", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getSettings.mockResolvedValue({ requireLogin: true });
+    mocks.getConsistentMachineId.mockResolvedValue("cli-token");
+    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+    mocks.hasValidAdminApiToken.mockResolvedValue(true);
+  });
+
+  it.each([
+    "/api/keys",
+    "/api/keys/key-id",
+    "/api/key-actions/debit",
+    "/api/usage/api-keys",
+  ])("allows admin token on %s", async (pathname) => {
+    expect(await proxy(request(pathname))).toBe(mocks.nextResponse);
+  });
+
+  it("does not allow admin token on unrelated API routes", async () => {
+    const response = await proxy(request("/api/settings"));
+
+    expect(response.status).toBe(401);
   });
 });
 

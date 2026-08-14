@@ -29,7 +29,7 @@ export {
 
 // API keys
 export {
-  getApiKeys, getApiKeyById, getApiKeyByKey, createApiKey, updateApiKey, deleteApiKey, validateApiKey,
+  getApiKeys, getApiKeyById, getApiKeyByKey, createApiKey, updateApiKey, regenerateApiKey, deleteApiKey, validateApiKey,
 } from "./repos/apiKeysRepo.js";
 
 // Combos
@@ -59,7 +59,7 @@ export {
 // Usage
 export {
   statsEmitter, trackPendingRequest, getActiveRequests,
-  saveRequestUsage, getUsageHistory, getUsageStats, getChartData,
+  saveRequestUsage, getUsageHistory, getApiKeyDailyUsage, getUsageStats, getChartData,
   appendRequestLog, getRecentLogs,
 } from "./repos/usageRepo.js";
 
@@ -85,6 +85,11 @@ export async function exportDb() {
       allowedModels: r.allowedModels || "", blockedModels: r.blockedModels || "",
       allowedIPs: r.allowedIPs || "", blockedIPs: r.blockedIPs || "",
       expiresAt: r.expiresAt || "", description: r.description || "",
+      ownerRef: r.ownerRef ?? null, budgetUsd: r.budgetUsd ?? null,
+      budgetResetHours: r.budgetResetHours ?? null, budgetWindowStartedAt: r.budgetWindowStartedAt ?? null,
+      billingMode: r.billingMode || "credits", byokProvider: r.byokProvider ?? null,
+      byokCredentialsCiphertext: r.byokCredentialsCiphertext ?? null,
+      byokCredsEncVersion: r.byokCredsEncVersion ?? null, regenerateVersion: r.regenerateVersion ?? 0,
     })),
     combos: db.all(`SELECT * FROM combos`).map((r) => ({ id: r.id, name: r.name, kind: r.kind, models: parseJson(r.models, []), createdAt: r.createdAt, updatedAt: r.updatedAt })),
     modelAliases: {},
@@ -145,10 +150,13 @@ export async function importDb(payload) {
     }
     for (const k of payload.apiKeys || []) {
       db.run(
-        `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly, allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly, allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description, ownerRef, budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode, byokProvider, byokCredentialsCiphertext, byokCredsEncVersion, regenerateVersion) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [k.id, k.key, k.name || null, k.machineId || null, k.isActive === false ? 0 : 1, k.createdAt || new Date().toISOString(),
-         k.rateLimitRequests || 0, k.rateLimitWindowSeconds || 60, k.tokenLimitDaily || 0, k.tokenLimitMonthly || 0,
-         k.allowedModels || "", k.blockedModels || "", k.allowedIPs || "", k.blockedIPs || "", k.expiresAt || "", k.description || ""]
+          k.rateLimitRequests || 0, k.rateLimitWindowSeconds || 60, k.tokenLimitDaily || 0, k.tokenLimitMonthly || 0,
+         k.allowedModels || "", k.blockedModels || "", k.allowedIPs || "", k.blockedIPs || "", k.expiresAt || "", k.description || "",
+         k.ownerRef ?? null, k.budgetUsd ?? null, k.budgetResetHours ?? null, k.budgetWindowStartedAt ?? null,
+         k.billingMode || "credits", k.byokProvider ?? null, k.byokCredentialsCiphertext ?? null,
+         k.byokCredsEncVersion ?? null, k.regenerateVersion ?? 0]
       );
     }
     for (const c of payload.combos || []) {

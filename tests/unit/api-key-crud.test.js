@@ -38,6 +38,15 @@ describe("API Keys CRUD - create with options", () => {
       blockedIPs: "10.0.0.1",
       expiresAt: "2099-12-31T23:59:59Z",
       description: "Production key",
+      ownerRef: "workspace-1",
+      budgetUsd: 25.5,
+      budgetResetHours: 168,
+      budgetWindowStartedAt: "2099-01-01T00:00:00Z",
+      billingMode: "byok",
+      byokProvider: "openai",
+      byokCredentialsCiphertext: "encrypted",
+      byokCredsEncVersion: 1,
+      regenerateVersion: 2,
     });
 
     expect(key.id).toBeTruthy();
@@ -53,6 +62,15 @@ describe("API Keys CRUD - create with options", () => {
     expect(key.blockedIPs).toBe("10.0.0.1");
     expect(key.expiresAt).toBe("2099-12-31T23:59:59Z");
     expect(key.description).toBe("Production key");
+    expect(key.ownerRef).toBe("workspace-1");
+    expect(key.budgetUsd).toBe(25.5);
+    expect(key.budgetResetHours).toBe(168);
+    expect(key.budgetWindowStartedAt).toBe("2099-01-01T00:00:00Z");
+    expect(key.billingMode).toBe("byok");
+    expect(key.byokProvider).toBe("openai");
+    expect(key.byokCredentialsCiphertext).toBe("encrypted");
+    expect(key.byokCredsEncVersion).toBe(1);
+    expect(key.regenerateVersion).toBe(2);
   });
 
   it("creates key with defaults when no options", async () => {
@@ -72,6 +90,10 @@ describe("API Keys CRUD - create with options", () => {
     expect(key.blockedIPs).toBe("");
     expect(key.expiresAt).toBe("");
     expect(key.description).toBe("");
+    expect(key.ownerRef).toBeNull();
+    expect(key.budgetUsd).toBeNull();
+    expect(key.billingMode).toBe("credits");
+    expect(key.regenerateVersion).toBe(0);
   });
 });
 
@@ -112,6 +134,19 @@ describe("API Keys CRUD - read", () => {
     expect(keys.map(k => k.name)).toContain("key-1");
     expect(keys.map(k => k.name)).toContain("key-2");
   });
+
+  it("getApiKeys filters by ownerRef", async () => {
+    const { createApiKey, getApiKeys } = await import("@/lib/db/repos/apiKeysRepo.js");
+    const { getConsistentMachineId } = await import("@/shared/utils/machineId.js");
+    const machineId = await getConsistentMachineId();
+
+    await createApiKey("key-1", machineId, { ownerRef: "workspace-1" });
+    await createApiKey("key-2", machineId, { ownerRef: "workspace-2" });
+
+    const keys = await getApiKeys("workspace-1");
+    expect(keys).toHaveLength(1);
+    expect(keys[0].ownerRef).toBe("workspace-1");
+  });
 });
 
 describe("API Keys CRUD - update", () => {
@@ -144,6 +179,19 @@ describe("API Keys CRUD - update", () => {
     await updateApiKey(key.id, { isActive: false });
     const updated = await getApiKeyById(key.id);
     expect(updated.isActive).toBe(false);
+  });
+
+  it("regenerates atomically, invalidates the old key, and bumps the version", async () => {
+    const { createApiKey, regenerateApiKey, validateApiKey } = await import("@/lib/db/repos/apiKeysRepo.js");
+    const { getConsistentMachineId } = await import("@/shared/utils/machineId.js");
+    const key = await createApiKey("test-key", await getConsistentMachineId());
+
+    const regenerated = await regenerateApiKey(key.id);
+
+    expect(regenerated.key).not.toBe(key.key);
+    expect(regenerated.regenerateVersion).toBe(1);
+    expect(await validateApiKey(key.key)).toBe(false);
+    expect(await validateApiKey(regenerated.key)).toBe(true);
   });
 });
 

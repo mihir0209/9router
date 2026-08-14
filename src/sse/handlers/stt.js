@@ -1,6 +1,8 @@
 import {
   extractApiKey, isValidApiKey,
   getProviderCredentials, markAccountUnavailable,
+  credentialsErrorResponse,
+  byokUpstreamErrorResponse,
 } from "../services/auth.js";
 import { validateAndEnforceApiKey } from "../services/validateApiKey.js";
 import { getSettings } from "@/lib/localDb";
@@ -45,7 +47,7 @@ export async function handleStt(request) {
   log.info("ROUTING", `Provider: ${provider}, Model: ${model}`);
 
   // noAuth providers
-  if (!CREDENTIALED_PROVIDERS.has(provider)) {
+  if (!CREDENTIALED_PROVIDERS.has(provider) && keyCheck.keyRecord?.billingMode !== "byok") {
     const result = await handleSttCore({ provider, model, formData, sttConfig: AI_PROVIDERS[provider]?.sttConfig });
     if (result.success) return result.response;
     return errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "STT failed");
@@ -57,7 +59,9 @@ export async function handleStt(request) {
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, keyCheck);
+    const credentialsError = credentialsErrorResponse(credentials);
+    if (credentialsError) return credentialsError;
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
@@ -75,6 +79,8 @@ export async function handleStt(request) {
 
     if (result.success) return result.response;
 
+    const byokError = byokUpstreamErrorResponse(credentials, result.status);
+    if (byokError) return byokError;
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
     if (shouldFallback) {
       excludeConnectionIds.add(credentials.connectionId);

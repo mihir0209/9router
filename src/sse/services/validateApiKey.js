@@ -4,6 +4,7 @@ import { enforceApiKeyRestrictions } from "./apiKeyEnforcement.js";
 import { errorResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
+import { budgetHeaders } from "@/lib/budgetService.js";
 
 // In-memory track of rate limit violations per IP for auto-blocking
 const ipViolationCounts = new Map();
@@ -34,26 +35,31 @@ function trackIpViolation(ip) {
  */
 export async function validateAndEnforceApiKey(request, body, handlerName = "AUTH") {
   if (request.headers?.get("x-9r-dashboard-internal") === "1") {
-    return { allowed: true, apiKey: null };
+    return { allowed: true, apiKey: null, keyRecord: null };
   }
 
   const settings = await getSettings();
   const apiKey = extractApiKey(request);
   const clientIp = request.headers?.get("x-9r-real-ip") || "";
 
+  let keyRecord = apiKey ? await getApiKeyByKey(apiKey) : null;
+
   if (!settings.requireApiKey) {
-    return { allowed: true, apiKey };
-  }
+    if (!keyRecord) return { allowed: true, apiKey, keyRecord: null };
+    if (!(await isValidApiKey(apiKey))) {
+      return { allowed: false, response: errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key") };
+    }
+  } else {
+    if (!apiKey) {
+      log.warn(handlerName, "Missing API key (requireApiKey=true)");
+      return { allowed: false, response: errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key") };
+    }
 
-  if (!apiKey) {
-    log.warn(handlerName, "Missing API key (requireApiKey=true)");
-    return { allowed: false, response: errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key") };
-  }
-
-  const valid = await isValidApiKey(apiKey);
-  if (!valid) {
-    log.warn(handlerName, "Invalid API key (requireApiKey=true)");
-    return { allowed: false, response: errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key") };
+    const valid = await isValidApiKey(apiKey);
+    if (!valid) {
+      log.warn(handlerName, "Invalid API key (requireApiKey=true)");
+      return { allowed: false, response: errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key") };
+    }
   }
 
   // Enforce per-key restrictions (rate limits, IP blocks, model restrictions, token limits)
@@ -62,14 +68,35 @@ export async function validateAndEnforceApiKey(request, body, handlerName = "AUT
     log.warn(handlerName, `API key restriction denied: ${restrictionCheck.error}`);
 
     // Build response with rate limit headers
-    const res = errorResponse(restrictionCheck.status || 403, restrictionCheck.error);
+    const res = restrictionCheck.status === 402
+      ? new Response(JSON.stringify({
+          error: {
+            message: restrictionCheck.error,
+            type: "budget_exceeded",
+            param: null,
+            code: 402,
+          },
+        }), {
+          status: 402,
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        })
+      : errorResponse(restrictionCheck.status || 403, restrictionCheck.error);
+
+    for (const [name, value] of Object.entries(budgetHeaders(restrictionCheck.budget))) {
+      res.headers.set(name, value);
+    }
+    if (restrictionCheck.status === 402 && restrictionCheck.budget?.resetsAt) {
+      const resetMs = new Date(restrictionCheck.budget.resetsAt).getTime();
+      if (Number.isFinite(resetMs)) {
+        res.headers.set("Retry-After", String(Math.max(Math.ceil((resetMs - Date.now()) / 1000), 1)));
+      }
+    }
 
     if (restrictionCheck.retryAfter) {
       res.headers.set("Retry-After", String(restrictionCheck.retryAfter));
     }
 
     // Add standard rate limit headers
-    const keyRecord = await getApiKeyByKey(apiKey);
     if (keyRecord && keyRecord.rateLimitRequests > 0) {
       res.headers.set("X-RateLimit-Limit", String(keyRecord.rateLimitRequests));
       res.headers.set("X-RateLimit-Remaining", "0");
@@ -115,5 +142,5 @@ export async function validateAndEnforceApiKey(request, body, handlerName = "AUT
     }
   }
 
-  return { allowed: true, apiKey };
+  return { allowed: true, apiKey, keyRecord };
 }

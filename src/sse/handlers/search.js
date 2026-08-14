@@ -1,5 +1,7 @@
 import {
   getProviderCredentials,
+  credentialsErrorResponse,
+  byokUpstreamErrorResponse,
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
@@ -73,7 +75,7 @@ export async function handleSearch(request) {
     return handleComboChat({
       body,
       models: comboModels,
-      handleSingleModel: (b, m) => handleSingleProviderSearch(b, m, request, apiKey, settings),
+      handleSingleModel: (b, m) => handleSingleProviderSearch(b, m, request, apiKey, settings, keyCheck),
       log,
       comboName: providerInput,
       comboStrategy,
@@ -81,10 +83,10 @@ export async function handleSearch(request) {
     });
   }
 
-  return handleSingleProviderSearch(body, providerInput, request, apiKey, settings);
+  return handleSingleProviderSearch(body, providerInput, request, apiKey, settings, keyCheck);
 }
 
-async function handleSingleProviderSearch(body, providerInput, request, apiKey, settings) {
+async function handleSingleProviderSearch(body, providerInput, request, apiKey, settings, keyContext) {
   const query = body.query;
   const providerId = resolveProviderId(providerInput);
   const resolvedProvider = AI_PROVIDERS[providerId];
@@ -124,7 +126,7 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
   };
 
   // No-auth providers (e.g. searxng) bypass credential lookup
-  if (resolvedProvider.noAuth) {
+  if (resolvedProvider.noAuth && keyContext?.keyRecord?.billingMode !== "byok") {
     log.info("AUTH", `\x1b[32m${providerId} no-auth mode\x1b[0m`);
     const result = await handleSearchCore({
       body: coreBody,
@@ -143,7 +145,9 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(providerId, excludeConnectionIds);
+    const credentials = await getProviderCredentials(providerId, excludeConnectionIds, null, keyContext);
+    const credentialsError = credentialsErrorResponse(credentials);
+    if (credentialsError) return credentialsError;
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
@@ -185,6 +189,8 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
 
     if (result.success) return result.response;
 
+    const byokError = byokUpstreamErrorResponse(credentials, result.status);
+    if (byokError) return byokError;
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, providerId);
 
     if (shouldFallback) {

@@ -1,5 +1,7 @@
 import {
   getProviderCredentials,
+  credentialsErrorResponse,
+  byokUpstreamErrorResponse,
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
@@ -92,7 +94,7 @@ export async function handleFetch(request) {
     return handleComboChat({
       body,
       models: comboModels,
-      handleSingleModel: (b, m) => handleSingleProviderFetch(b, m, request, apiKey, settings),
+      handleSingleModel: (b, m) => handleSingleProviderFetch(b, m, request, apiKey, settings, keyCheck),
       log,
       comboName: providerInput,
       comboStrategy,
@@ -100,10 +102,10 @@ export async function handleFetch(request) {
     });
   }
 
-  return handleSingleProviderFetch(body, providerInput, request, apiKey, settings);
+  return handleSingleProviderFetch(body, providerInput, request, apiKey, settings, keyCheck);
 }
 
-async function handleSingleProviderFetch(body, providerInput, request, apiKey, settings) {
+async function handleSingleProviderFetch(body, providerInput, request, apiKey, settings, keyContext) {
   const targetUrl = body.url;
   const format = body.format;
   const maxCharacters = body.max_characters;
@@ -128,7 +130,7 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
   }
 
   // No-auth fetch path (kept for parity though no current fetch provider sets noAuth)
-  if (resolvedProvider.noAuth) {
+  if (resolvedProvider.noAuth && keyContext?.keyRecord?.billingMode !== "byok") {
     log.info("AUTH", `\x1b[32m${providerId} no-auth mode\x1b[0m`);
     const result = await handleFetchCore({
       url: targetUrl,
@@ -153,7 +155,9 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(providerId, excludeConnectionIds);
+    const credentials = await getProviderCredentials(providerId, excludeConnectionIds, null, keyContext);
+    const credentialsError = credentialsErrorResponse(credentials);
+    if (credentialsError) return credentialsError;
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
@@ -199,6 +203,8 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
       });
     }
 
+    const byokError = byokUpstreamErrorResponse(credentials, result.status);
+    if (byokError) return byokError;
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, providerId);
 
     if (shouldFallback) {

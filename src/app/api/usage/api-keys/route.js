@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getUsageStats } from "@/lib/usageDb";
 import { getApiKeys } from "@/lib/localDb";
+import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,7 @@ export async function GET(request) {
     const { searchParams } = new URL(request.url);
     const period = searchParams.get("period") || "7d";
     const keyId = searchParams.get("keyId") || null;
+    const isAdminApi = await hasValidAdminApiToken(request);
 
     if (!VALID_PERIODS.has(period)) {
       return NextResponse.json({ error: "Invalid period" }, { status: 400 });
@@ -25,7 +27,7 @@ export async function GET(request) {
       keyUsageMap[key.key] = {
         id: key.id,
         name: key.name,
-        key: key.key,
+        ...(!isAdminApi && { key: key.key }),
         maskedKey: key.key ? `${key.key.slice(0, 7)}...${key.key.slice(-4)}` : "",
         isActive: key.isActive,
         createdAt: key.createdAt,

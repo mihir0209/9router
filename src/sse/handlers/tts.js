@@ -1,6 +1,8 @@
 import {
   extractApiKey, isValidApiKey,
   getProviderCredentials, markAccountUnavailable,
+  credentialsErrorResponse,
+  byokUpstreamErrorResponse,
 } from "../services/auth.js";
 import { validateAndEnforceApiKey } from "../services/validateApiKey.js";
 import { getSettings } from "@/lib/localDb";
@@ -52,7 +54,7 @@ export async function handleTts(request) {
     return handleComboChat({
       body,
       models: comboModels,
-      handleSingleModel: (b, m) => handleSingleModelTts(b, m, responseFormat, language),
+      handleSingleModel: (b, m) => handleSingleModelTts(b, m, responseFormat, language, keyCheck),
       log,
       comboName: modelStr,
       comboStrategy,
@@ -60,10 +62,10 @@ export async function handleTts(request) {
     });
   }
 
-  return handleSingleModelTts(body, modelStr, responseFormat, language);
+  return handleSingleModelTts(body, modelStr, responseFormat, language, keyCheck);
 }
 
-async function handleSingleModelTts(body, modelStr, responseFormat, language) {
+async function handleSingleModelTts(body, modelStr, responseFormat, language, keyContext) {
   const modelInfo = await getModelInfo(modelStr);
   if (!modelInfo.provider) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
 
@@ -71,7 +73,7 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language) {
   log.info("ROUTING", `Provider: ${provider}, Voice: ${model}`);
 
   // noAuth providers — no credential needed
-  if (!CREDENTIALED_PROVIDERS.has(provider)) {
+  if (!CREDENTIALED_PROVIDERS.has(provider) && keyContext?.keyRecord?.billingMode !== "byok") {
     const result = await handleTtsCore({ provider, model, input: body.input, responseFormat, language });
     if (result.success) return result.response;
     return errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "TTS failed");
@@ -83,7 +85,9 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language) {
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, keyContext);
+    const credentialsError = credentialsErrorResponse(credentials);
+    if (credentialsError) return credentialsError;
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
@@ -101,6 +105,8 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language) {
 
     if (result.success) return result.response;
 
+    const byokError = byokUpstreamErrorResponse(credentials, result.status);
+    if (byokError) return byokError;
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
     if (shouldFallback) {
       excludeConnectionIds.add(credentials.connectionId);

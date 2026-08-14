@@ -243,7 +243,11 @@ export async function saveRequestUsage(entry) {
     const db = await getAdapter();
 
     if (!entry.timestamp) entry.timestamp = new Date().toISOString();
-    entry.cost = await calculateCost(entry.provider, entry.model, entry.tokens);
+    if (entry.forceZeroCost || entry.connectionId?.startsWith("byok:")) {
+      entry.cost = 0;
+    } else if (!Number.isFinite(entry.cost)) {
+      entry.cost = await calculateCost(entry.provider, entry.model, entry.tokens);
+    }
 
     const tokens = entry.tokens || {};
     const promptTokens = tokens.prompt_tokens || tokens.input_tokens || 0;
@@ -331,6 +335,35 @@ export async function getUsageHistory(filter = {}) {
     connectionId: r.connectionId, apiKeyMasked: maskApiKey(r.apiKey), endpoint: r.endpoint,
     cost: r.cost, status: r.status, tokens: parseJson(r.tokens, {}),
   }));
+}
+
+export async function getApiKeyDailyUsage(apiKey, { from, to } = {}) {
+  const db = await getAdapter();
+  const conditions = ["apiKey = ?"];
+  const params = [apiKey];
+
+  if (from) {
+    conditions.push("timestamp >= ?");
+    params.push(from);
+  }
+  if (to) {
+    conditions.push("timestamp <= ?");
+    params.push(to);
+  }
+
+  return db.all(
+    `SELECT substr(timestamp, 1, 10) AS date,
+            COUNT(*) AS requests,
+            COALESCE(SUM(promptTokens), 0) AS promptTokens,
+            COALESCE(SUM(completionTokens), 0) AS completionTokens,
+            COALESCE(SUM(promptTokens), 0) + COALESCE(SUM(completionTokens), 0) AS tokens,
+            COALESCE(SUM(cost), 0) AS cost
+       FROM usageHistory
+      WHERE ${conditions.join(" AND ")}
+      GROUP BY substr(timestamp, 1, 10)
+      ORDER BY date ASC`,
+    params
+  );
 }
 
 function loadDaysInRange(adapter, maxDays) {

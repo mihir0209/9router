@@ -1,10 +1,12 @@
 import {
   getProviderCredentials,
+  credentialsErrorResponse,
+  byokUpstreamErrorResponse,
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
-  isValidApiKey,
 } from "../services/auth.js";
+import { validateAndEnforceApiKey } from "../services/validateApiKey.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
 import { handleVideoProxyCore, getVideoConfig, sanitizeSecrets } from "open-sse/handlers/videoCore.js";
@@ -28,14 +30,7 @@ const CREATE_ROTATION_STATUSES = new Set([
 ]);
 
 async function requireValidApiKey(request) {
-  const apiKey = extractApiKey(request);
-  const settings = await getSettings();
-  if (settings.requireApiKey) {
-    if (!apiKey) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
-    const valid = await isValidApiKey(apiKey);
-    if (!valid) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
-  }
-  return null;
+  return validateAndEnforceApiKey(request, {}, "VIDEO");
 }
 
 /**
@@ -93,8 +88,8 @@ function withConnectionHeader(response, connectionId) {
  * POST /v1/videos/{generations|edits|extensions} — async job creation proxy.
  */
 export async function handleVideoCreate(request, action) {
-  const authError = await requireValidApiKey(request);
-  if (authError) return authError;
+  const keyCheck = await requireValidApiKey(request);
+  if (!keyCheck.allowed) return keyCheck.response;
 
   const bodyInfo = await readForwardableBody(request);
   if (bodyInfo.error) return bodyInfo.error;
@@ -126,7 +121,9 @@ export async function handleVideoCreate(request, action) {
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { preferredConnectionId });
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { preferredConnectionId, ...keyCheck });
+    const credentialsError = credentialsErrorResponse(credentials);
+    if (credentialsError) return credentialsError;
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
@@ -167,6 +164,8 @@ export async function handleVideoCreate(request, action) {
       return withConnectionHeader(result.response, credentials.connectionId);
     }
 
+    const byokError = byokUpstreamErrorResponse(credentials, result.status);
+    if (byokError) return byokError;
     // Record the failure (dashboard shows lastError/errorCode → user sees re-auth is needed)
     const { shouldFallback } = await markAccountUnavailable(
       credentials.connectionId, result.status, sanitizeSecrets(result.error, refreshedCredentials), provider, model
@@ -189,15 +188,17 @@ export async function handleVideoCreate(request, action) {
  * caller pins the creating account via `x-connection-id` (returned on create).
  */
 export async function handleVideoGet(request, requestId) {
-  const authError = await requireValidApiKey(request);
-  if (authError) return authError;
+  const keyCheck = await requireValidApiKey(request);
+  if (!keyCheck.allowed) return keyCheck.response;
 
   if (!requestId) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing video request id");
 
   const provider = DEFAULT_VIDEO_PROVIDER;
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
 
-  const credentials = await getProviderCredentials(provider, null, null, { preferredConnectionId });
+  const credentials = await getProviderCredentials(provider, null, null, { preferredConnectionId, ...keyCheck });
+  const credentialsError = credentialsErrorResponse(credentials);
+  if (credentialsError) return credentialsError;
   if (!credentials || credentials.allRateLimited) {
     return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
   }
@@ -225,6 +226,8 @@ export async function handleVideoGet(request, requestId) {
     return withConnectionHeader(result.response, credentials.connectionId);
   }
 
+  const byokError = byokUpstreamErrorResponse(credentials, result.status);
+  if (byokError) return byokError;
   await markAccountUnavailable(
     credentials.connectionId, result.status, sanitizeSecrets(result.error, refreshedCredentials), provider, null
   );

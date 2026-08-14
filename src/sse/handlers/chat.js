@@ -2,6 +2,8 @@ import "open-sse/index.js";
 
 import {
   getProviderCredentials,
+  credentialsErrorResponse,
+  byokUpstreamErrorResponse,
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
@@ -25,6 +27,7 @@ import { updateProviderCredentials, checkAndRefreshToken } from "../services/tok
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { classifyProxyFailure, quarantineProxyPool } from "@/lib/proxy/quarantine";
 import { stripRequestUser } from "@/lib/requestPrivacy.js";
+import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
 
 /**
  * Handle chat completion request
@@ -82,6 +85,7 @@ export async function handleChat(request, clientRawRequest = null) {
     return keyCheck.response;
   }
   body = stripRequestUser(body, settings.stripRequestUser === true);
+  const keyContext = { apiKey: keyCheck.apiKey, keyRecord: keyCheck.keyRecord };
   if (clientRawRequest) clientRawRequest = { ...clientRawRequest, body };
 
   if (!modelStr) {
@@ -113,7 +117,7 @@ export async function handleChat(request, clientRawRequest = null) {
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+          return handleSingleModelChat(b, m, cleanRawReq, request, keyContext);
         },
         log,
         comboName: modelStr,
@@ -127,7 +131,7 @@ export async function handleChat(request, clientRawRequest = null) {
     return handleComboChat({
       body,
       models: comboModels,
-      handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+      handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, keyContext),
       log,
       comboName: modelStr,
       comboStrategy,
@@ -136,13 +140,13 @@ export async function handleChat(request, clientRawRequest = null) {
   }
 
   // Single model request
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey);
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, keyContext);
 }
 
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, keyContext = {}) {
   const modelInfo = await getModelInfo(modelStr);
   if (process.env.NINEROUTER_RUNTIME === "cloudflare" && modelInfo.provider === "opencode") {
     return errorResponse(
@@ -172,7 +176,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+            return handleSingleModelChat(b, m, cleanRawReq, request, keyContext);
           },
           log,
           comboName: modelStr,
@@ -186,7 +190,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       return handleComboChat({
         body,
         models: comboModels,
-        handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, keyContext),
         log,
         comboName: modelStr,
         comboStrategy,
@@ -210,7 +214,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, keyContext);
+    const credentialsError = credentialsErrorResponse(credentials);
+    if (credentialsError) return credentialsError;
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -252,7 +258,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       clientRawRequest,
       connectionId: credentials.connectionId,
       userAgent,
-      apiKey,
+      apiKey: keyContext.apiKey,
       ccFilterNaming: !!chatSettings.ccFilterNaming,
       filterClaudeIdentityHeaders: !!chatSettings.filterClaudeIdentityHeaders,
       rtkEnabled: !!chatSettings.rtkEnabled,
@@ -284,7 +290,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     });
 
-    if (result.success) return result.response;
+    if (result.success) return guardApiKeyResponse(result.response, keyContext.keyRecord);
+    const byokError = byokUpstreamErrorResponse(credentials, result.status);
+    if (byokError) return byokError;
 
     const proxyPoolId = credentials.providerSpecificData?.connectionProxyPoolId;
     const proxyFailureKind = classifyProxyFailure(result.status, result.error);

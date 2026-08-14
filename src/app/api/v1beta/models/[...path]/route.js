@@ -2,6 +2,8 @@ import { handleChat } from "@/sse/handlers/chat.js";
 import {
   clearAccountError,
   getProviderCredentials,
+  credentialsErrorResponse,
+  byokUpstreamErrorResponse,
   isValidApiKey,
   markAccountUnavailable,
 } from "@/sse/services/auth.js";
@@ -180,14 +182,17 @@ function buildGeminiNativeUrl(requestUrl, model, action) {
 
 async function validateGeminiNativeClientKey(request, body) {
   const settings = await getSettings();
-  if (!settings.requireApiKey) return null;
+  if (!settings.requireApiKey) {
+    const keyCheck = await validateAndEnforceApiKey(request, body, "GEMINI_NATIVE");
+    return { keyCheck };
+  }
 
   const keyCheck = await validateAndEnforceApiKey(request, body, "GEMINI_NATIVE");
   if (!keyCheck.allowed) {
-    return Response.json({ error: { message: keyCheck.response?.body?.error || keyCheck.response?.statusText || "Unauthorized" } }, { status: keyCheck.response?.status || 401 });
+    return { error: keyCheck.response };
   }
 
-  return null;
+  return { keyCheck };
 }
 
 function buildGeminiNativeAuthHeaders(credentials) {
@@ -232,8 +237,8 @@ function getSafeGeminiNativeErrorText(error) {
 }
 
 async function forwardGeminiNativeRequest(request, body, model, action) {
-  const authError = await validateGeminiNativeClientKey(request, body);
-  if (authError) return authError;
+  const auth = await validateGeminiNativeClientKey(request, body);
+  if (auth.error) return auth.error;
 
   const modelId = normalizeGeminiNativeModel(model);
   if (!GEMINI_NATIVE_MODEL_PATTERN.test(modelId)) {
@@ -245,7 +250,9 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials("gemini", excludeConnectionIds, modelId);
+    const credentials = await getProviderCredentials("gemini", excludeConnectionIds, modelId, auth.keyCheck);
+    const credentialsError = credentialsErrorResponse(credentials);
+    if (credentialsError) return credentialsError;
     if (!credentials || credentials.allRateLimited) {
       console.log(`[GEMINI_NATIVE] exhausted model=${modelId} status=${lastStatus || Number(credentials?.lastErrorCode) || 503} error=${lastError || credentials?.lastError || "No active credentials for provider: gemini"}`);
       return Response.json(
@@ -337,6 +344,8 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
     }
 
     const errorText = await upstreamResponse.text();
+    const byokError = byokUpstreamErrorResponse(credentials, upstreamResponse.status);
+    if (byokError) return byokError;
     const { shouldFallback } = await markAccountUnavailable(
       credentials.connectionId,
       upstreamResponse.status,

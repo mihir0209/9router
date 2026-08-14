@@ -142,8 +142,11 @@ function importLegacyMain(adapter, data) {
 
   importWithAssertion(adapter, "apiKeys", data.apiKeys || [], (k) => {
     adapter.run(
-      `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt) VALUES(?, ?, ?, ?, ?, ?)`,
-      [k.id, k.key, k.name || null, k.machineId || null, k.isActive === false ? 0 : 1, k.createdAt || new Date().toISOString()]
+      `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, ownerRef, budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode, byokProvider, byokCredentialsCiphertext, byokCredsEncVersion, regenerateVersion) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [k.id, k.key, k.name || null, k.machineId || null, k.isActive === false ? 0 : 1, k.createdAt || new Date().toISOString(),
+       k.ownerRef ?? null, k.budgetUsd ?? null, k.budgetResetHours ?? null, k.budgetWindowStartedAt ?? null,
+       k.billingMode || "credits", k.byokProvider ?? null, k.byokCredentialsCiphertext ?? null,
+       k.byokCredsEncVersion ?? null, k.regenerateVersion ?? 0]
     );
   }, (k) => ({ id: k.id ?? null, name: k.name ?? null }));
 

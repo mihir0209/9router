@@ -1,4 +1,5 @@
-import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools, getProviderNodeById } from "@/lib/localDb";
+import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools, getProviderNodeById, getApiKeyByKey } from "@/lib/localDb";
+import { decryptByokCredential } from "@/lib/byokCrypto.js";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
@@ -8,6 +9,26 @@ import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
 let selectionMutex = Promise.resolve();
+
+export class ByokCredentialsError extends Error {
+  constructor(message = "The BYOK credential is invalid") {
+    super(message);
+    this.name = "ByokCredentialsError";
+    this.code = "user_credentials_invalid";
+  }
+}
+
+export function credentialsErrorResponse(credentials) {
+  if (!(credentials instanceof ByokCredentialsError)) return null;
+  return new Response(JSON.stringify({
+    error: { message: credentials.message, type: "authentication_error", code: credentials.code },
+  }), { status: 401, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+}
+
+export function byokUpstreamErrorResponse(credentials, status) {
+  if (!credentials?.isByok || (status !== 401 && status !== 403)) return null;
+  return credentialsErrorResponse(new ByokCredentialsError("The provider rejected the BYOK credential"));
+}
 
 /**
  * Get provider credentials from localDb
@@ -22,6 +43,26 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     ? excludeConnectionIds
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
+  const keyRecord = options?.keyRecord || (options?.apiKey ? await getApiKeyByKey(options.apiKey) : null);
+
+  if (keyRecord?.billingMode === "byok") {
+    const providerId = resolveProviderId(provider);
+    if (!keyRecord.byokCredentialsCiphertext || resolveProviderId(keyRecord.byokProvider) !== providerId) {
+      return new ByokCredentialsError(`No valid BYOK credential for provider: ${providerId}`);
+    }
+    try {
+      return {
+        authType: "apiKey",
+        apiKey: decryptByokCredential(keyRecord.byokCredentialsCiphertext, keyRecord.byokProvider, keyRecord.byokCredsEncVersion),
+        connectionId: `byok:${keyRecord.id}`,
+        connectionName: "BYOK",
+        providerSpecificData: {},
+        isByok: true,
+      };
+    } catch {
+      return new ByokCredentialsError();
+    }
+  }
   // Acquire mutex to prevent race conditions
   const currentMutex = selectionMutex;
   let resolveMutex;
@@ -216,12 +257,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connectionName: connection.displayName || connection.name || connection.email || connection.id,
       copilotToken: connection.providerSpecificData?.copilotToken,
       providerSpecificData: {
-        ...(connection.providerSpecificData || {}),
-        connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
-        connectionProxyUrl: resolvedProxy.connectionProxyUrl,
-        connectionNoProxy: resolvedProxy.connectionNoProxy,
-        connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
-        vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+        ...providerSpecificData,
         // Include provider-level kiroAgenticPromptMode setting
         kiroAgenticPromptMode: providerId === "kiro" ? kiroAgenticPromptMode : undefined,
       },
@@ -248,7 +284,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  * @returns {{ shouldFallback: boolean, cooldownMs: number }}
  */
 export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
-  if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
+  if (!connectionId || connectionId === "noauth" || connectionId.startsWith("byok:")) return { shouldFallback: false, cooldownMs: 0 };
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
   const backoffLevel = conn?.backoffLevel || 0;
@@ -307,7 +343,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
  * @param {string|null} model - model that succeeded
  */
 export async function clearAccountError(connectionId, currentConnection, model = null) {
-  if (!connectionId || connectionId === "noauth") return;
+  if (!connectionId || connectionId === "noauth" || connectionId.startsWith("byok:")) return;
   const conn = currentConnection._connection || currentConnection;
   const now = Date.now();
   const allLockKeys = Object.keys(conn).filter(k => k.startsWith("modelLock_"));

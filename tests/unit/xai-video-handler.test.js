@@ -15,6 +15,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const authMocks = vi.hoisted(() => ({
   getProviderCredentials: vi.fn(),
+  credentialsErrorResponse: vi.fn(() => null),
+  byokUpstreamErrorResponse: vi.fn(() => null),
   markAccountUnavailable: vi.fn(async () => ({ shouldFallback: true, cooldownMs: 0 })),
   clearAccountError: vi.fn(async () => {}),
   extractApiKey: vi.fn(() => null),
@@ -27,6 +29,9 @@ const tokenMocks = vi.hoisted(() => ({
 
 vi.mock("@/sse/services/auth.js", () => authMocks);
 vi.mock("@/sse/services/tokenRefresh.js", () => tokenMocks);
+vi.mock("@/sse/services/validateApiKey.js", () => ({
+  validateAndEnforceApiKey: vi.fn(async () => ({ allowed: true, apiKey: null, keyRecord: null })),
+}));
 vi.mock("@/lib/localDb", () => ({
   getSettings: vi.fn(async () => ({ requireApiKey: false })),
   getComboByName: vi.fn(async () => null),

@@ -131,7 +131,7 @@ function _refreshProjectId(provider, connectionId, accessToken) {
   // Evict the stale cached entry so getProjectIdForConnection does a real fetch
   invalidateProjectId(connectionId);
 
-  getProjectIdForConnection(connectionId, accessToken)
+  getProjectIdForConnection(connectionId, accessToken, provider)
     .then((projectId) => {
       if (!projectId) return;
       updateProviderCredentials(connectionId, { projectId }).catch((err) => {
@@ -220,6 +220,7 @@ export async function updateProviderCredentials(connectionId, newCredentials) {
  */
 export async function checkAndRefreshToken(provider, credentials) {
   let creds = { ...credentials };
+  if (creds.isByok) return creds;
   if (!creds.connectionId && creds.id) {
     creds.connectionId = creds.id;
   }

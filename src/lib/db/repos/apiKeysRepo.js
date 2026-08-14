@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "../driver.js";
+import { generateApiKeyWithMachine } from "@/shared/utils/apiKey";
 
 const API_KEY_FIELDS = [
   "id", "key", "name", "machineId", "isActive", "createdAt",
@@ -8,6 +9,9 @@ const API_KEY_FIELDS = [
   "allowedModels", "blockedModels",
   "allowedIPs", "blockedIPs",
   "expiresAt", "description",
+  "ownerRef", "budgetUsd", "budgetResetHours", "budgetWindowStartedAt",
+  "billingMode", "byokProvider", "byokCredentialsCiphertext",
+  "byokCredsEncVersion", "regenerateVersion",
 ];
 
 function rowToKey(row) {
@@ -29,12 +33,23 @@ function rowToKey(row) {
     blockedIPs: row.blockedIPs || "",
     expiresAt: row.expiresAt || "",
     description: row.description || "",
+    ownerRef: row.ownerRef ?? null,
+    budgetUsd: row.budgetUsd ?? null,
+    budgetResetHours: row.budgetResetHours ?? null,
+    budgetWindowStartedAt: row.budgetWindowStartedAt ?? null,
+    billingMode: row.billingMode || "credits",
+    byokProvider: row.byokProvider ?? null,
+    byokCredentialsCiphertext: row.byokCredentialsCiphertext ?? null,
+    byokCredsEncVersion: row.byokCredsEncVersion ?? null,
+    regenerateVersion: row.regenerateVersion ?? 0,
   };
 }
 
-export async function getApiKeys() {
+export async function getApiKeys(ownerRef) {
   const db = await getAdapter();
-  const rows = db.all(`SELECT * FROM apiKeys ORDER BY createdAt ASC`);
+  const rows = ownerRef === undefined || ownerRef === null
+    ? db.all(`SELECT * FROM apiKeys ORDER BY createdAt ASC`)
+    : db.all(`SELECT * FROM apiKeys WHERE ownerRef = ? ORDER BY createdAt ASC`, [ownerRef]);
   return rows.map(rowToKey);
 }
 
@@ -72,6 +87,15 @@ export async function createApiKey(name, machineId, options = {}) {
     blockedIPs: options.blockedIPs || "",
     expiresAt: options.expiresAt || "",
     description: options.description || "",
+    ownerRef: options.ownerRef ?? null,
+    budgetUsd: options.budgetUsd ?? null,
+    budgetResetHours: options.budgetResetHours ?? null,
+    budgetWindowStartedAt: options.budgetWindowStartedAt ?? null,
+    billingMode: options.billingMode || "credits",
+    byokProvider: options.byokProvider ?? null,
+    byokCredentialsCiphertext: options.byokCredentialsCiphertext ?? null,
+    byokCredsEncVersion: options.byokCredsEncVersion ?? null,
+    regenerateVersion: options.regenerateVersion ?? 0,
   };
   db.run(
     `INSERT INTO apiKeys(${API_KEY_FIELDS.join(", ")}) VALUES(${API_KEY_FIELDS.map(() => "?").join(", ")})`,
@@ -95,6 +119,26 @@ export async function updateApiKey(id, data) {
     );
     result = merged;
   });
+  return result;
+}
+
+export async function regenerateApiKey(id) {
+  const db = await getAdapter();
+  let result = null;
+
+  db.transaction(() => {
+    const row = db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]);
+    if (!row) return;
+
+    const generated = generateApiKeyWithMachine(row.machineId);
+    db.run(
+      `UPDATE apiKeys SET key = ?, regenerateVersion = COALESCE(regenerateVersion, 0) + 1 WHERE id = ?`,
+      [generated.key, id]
+    );
+    db.run(`UPDATE usageHistory SET apiKey = ? WHERE apiKey = ?`, [generated.key, row.key]);
+    result = rowToKey(db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]));
+  });
+
   return result;
 }
 

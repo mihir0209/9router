@@ -1,5 +1,31 @@
 import { NextResponse } from "next/server";
 import { deleteApiKey, getApiKeyById, updateApiKey } from "@/lib/localDb";
+import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
+import { serializeApiKey } from "@/lib/apiKeys/serializers";
+import { getBudgetState } from "@/lib/budgetService.js";
+
+function normalizeList(value) {
+  return Array.isArray(value) ? value.join(",") : value;
+}
+
+function validatePolicy(data) {
+  const nonNegative = ["rateLimitRequests", "tokenLimitDaily", "tokenLimitMonthly", "budgetUsd"];
+  const positive = ["rateLimitWindowSeconds", "budgetResetHours"];
+  for (const field of nonNegative) {
+    if (data[field] != null && (!Number.isFinite(Number(data[field])) || Number(data[field]) < 0)) {
+      return `${field} must be a non-negative number`;
+    }
+  }
+  for (const field of positive) {
+    if (data[field] != null && (!Number.isFinite(Number(data[field])) || Number(data[field]) <= 0)) {
+      return `${field} must be a positive number`;
+    }
+  }
+  if (data.budgetWindowStartedAt != null && Number.isNaN(new Date(data.budgetWindowStartedAt).getTime())) {
+    return "budgetWindowStartedAt must be a valid date";
+  }
+  return null;
+}
 
 // GET /api/keys/[id] - Get single key
 export async function GET(request, { params }) {
@@ -9,7 +35,18 @@ export async function GET(request, { params }) {
     if (!key) {
       return NextResponse.json({ error: "Key not found" }, { status: 404 });
     }
-    return NextResponse.json({ key });
+    const isAdminApi = await hasValidAdminApiToken(request);
+    const serialized = serializeApiKey(key);
+    if (isAdminApi) {
+      const budget = await getBudgetState(key.key);
+      return NextResponse.json({
+        ...serialized,
+        budgetRemainingUsd: budget.remaining,
+        budgetResetAt: budget.resetsAt,
+        budgetSpendWindowUsd: budget.used,
+      });
+    }
+    return NextResponse.json({ key: serialized });
   } catch (error) {
     console.log("Error fetching key:", error);
     return NextResponse.json({ error: "Failed to fetch key" }, { status: 500 });
@@ -34,15 +71,36 @@ export async function PUT(request, { params }) {
       "allowedModels", "blockedModels",
       "allowedIPs", "blockedIPs",
       "expiresAt", "description",
+      "budgetUsd", "budgetResetHours", "budgetWindowStartedAt", "billingMode",
     ];
     for (const field of allowedFields) {
       if (body[field] !== undefined) {
         updateData[field] = body[field];
       }
     }
+    for (const field of ["allowedModels", "blockedModels", "allowedIPs", "blockedIPs"]) {
+      if (updateData[field] !== undefined) updateData[field] = normalizeList(updateData[field]);
+    }
+    if (updateData.billingMode && !["credits", "byok"].includes(updateData.billingMode)) {
+      return NextResponse.json({ error: "Invalid billingMode" }, { status: 400 });
+    }
+    const validationError = validatePolicy(updateData);
+    if (validationError) return NextResponse.json({ error: validationError }, { status: 400 });
+    if (updateData.billingMode === "byok" && !existing.byokCredentialsCiphertext) {
+      return NextResponse.json({ error: "Configure BYOK credentials before enabling byok billing" }, { status: 400 });
+    }
+    if (updateData.billingMode === "credits") {
+      Object.assign(updateData, {
+        byokProvider: null,
+        byokCredentialsCiphertext: null,
+        byokCredsEncVersion: null,
+      });
+    }
 
     const updated = await updateApiKey(id, updateData);
-    return NextResponse.json({ key: updated });
+    const isAdminApi = await hasValidAdminApiToken(request);
+    const serialized = serializeApiKey(updated);
+    return NextResponse.json(isAdminApi ? serialized : { key: serialized });
   } catch (error) {
     console.log("Error updating key:", error);
     return NextResponse.json({ error: "Failed to update key" }, { status: 500 });
