@@ -2,9 +2,9 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { getApiKeyById, updateApiKey } from "@/lib/db/index.js";
 import { getDashboardAuthSession } from "@/lib/auth/dashboardSession";
-import { BYOK_ENVELOPE_VERSION, encryptByokCredential } from "@/lib/byokCrypto.js";
+import { BYOK_ENVELOPE_VERSION } from "@/lib/byokCrypto.js";
 import { AI_PROVIDERS, resolveProviderId } from "@/shared/constants/providers.js";
-import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
+import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken.js";
 
 async function requireDashboardSession() {
   if (process.env.NINEROUTER_RUNTIME !== "cloudflare") return null;
@@ -13,9 +13,19 @@ async function requireDashboardSession() {
   return session?.authenticated ? null : NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 }
 
-// PUT /api/keys/[id]/byok - Replace or clear the key's provider credential.
-// The app never touches the raw credential after this call: WebClaw passes
-// { provider, apiKey } here and the fork encrypts it at rest with BYOK_ENC_KEY.
+function validateEnvelope(raw) {
+  if (typeof raw !== "string" || !raw.trim()) return "credentialsCiphertext must be a non-empty string";
+  let env;
+  try { env = JSON.parse(raw); } catch { return "credentialsCiphertext is not valid JSON"; }
+  if (!env || env.v !== BYOK_ENVELOPE_VERSION || env.alg !== "A256GCM") return "invalid envelope version or algorithm";
+  if (typeof env.iv !== "string" || typeof env.ciphertext !== "string" || typeof env.tag !== "string")
+    return "envelope missing required fields (iv, ciphertext, tag)";
+  return null;
+}
+
+// PUT /api/keys/[id]/byok - Replace or clear the key's BYOK credential.
+// Accepts { provider, credentialsCiphertext } — never plaintext apiKey.
+// credentialsCiphertext is a JSON AES-256-GCM envelope produced by byokCrypto.js.
 export async function PUT(request, { params }) {
   try {
     const unauthorized = await hasValidAdminApiToken(request) ? null : await requireDashboardSession();
@@ -26,7 +36,9 @@ export async function PUT(request, { params }) {
     if (!existing) return NextResponse.json({ error: "Key not found" }, { status: 404 });
 
     const body = await request.json();
-    if (body.apiKey === null || body.apiKey === undefined) {
+
+    // Clear path: credentialsCiphertext is null → restore credits mode
+    if (body.credentialsCiphertext === null || body.credentialsCiphertext === undefined) {
       await updateApiKey(id, {
         billingMode: "credits",
         byokProvider: null,
@@ -35,11 +47,9 @@ export async function PUT(request, { params }) {
       });
       return NextResponse.json({ billingMode: "credits" });
     }
+
     if (typeof body.provider !== "string" || !body.provider.trim()) {
       return NextResponse.json({ error: "provider is required" }, { status: 400 });
-    }
-    if (typeof body.apiKey !== "string" || !body.apiKey.trim()) {
-      return NextResponse.json({ error: "apiKey is required" }, { status: 400 });
     }
 
     const provider = resolveProviderId(body.provider.trim());
@@ -47,15 +57,19 @@ export async function PUT(request, { params }) {
       return NextResponse.json({ error: "unknown provider" }, { status: 400 });
     }
 
-    const credentialsCiphertext = encryptByokCredential(body.apiKey.trim(), provider, BYOK_ENVELOPE_VERSION);
+    const envError = validateEnvelope(body.credentialsCiphertext);
+    if (envError) {
+      return NextResponse.json({ error: envError }, { status: 400 });
+    }
+
     const updated = await updateApiKey(id, {
       billingMode: "byok",
       byokProvider: provider,
       byokCredsEncVersion: BYOK_ENVELOPE_VERSION,
-      byokCredentialsCiphertext: credentialsCiphertext,
+      byokCredentialsCiphertext: body.credentialsCiphertext,
     });
 
-    return NextResponse.json({ billingMode: updated.billingMode, provider: updated.byokProvider });
+    return NextResponse.json({ billingMode: updated.billingMode });
   } catch (error) {
     const status = /BYOK_ENC_KEY/.test(error.message) ? 503 : 500;
     return NextResponse.json({

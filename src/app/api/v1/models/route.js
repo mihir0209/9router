@@ -472,6 +472,27 @@ export async function buildModelsList(kindFilter, options = {}) {
           owned_by: outputAlias,
         };
         if (caps) originalModel.capabilities = caps;
+        // Token limits under the snake_case names the OpenAI/OpenRouter
+        // convention uses. `capabilities.contextWindow` is camelCase and nested,
+        // so clients matching context_length find nothing, fall back to guessing
+        // the window from the model name, and guess high — a 372k model read as
+        // 1.05M never reaches its compaction threshold and hard-fails upstream.
+        // Emitted at top level because not every client recurses into nested
+        // objects; the camelCase `capabilities` block stays for compatibility.
+        if (kind === LLM_KIND || allowAsLlm) {
+          let contextWindow = caps?.contextWindow;
+          let maxOutput = caps?.maxOutput;
+          // Live-catalog and service-kind capabilities are usually partial
+          // (often just { tools: true }), so fill the gaps from the static
+          // table rather than emitting null and leaving clients to guess.
+          if (!Number.isFinite(contextWindow) || !Number.isFinite(maxOutput)) {
+            const fallback = getCapabilitiesForModel(providerId, modelId);
+            if (!Number.isFinite(contextWindow)) contextWindow = fallback.contextWindow;
+            if (!Number.isFinite(maxOutput)) maxOutput = fallback.maxOutput;
+          }
+          if (Number.isFinite(contextWindow)) originalModel.context_length = contextWindow;
+          if (Number.isFinite(maxOutput)) originalModel.max_completion_tokens = maxOutput;
+        }
         models.push(originalModel);
 
         // Also emit an alias entry (so clients can use the short alias)
@@ -482,6 +503,8 @@ export async function buildModelsList(kindFilter, options = {}) {
             owned_by: outputAlias,
           };
           if (caps) aliasModel.capabilities = caps;
+          if (Number.isFinite(originalModel.context_length)) aliasModel.context_length = originalModel.context_length;
+          if (Number.isFinite(originalModel.max_completion_tokens)) aliasModel.max_completion_tokens = originalModel.max_completion_tokens;
           models.push(aliasModel);
         }
       }

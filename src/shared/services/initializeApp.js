@@ -116,6 +116,18 @@ async function runHeavyStartup() {
   migrateLegacyProxyScrape().then((migrated) => {
     if (migrated) console.log("[InitApp] Migrated legacy ProxyScrape config to unified provider system");
   }).catch(() => {});
+
+  if (hasQuotaAutoPingEnabled(settings)) {
+    import("@/shared/services/quotaAutoPing")
+      .then(({ startQuotaAutoPing }) => startQuotaAutoPing())
+      .catch((e) => console.log("[AutoPing] scheduler start failed:", e.message));
+  }
+
+  // Proactive OAuth token refresh (e.g. grok-cli ~6h TTL). Module is idempotent
+  // and also started from custom-server.js when that entry is used.
+  import("@/sse/services/backgroundTokenRefresh.js")
+    .then(({ startBackgroundTokenRefresh }) => startBackgroundTokenRefresh())
+    .catch((e) => console.log("[BackgroundTokenRefresh] scheduler start failed:", e.message));
 }
 
 function hasQuotaAutoPingEnabled(settings) {
