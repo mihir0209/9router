@@ -7,6 +7,7 @@ import { resolveSessionId } from "../utils/sessionManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { cleanJSONSchemaForAntigravity } from "../translator/formats/gemini.js";
 import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignature.js";
+import { getModelUpstreamId, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
 
 // Sanitize function name: Gemini requires [a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}
 function sanitizeFunctionName(name) {
@@ -135,6 +136,9 @@ export class AntigravityExecutor extends BaseExecutor {
 
   transformRequest(model, body, stream, credentials) {
     const projectId = credentials?.projectId || this.generateProjectId();
+    const resolvedModel = getModelUpstreamId(PROVIDER_ID_TO_ALIAS[this.provider] || this.provider, body.model || model);
+    const presetMatch = resolvedModel.match(/\(([^()]+)\)\s*$/);
+    const upstreamModel = presetMatch ? resolvedModel.slice(0, presetMatch.index).trim() : resolvedModel;
 
     // OpenAI clients may include stream_options even for non-streaming calls.
     // Google generateContent rejects that combination before processing the request.
@@ -258,6 +262,12 @@ export class AntigravityExecutor extends BaseExecutor {
     }
 
     const generationConfig = { ...(requestWithoutTools.generationConfig || {}) };
+    if (presetMatch && !generationConfig.thinkingConfig) {
+      generationConfig.thinkingConfig = {
+        thinkingLevel: presetMatch[1],
+        includeThoughts: presetMatch[1] !== "minimal",
+      };
+    }
     if (generationConfig.maxOutputTokens > MAX_ANTIGRAVITY_OUTPUT_TOKENS) {
       generationConfig.maxOutputTokens = MAX_ANTIGRAVITY_OUTPUT_TOKENS;
     }
@@ -280,7 +290,7 @@ export class AntigravityExecutor extends BaseExecutor {
     return {
       ...body,
       project: projectId,
-      model: body.model || model,
+      model: upstreamModel,
       userAgent: "antigravity",
       requestType: "agent",
       requestId: buildIdeRequestId({ body, request: transformedRequest, credentials, model, requestType: "agent" }),
