@@ -74,6 +74,9 @@ export const ERROR_RULES = [
   { text: "service unavailable",      backoff: true, retryHttp: true, attempts: 3, delayMs: 2000 },
 
   // --- Status-based rules (fallback when text doesn't match) ---
+  // Generic request-shape errors are deterministic across accounts. Return them
+  // directly instead of locking every credential for the same invalid payload.
+  { status: 400, shouldFallback: false },
   { status: 401, cooldownMs: COOLDOWN.long },
   { status: 402, cooldownMs: COOLDOWN.long },
   { status: 403, cooldownMs: COOLDOWN.long },
