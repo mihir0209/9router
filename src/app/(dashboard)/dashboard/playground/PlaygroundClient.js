@@ -16,7 +16,15 @@ const ENDPOINTS = [
 ];
 
 function safeParse(str, fallback) {
-  try { return JSON.parse(str); } catch { return fallback; }
+  try {
+    const parsed = JSON.parse(str);
+    return parsed ?? fallback;
+  } catch { return fallback; }
+}
+
+function safeParseArray(str) {
+  const parsed = safeParse(str, []);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function formatMs(ms) {
@@ -105,7 +113,7 @@ export default function PlaygroundClient() {
 
   useEffect(() => {
     setHost(window.location.origin);
-    setHistory(safeParse(localStorage.getItem(HISTORY_KEY), []));
+    setHistory(safeParseArray(localStorage.getItem(HISTORY_KEY)));
   }, []);
 
   useEffect(() => {
@@ -169,7 +177,7 @@ export default function PlaygroundClient() {
       const entry = { status: res.status, elapsed, body: parsed, model: body.model || selectedEndpoint, ts: Date.now() };
       setResponse(entry);
       setHistory(prev => {
-        const next = [entry, ...prev].slice(0, 50);
+        const next = [entry, ...(Array.isArray(prev) ? prev : [])].slice(0, 50);
         localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
         return next;
       });
@@ -266,7 +274,7 @@ export default function PlaygroundClient() {
         </div>
       )}
 
-      {history.length > 0 && (
+      {Array.isArray(history) && history.length > 0 && (
         <div>
           <h2 className="text-lg font-semibold mb-2">History</h2>
           <div className="space-y-2">
