@@ -37,12 +37,18 @@ export class BaseExecutor {
     if (this.provider?.startsWith?.("openai-compatible-")) {
       const baseUrl = credentials?.providerSpecificData?.baseUrl || OPENAI_COMPAT_BASE;
       const normalized = baseUrl.replace(/\/$/, "");
+      if (normalized.endsWith("/chat/completions") || normalized.endsWith("/responses") || normalized.includes("/chat-completions")) {
+        return normalized;
+      }
       const path = resolveOpenAICompatibleApiType(this.provider, credentials) === "responses" ? "/responses" : "/chat/completions";
       return `${normalized}${path}`;
     }
     if (this.provider?.startsWith?.("anthropic-compatible-")) {
       const baseUrl = credentials?.providerSpecificData?.baseUrl || ANTHROPIC_COMPAT_BASE;
       const normalized = baseUrl.replace(/\/$/, "");
+      if (normalized.endsWith("/messages")) {
+        return normalized;
+      }
       return `${normalized}/messages`;
     }
     const baseUrls = this.getBaseUrls();

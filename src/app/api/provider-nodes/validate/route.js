@@ -159,28 +159,34 @@ export async function POST(request) {
     }
 
     // OpenAI Compatible Validation (Default)
-    const modelsUrl = `${baseUrl.replace(/\/$/, "")}/models`;
-    const res = await fetchWithTimeout(modelsUrl, {
-      headers: { "Authorization": `Bearer ${apiKey}` },
-    });
+    const normalizedBase = baseUrl.trim().replace(/\/$/, "");
+    const isDirectChatUrl = normalizedBase.endsWith("/chat/completions") || normalizedBase.endsWith("/responses") || normalizedBase.includes("/chat-completions");
+    
+    if (!isDirectChatUrl) {
+      const modelsUrl = `${normalizedBase}/models`;
+      const res = await fetchWithTimeout(modelsUrl, {
+        headers: { "Authorization": `Bearer ${apiKey}` },
+      });
 
-    if (res.ok) return NextResponse.json({ valid: true });
+      if (res.ok) return NextResponse.json({ valid: true });
 
-    // Auth errors - no point trying chat fallback
-    if (res.status === 401 || res.status === 403) {
-      return NextResponse.json({ valid: false, error: "API key unauthorized" });
+      // Auth errors - no point trying chat fallback
+      if (res.status === 401 || res.status === 403) {
+        return NextResponse.json({ valid: false, error: "API key unauthorized" });
+      }
     }
 
-    // Fallback: try chat/completions if modelId provided
-    if (modelId) {
-      const chatRes = await fetchWithTimeout(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    // Fallback: try chat/completions if modelId provided (or if direct chat URL was provided)
+    if (modelId || isDirectChatUrl) {
+      const targetChatUrl = isDirectChatUrl ? normalizedBase : `${normalizedBase}/chat/completions`;
+      const chatRes = await fetchWithTimeout(targetChatUrl, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${apiKey}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: modelId,
+          model: modelId || "gpt-4o-mini",
           messages: [{ role: "user", content: "ping" }],
           max_tokens: 1
         })
@@ -195,7 +201,7 @@ export async function POST(request) {
       });
     }
 
-    return NextResponse.json({ valid: false, error: getModelsErrorMessage(res.status) });
+    return NextResponse.json({ valid: false, error: getModelsErrorMessage(404) });
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     console.error("Error validating provider node:", {
