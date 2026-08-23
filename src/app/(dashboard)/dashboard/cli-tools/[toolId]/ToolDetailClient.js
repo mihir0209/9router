@@ -123,7 +123,7 @@ export default function ToolDetailClient({ toolId, machineId }) {
     if (tunnelEnabled && tunnelPublicUrl) return tunnelPublicUrl;
     if (cloudEnabled && CLOUD_URL) return CLOUD_URL;
     if (typeof window !== "undefined") return window.location.origin;
-    return "http://localhost:20128";
+    return `http://localhost:${typeof window !== "undefined" ? window.location.port : (process.env.PORT || "20128")}`;
   };
 
   const renderToolCard = () => {
