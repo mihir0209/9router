@@ -8,6 +8,7 @@ import {
   resolveHttpTextRetry,
   getRetryComputeDelayHook,
 } from "../retry/index.js";
+import { resolveRemediation } from "../retry/remediation.js";
 import { resolveHeaderTemplates, applyHeaderBlacklist } from "../utils/headerTemplates.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
 
@@ -176,9 +177,9 @@ export class BaseExecutor {
     };
 
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
-      const url = this.buildUrl(model, stream, urlIndex, credentials);
-      const transformedBody = this.transformRequest(model, body, stream, credentials);
-      const headers = this.buildHeaders(credentials, stream, url, model);
+      let url = this.buildUrl(model, stream, urlIndex, credentials);
+      let transformedBody = this.transformRequest(model, body, stream, credentials);
+      let headers = this.buildHeaders(credentials, stream, url, model);
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
@@ -227,6 +228,26 @@ export class BaseExecutor {
               console.error("[KIRO_DEBUG] upstream response → /tmp/kiro-debug-upstream-response.json");
             } catch (e) { console.error(`[KIRO_DEBUG] response dump failed: ${e.message}`); }
           }
+          const remediation = resolveRemediation({
+            status: response.status,
+            errorBody: errBody,
+            url,
+            transformedBody,
+            headers,
+            stream,
+            credentials,
+            model,
+            provider: this.provider,
+          });
+          if (remediation && remediation.retry) {
+            if (remediation.transformedBody) transformedBody = remediation.transformedBody;
+            if (remediation.url) url = remediation.url;
+            if (remediation.headers) Object.assign(headers, remediation.headers);
+            log?.debug?.("REMEDIATE", `${this.provider} ${response.status} → mutated request, retrying same account`);
+            urlIndex--;
+            continue;
+          }
+
           const textRetry = resolveHttpTextRetry(this.provider, response.status, errBody, credentials);
           if (textRetry && await tryRetry(urlIndex, response.status, `text "${textRetry.rule?.text || "match"}"`, response, textRetry)) {
             urlIndex--;
