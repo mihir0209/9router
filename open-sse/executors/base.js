@@ -144,6 +144,8 @@ export class BaseExecutor {
     let lastError = null;
     let lastStatus = 0;
     const retryAttemptsByUrl = {};
+    const remediatedRequestsByUrl = {};
+    const attemptedRemediationsByUrl = {};
 
     // Merge: defaults → executor/registry config → plugin/node/settings overlays
     // includeRegistry:false — this.config.retry already is PROVIDERS[id].retry
@@ -177,9 +179,10 @@ export class BaseExecutor {
     };
 
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
-      let url = this.buildUrl(model, stream, urlIndex, credentials);
-      let transformedBody = this.transformRequest(model, body, stream, credentials);
-      let headers = this.buildHeaders(credentials, stream, url, model);
+      const priorRemediation = remediatedRequestsByUrl[urlIndex];
+      let url = priorRemediation?.url || this.buildUrl(model, stream, urlIndex, credentials);
+      let transformedBody = priorRemediation?.transformedBody || this.transformRequest(model, body, stream, credentials);
+      let headers = priorRemediation?.headers || this.buildHeaders(credentials, stream, url, model);
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
@@ -228,7 +231,8 @@ export class BaseExecutor {
               console.error("[KIRO_DEBUG] upstream response → /tmp/kiro-debug-upstream-response.json");
             } catch (e) { console.error(`[KIRO_DEBUG] response dump failed: ${e.message}`); }
           }
-          const remediation = resolveRemediation({
+          const attemptedRemediations = attemptedRemediationsByUrl[urlIndex] ||= new Set();
+          const remediation = await resolveRemediation({
             status: response.status,
             errorBody: errBody,
             url,
@@ -238,11 +242,13 @@ export class BaseExecutor {
             credentials,
             model,
             provider: this.provider,
-          });
+          }, attemptedRemediations);
           if (remediation && remediation.retry) {
             if (remediation.transformedBody) transformedBody = remediation.transformedBody;
             if (remediation.url) url = remediation.url;
             if (remediation.headers) Object.assign(headers, remediation.headers);
+            attemptedRemediations.add(remediation.handlerId);
+            remediatedRequestsByUrl[urlIndex] = { url, transformedBody, headers };
             log?.debug?.("REMEDIATE", `${this.provider} ${response.status} → mutated request, retrying same account`);
             urlIndex--;
             continue;

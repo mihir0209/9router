@@ -1,5 +1,5 @@
 import { errorTextIncludes } from "./schema.js";
-import { openaiToOpenAIResponsesRequest } from "../translator/request/openai-responses.js";
+import { budgetToLevel } from "../translator/concerns/thinking.js";
 
 /**
  * Registry of dynamic request remediation handlers.
@@ -12,23 +12,78 @@ const REMEDIATION_HANDLERS = [];
 /**
  * Register a remediation handler.
  * @param {object} handler
- * @param {string|string[]} [handler.pattern] - Substring pattern(s) to match against error body
+ * @param {string|RegExp|(string|RegExp)[]} [handler.pattern] - Pattern(s) to match against error body
  * @param {number} [handler.status=400] - Status code to match
  * @param {function} handler.remediate - (ctx) => { transformedBody?, url?, headers?, retry: boolean }
  */
 export function registerRemediationHandler(handler) {
-  if (!handler || typeof handler.remediate !== "function") return;
+  if (!handler || typeof handler.id !== "string" || !handler.id || typeof handler.remediate !== "function") return;
   REMEDIATION_HANDLERS.push(handler);
 }
+
+function matchPattern(errorBody, pattern) {
+  if (pattern instanceof RegExp) {
+    pattern.lastIndex = 0;
+    return pattern.exec(String(errorBody || ""));
+  }
+  return errorTextIncludes(errorBody, pattern) ? [pattern] : null;
+}
+
+function normalizeClaudeEffort(budgetTokens) {
+  const level = budgetToLevel(budgetTokens);
+  if (level === "xhigh" || level === "max") return "high";
+  return level || "medium";
+}
+
+// Upstreams can explicitly announce a renamed top-level request parameter.
+// Capture the names from the response rather than tying this to a provider or model.
+registerRemediationHandler({
+  id: "rename-unsupported-parameter",
+  pattern: /unsupported parameter:\s*\\?["']([A-Za-z_][A-Za-z0-9_]*)\\?["'][\s\S]*?(?:this\s+)?parameter has moved to\s*\\?["']([A-Za-z_][A-Za-z0-9_]*)\\?["']/i,
+  status: 400,
+  remediate: ({ transformedBody, match }) => {
+    const [, from, to] = match || [];
+    if (!from || !to || from === to || !Object.prototype.hasOwnProperty.call(transformedBody, from)) return null;
+    const body = { ...transformedBody };
+    if (body[to] === undefined) body[to] = body[from];
+    delete body[from];
+    return { transformedBody: body, retry: true };
+  },
+});
+
+// New Claude-compatible APIs can describe the exact legacy and replacement
+// thinking types in their error. Apply only when the submitted value matches.
+registerRemediationHandler({
+  id: "replace-unsupported-claude-thinking-type",
+  pattern: /\\?["']thinking\.type\.([A-Za-z][A-Za-z0-9_-]*)\\?["']\s+is not supported[\s\S]*?use\s+\\?["']thinking\.type\.([A-Za-z][A-Za-z0-9_-]*)\\?["'][\s\S]*?\\?["']output_config\.effort\\?["']/i,
+  status: 400,
+  remediate: ({ transformedBody, match }) => {
+    const [, from, to] = match || [];
+    if (!from || !to || from === to || transformedBody?.thinking?.type !== from) return null;
+    const effort = transformedBody.output_config?.effort
+      || normalizeClaudeEffort(transformedBody.thinking.budget_tokens);
+    return {
+      transformedBody: {
+        ...transformedBody,
+        thinking: { type: to },
+        output_config: { ...(transformedBody.output_config || {}), effort },
+      },
+      retry: true,
+    };
+  },
+});
 
 // 1. OpenAI / Cloudflare AI Gateway: Function tools with reasoning_effort on /v1/chat/completions
 // Error: "Function tools with reasoning_effort are not supported for gpt-5.6-sol in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'."
 registerRemediationHandler({
+  id: "openai-tools-require-responses",
   pattern: ["to use function tools, use /v1/responses", "use /v1/responses or set reasoning_effort to 'none'"],
   status: 400,
-  remediate: ({ url, transformedBody, headers, stream, credentials, model }) => {
+  remediate: async ({ url, transformedBody, stream, credentials, model }) => {
     // If upstream supports switching to /responses
     if (url.includes("/chat/completions")) {
+      // Lazy import avoids BaseExecutor → remediation → translator registry → executors cycle.
+      const { openaiToOpenAIResponsesRequest } = await import("../translator/request/openai-responses.js");
       const responsesUrl = url.replace("/chat/completions", "/responses");
       const responsesBody = openaiToOpenAIResponsesRequest(model || transformedBody.model, transformedBody, stream, credentials);
       return {
@@ -55,6 +110,7 @@ registerRemediationHandler({
 
 // 2. Antigravity: Invalid Argument (e.g. invalid thinking configuration or un-tiered model name)
 registerRemediationHandler({
+  id: "antigravity-invalid-thinking-config",
   pattern: ["request contains an invalid argument", "invalid_argument"],
   status: 400,
   remediate: ({ transformedBody }) => {
@@ -83,21 +139,26 @@ registerRemediationHandler({
 /**
  * Resolve remediation for an upstream error.
  * @param {object} ctx - { status, errorBody, url, transformedBody, headers, stream, credentials, model, provider }
- * @returns {object|null} - { transformedBody?, url?, headers?, retry: boolean }
+ * @returns {Promise<object|null>} - { transformedBody?, url?, headers?, retry: boolean, handlerId }
  */
-export function resolveRemediation(ctx) {
+export async function resolveRemediation(ctx, attemptedHandlerIds = new Set()) {
   const { status, errorBody } = ctx;
   if (!status || !errorBody) return null;
 
   for (const handler of REMEDIATION_HANDLERS) {
+    if (attemptedHandlerIds.has(handler.id)) continue;
     if (handler.status && handler.status !== status) continue;
+    let match = null;
     if (handler.pattern) {
       const patterns = Array.isArray(handler.pattern) ? handler.pattern : [handler.pattern];
-      const match = patterns.some(p => errorTextIncludes(errorBody, p));
+      for (const pattern of patterns) {
+        match = matchPattern(errorBody, pattern);
+        if (match) break;
+      }
       if (!match) continue;
     }
-    const result = handler.remediate(ctx);
-    if (result && result.retry) return result;
+    const result = await handler.remediate({ ...ctx, match });
+    if (result && result.retry) return { ...result, handlerId: handler.id };
   }
 
   return null;
