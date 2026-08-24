@@ -35,18 +35,50 @@ function normalizeClaudeEffort(budgetTokens) {
   return level || "medium";
 }
 
+function isSafePath(path) {
+  const unsafe = new Set(["__proto__", "prototype", "constructor"]);
+  return path.split(".").every((part) => part && !unsafe.has(part));
+}
+
+function getPath(object, path) {
+  return path.split(".").reduce((value, key) => value?.[key], object);
+}
+
+function setPath(object, path, value) {
+  const keys = path.split(".");
+  let current = object;
+  for (const key of keys.slice(0, -1)) {
+    const child = current[key];
+    current[key] = child && typeof child === "object" && !Array.isArray(child) ? { ...child } : {};
+    current = current[key];
+  }
+  const last = keys.at(-1);
+  if (current[last] === undefined) current[last] = value;
+}
+
+function deletePath(object, path) {
+  const keys = path.split(".");
+  let current = object;
+  for (const key of keys.slice(0, -1)) {
+    if (!current[key] || typeof current[key] !== "object") return;
+    current[key] = { ...current[key] };
+    current = current[key];
+  }
+  delete current[keys.at(-1)];
+}
+
 // Upstreams can explicitly announce a renamed top-level request parameter.
 // Capture the names from the response rather than tying this to a provider or model.
 registerRemediationHandler({
   id: "rename-unsupported-parameter",
-  pattern: /unsupported parameter:\s*\\?["']([A-Za-z_][A-Za-z0-9_]*)\\?["'][\s\S]*?(?:this\s+)?parameter has moved to\s*\\?["']([A-Za-z_][A-Za-z0-9_]*)\\?["']/i,
+  pattern: /unsupported parameter:\s*\\?["']([A-Za-z_][A-Za-z0-9_.]*)\\?["'][\s\S]*?(?:this\s+)?parameter has moved to\s*\\?["']([A-Za-z_][A-Za-z0-9_.]*)\\?["']/i,
   status: 400,
   remediate: ({ transformedBody, match }) => {
     const [, from, to] = match || [];
-    if (!from || !to || from === to || !Object.prototype.hasOwnProperty.call(transformedBody, from)) return null;
+    if (!from || !to || from === to || !isSafePath(from) || !isSafePath(to) || getPath(transformedBody, from) === undefined) return null;
     const body = { ...transformedBody };
-    if (body[to] === undefined) body[to] = body[from];
-    delete body[from];
+    setPath(body, to, getPath(transformedBody, from));
+    deletePath(body, from);
     return { transformedBody: body, retry: true };
   },
 });

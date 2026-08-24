@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import { BaseExecutor } from "../../open-sse/executors/base.js";
+import { DefaultExecutor } from "../../open-sse/executors/default.js";
 
 const received = new Map();
 let server;
@@ -42,6 +43,30 @@ beforeAll(async () => {
             code: "unsupported_parameter",
           },
         });
+        return;
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.url === "/responses-reasoning") {
+      if (body.reasoning_effort !== undefined) {
+        sendJson(res, 400, {
+          error: {
+            message: "Unsupported parameter: 'reasoning_effort'. In the Responses API, this parameter has moved to 'reasoning.effort'. Try again with the new parameter.",
+            type: "invalid_request_error",
+            code: "unsupported_parameter",
+          },
+        });
+        return;
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.url === "/canonical/responses") {
+      if (body.reasoning_effort !== undefined || body.max_completion_tokens !== undefined) {
+        sendJson(res, 400, { error: { message: "legacy Responses parameters reached the wire" } });
         return;
       }
       sendJson(res, 200, { ok: true });
@@ -124,6 +149,50 @@ describe("request remediation against an error demo server", () => {
         thinking: { type: "adaptive" },
         output_config: { effort: "high" },
       },
+    ]);
+  });
+
+  it("moves a rejected flat argument into the reported nested path", async () => {
+    received.delete("/responses-reasoning");
+    const executor = new BaseExecutor("demo-responses", {
+      baseUrl: `${baseUrl}/responses-reasoning`,
+      retry: {},
+    });
+
+    const result = await executor.execute({
+      model: "demo-model",
+      body: { input: "hello", reasoning_effort: "high" },
+      stream: false,
+      credentials: { apiKey: "demo" },
+    });
+
+    expect(result.response.status).toBe(200);
+    expect(received.get("/responses-reasoning")).toEqual([
+      { input: "hello", reasoning_effort: "high" },
+      { input: "hello", reasoning: { effort: "high" } },
+    ]);
+  });
+
+  it("canonicalizes Responses parameters before the first network request", async () => {
+    received.delete("/canonical/responses");
+    const executor = new DefaultExecutor("openai-compatible-responses-demo");
+
+    const result = await executor.execute({
+      model: "gpt-5.4",
+      body: { input: "hello", max_completion_tokens: 123, reasoning_effort: "high" },
+      stream: false,
+      credentials: {
+        apiKey: "demo",
+        providerSpecificData: {
+          apiType: "responses",
+          baseUrl: `${baseUrl}/canonical/responses`,
+        },
+      },
+    });
+
+    expect(result.response.status).toBe(200);
+    expect(received.get("/canonical/responses")).toEqual([
+      { input: "hello", max_output_tokens: 123, reasoning: { effort: "high" } },
     ]);
   });
 });

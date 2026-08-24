@@ -1,5 +1,89 @@
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM } from "../schema/index.js";
 
+const CHAT_ONLY_PARAMETERS = [
+  "audio",
+  "frequency_penalty",
+  "logit_bias",
+  "modalities",
+  "n",
+  "prediction",
+  "presence_penalty",
+  "seed",
+  "stop",
+];
+
+function toResponsesTextFormat(responseFormat) {
+  if (!responseFormat || typeof responseFormat !== "object") return null;
+  if (responseFormat.type !== "json_schema") return { ...responseFormat };
+  return {
+    type: "json_schema",
+    ...(responseFormat.json_schema || {}),
+  };
+}
+
+/**
+ * Canonicalize legacy Chat Completions aliases to the current Responses API shape.
+ * Idempotent so every route that ultimately emits a Responses request can call it.
+ */
+export function normalizeOpenAIResponsesRequest(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const result = { ...body };
+
+  if (result.max_output_tokens === undefined) {
+    result.max_output_tokens = result.max_completion_tokens ?? result.max_tokens;
+  }
+  delete result.max_completion_tokens;
+  delete result.max_tokens;
+  if (result.max_output_tokens === undefined) delete result.max_output_tokens;
+
+  if (result.reasoning_effort !== undefined || result.reasoning_summary !== undefined) {
+    const reasoning = result.reasoning && typeof result.reasoning === "object" && !Array.isArray(result.reasoning)
+      ? { ...result.reasoning }
+      : {};
+    if (reasoning.effort === undefined && result.reasoning_effort !== undefined) reasoning.effort = result.reasoning_effort;
+    if (reasoning.summary === undefined && result.reasoning_summary !== undefined) reasoning.summary = result.reasoning_summary;
+    result.reasoning = reasoning;
+  }
+  delete result.reasoning_effort;
+  delete result.reasoning_summary;
+
+  if (result.verbosity !== undefined || result.response_format !== undefined) {
+    const text = result.text && typeof result.text === "object" && !Array.isArray(result.text)
+      ? { ...result.text }
+      : {};
+    if (text.verbosity === undefined && result.verbosity !== undefined) text.verbosity = result.verbosity;
+    if (text.format === undefined && result.response_format !== undefined) {
+      text.format = toResponsesTextFormat(result.response_format);
+    }
+    result.text = text;
+  }
+  delete result.verbosity;
+  delete result.response_format;
+
+  if (result.logprobs === true) {
+    const include = Array.isArray(result.include) ? [...result.include] : [];
+    if (!include.includes("message.output_text.logprobs")) include.push("message.output_text.logprobs");
+    result.include = include;
+  }
+  delete result.logprobs;
+
+  if (result.tool_choice?.type === "function" && result.tool_choice.function?.name) {
+    result.tool_choice = { type: "function", name: result.tool_choice.function.name };
+  }
+
+  for (const parameter of CHAT_ONLY_PARAMETERS) delete result[parameter];
+  if (result.stream_options && typeof result.stream_options === "object") {
+    const streamOptions = {};
+    if (result.stream_options.include_obfuscation !== undefined) {
+      streamOptions.include_obfuscation = result.stream_options.include_obfuscation;
+    }
+    if (Object.keys(streamOptions).length > 0) result.stream_options = streamOptions;
+    else delete result.stream_options;
+  }
+
+  return result;
+}
+
 /**
  * Normalize Responses API input to array format.
  * Accepts string or array, returns array of message items.

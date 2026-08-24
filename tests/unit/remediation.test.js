@@ -13,6 +13,12 @@ const thinkingError = JSON.stringify({
   },
 });
 
+const reasoningEffortError = JSON.stringify({
+  error: {
+    message: "Unsupported parameter: 'reasoning_effort'. In the Responses API, this parameter has moved to 'reasoning.effort'.",
+  },
+});
+
 describe("request remediation", () => {
   it("renames the exact top-level argument named by the upstream", async () => {
     const result = await resolveRemediation({
@@ -43,6 +49,18 @@ describe("request remediation", () => {
     });
 
     expect(result.transformedBody).toEqual({ current_limit: 12, input: "hello" });
+  });
+
+  it("moves an argument into a dotted destination path", async () => {
+    const result = await resolveRemediation({
+      status: 400,
+      errorBody: reasoningEffortError,
+      transformedBody: { reasoning_effort: "high", reasoning: { summary: "auto" } },
+    });
+
+    expect(result.transformedBody).toEqual({
+      reasoning: { summary: "auto", effort: "high" },
+    });
   });
 
   it("does not mutate when the reported source argument is absent", async () => {

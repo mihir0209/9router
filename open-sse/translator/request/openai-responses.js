@@ -6,7 +6,7 @@
  */
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
-import { normalizeResponsesInput } from "../formats/responsesApi.js";
+import { normalizeOpenAIResponsesRequest, normalizeResponsesInput } from "../formats/responsesApi.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM } from "../schema/index.js";
 
 // Responses API enforces max 64 chars on call_id (#393)
@@ -300,7 +300,7 @@ function buildReasoningInputItem(msg) {
  */
 export function openaiToOpenAIResponsesRequest(model, body, stream, credentials) {
   // Body already in Responses API format (e.g. Cursor CLI calling /chat/completions with input[])
-  if (body.input) return { ...body, model, stream: true };
+  if (body.input) return normalizeOpenAIResponsesRequest({ ...body, model, stream: true });
 
   const result = {
     model,
@@ -416,14 +416,25 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
 
   // Pass through other relevant fields
   if (body.temperature !== undefined) result.temperature = body.temperature;
-  if (body.max_tokens !== undefined) result.max_tokens = body.max_tokens;
+  if (body.max_output_tokens !== undefined) result.max_output_tokens = body.max_output_tokens;
+  else if (body.max_completion_tokens !== undefined) result.max_output_tokens = body.max_completion_tokens;
+  else if (body.max_tokens !== undefined) result.max_output_tokens = body.max_tokens;
   if (body.top_p !== undefined) result.top_p = body.top_p;
   if (body.reasoning !== undefined) result.reasoning = body.reasoning;
-  if (body.reasoning_effort !== undefined) result.reasoning = { effort: body.reasoning_effort, summary: "auto" };
+  if (body.reasoning_effort !== undefined) result.reasoning_effort = body.reasoning_effort;
   if (body.service_tier !== undefined) result.service_tier = body.service_tier;
   if (body.prompt_cache_key !== undefined) result.prompt_cache_key = body.prompt_cache_key;
 
-  return result;
+  if (body.reasoning_summary !== undefined) result.reasoning_summary = body.reasoning_summary;
+  if (body.verbosity !== undefined) result.verbosity = body.verbosity;
+  if (body.response_format !== undefined) result.response_format = body.response_format;
+  if (body.logprobs !== undefined) result.logprobs = body.logprobs;
+  if (body.top_logprobs !== undefined) result.top_logprobs = body.top_logprobs;
+  if (body.parallel_tool_calls !== undefined) result.parallel_tool_calls = body.parallel_tool_calls;
+  if (body.tool_choice !== undefined) result.tool_choice = body.tool_choice;
+  if (body.stream_options !== undefined) result.stream_options = body.stream_options;
+
+  return normalizeOpenAIResponsesRequest(result);
 }
 
 // Register both directions

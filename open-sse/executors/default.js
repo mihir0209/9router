@@ -2,6 +2,7 @@ import { BaseExecutor } from "./base.js";
 import { PROVIDERS, PROVIDER_OAUTH } from "../config/providers.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE, selectAnthropicBeta } from "../providers/shared.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
+import { normalizeOpenAIResponsesRequest } from "../translator/formats/responsesApi.js";
 import { OAUTH_ENDPOINTS, buildKimiHeaders } from "../config/appConstants.js";
 import { buildClineHeaders } from "../shared/clineAuth.js";
 import { filterClaudeIdentityHeaders, getCachedClaudeHeaders } from "../utils/claudeHeaderCache.js";
@@ -74,8 +75,9 @@ export class DefaultExecutor extends BaseExecutor {
     return /gpt-5|o[134]-/i.test(model);
   }
 
-  transformRequest(model, body) {
-    const transformed = this.applyJsonSchemaFallback(body);
+  transformRequest(model, body, stream, credentials) {
+    const isResponses = resolveOpenAICompatibleApiType(this.provider, credentials) === "responses";
+    const transformed = isResponses ? body : this.applyJsonSchemaFallback(body);
 
     if (transformed && typeof transformed === "object") {
       // quirk: some openai-compatible providers reject Anthropic's client_metadata field
@@ -83,14 +85,17 @@ export class DefaultExecutor extends BaseExecutor {
         delete transformed.client_metadata;
       }
       // Azure OpenAI and newer OpenAI models require max_completion_tokens instead of max_tokens
-      if (this.requiresMaxCompletionTokens(model) && transformed.max_tokens !== undefined) {
+      if (!isResponses && this.requiresMaxCompletionTokens(model) && transformed.max_tokens !== undefined) {
         transformed.max_completion_tokens = transformed.max_tokens;
         delete transformed.max_tokens;
       }
       stripUnsupportedParams(this.provider, model, transformed);
     }
 
-    return injectReasoningContent({ provider: this.provider, model, body: transformed });
+    const injected = injectReasoningContent({ provider: this.provider, model, body: transformed });
+    return isResponses
+      ? normalizeOpenAIResponsesRequest(injected)
+      : injected;
   }
 
   // Fallback json_schema → json_object for openai-compatible providers without native Structured Output.
