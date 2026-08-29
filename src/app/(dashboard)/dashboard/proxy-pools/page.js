@@ -395,27 +395,25 @@ export default function ProxyPoolsPage() {
   };
 
   const handleRemoveDead = async () => {
-    const inactive = proxyPools.filter(p => !p.isActive);
-    if (inactive.length === 0) {
+    if (inactiveCount === 0) {
       notify.info("No inactive proxies to remove");
       return;
     }
     setConfirmState({
-      title: "Remove Dead Proxies",
-      message: `This will permanently delete ${inactive.length} inactive proxy entries.\n\nThis cannot be undone.`,
+      title: "Delete Inactive Proxies",
+      message: `This will permanently delete all ${inactiveCount} inactive/disabled proxy entries.\n\nPools still bound to provider connections are kept. This cannot be undone.`,
       onConfirm: async () => {
         setConfirmState(null);
         setBulkBusy(true);
         try {
-          let deleted = 0;
-          for (const pool of inactive) {
-            try {
-              const res = await fetch(`/api/proxy-pools/${pool.id}`, { method: "DELETE" });
-              if (res.ok) deleted++;
-            } catch {}
-          }
+          const res = await fetch("/api/proxy-pools/inactive", { method: "DELETE" });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
           await fetchProxyPools();
-          notify.success(`Removed ${deleted} dead proxies`);
+          const skipped = data.skippedBound || 0;
+          notify.success(`Deleted ${data.deleted ?? 0} inactive proxies${skipped ? `, kept ${skipped} bound` : ""}`);
+        } catch (error) {
+          notify.error(error.message || "Failed to delete inactive proxies");
         } finally {
           setBulkBusy(false);
         }
@@ -763,6 +761,7 @@ export default function ProxyPoolsPage() {
     () => proxyPools.filter((pool) => pool.isActive === true).length,
     [proxyPools]
   );
+  const inactiveCount = proxyPools.filter((pool) => pool.isActive !== true).length;
   const proxyScrapeCount = useMemo(
     () => proxyPools.filter((pool) => pool.source === "proxyscrape").length,
     [proxyPools]
@@ -961,6 +960,7 @@ export default function ProxyPoolsPage() {
                     className="w-full rounded-[10px] border border-transparent bg-surface-2 px-3 py-2.5 text-sm text-text-main focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
                   />
                 )}
+                {field.help && <span className="text-xs text-text-muted">{field.help}</span>}
               </label>
             ))}
             <div className="flex gap-2 mt-2">
@@ -994,6 +994,18 @@ export default function ProxyPoolsPage() {
           )}
           <Badge variant="default">Total: {proxyPools.length}</Badge>
           <Badge variant="success">Active: {activeCount}</Badge>
+          {inactiveCount > 0 && (
+            <Button
+              size="sm"
+              variant="secondary"
+              icon="delete_sweep"
+              className="ml-auto"
+              onClick={handleRemoveDead}
+              disabled={bulkBusy || healthChecking}
+            >
+              Delete Inactive ({inactiveCount})
+            </Button>
+          )}
         </div>
 
         {(selectedIds.length > 0 || healthChecking) && (
@@ -1016,7 +1028,7 @@ export default function ProxyPoolsPage() {
                 variant="secondary"
                 icon="delete_sweep"
                 onClick={handleRemoveDead}
-                disabled={healthChecking || bulkBusy || proxyPools.filter(p => !p.isActive).length === 0}
+                disabled={healthChecking || bulkBusy || inactiveCount === 0}
               >
                 Remove Dead
               </Button>

@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createErrorResult } from "../utils/error.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { buildCustomMediaHeaders, resolveCustomMediaUrl } from "../config/customMedia.js";
 
 // Build auth headers from sttConfig + token
 function buildAuthHeaders(cfg, token) {
@@ -145,7 +146,12 @@ async function transcribeOpenAICompatible(cfg, file, model, token, formData) {
     const v = formData.get(k);
     if (v !== null && v !== undefined && v !== "") fd.append(k, v);
   }
-  const res = await fetch(cfg.baseUrl, { method: "POST", headers: buildAuthHeaders(cfg, token), body: fd });
+  const config = cfg.custom ? cfg : null;
+  const headers = config
+    ? buildCustomMediaHeaders(config, { apiKey: token }, null)
+    : buildAuthHeaders(cfg, token);
+  const url = cfg.isFullEndpoint ? cfg.baseUrl : (config ? resolveCustomMediaUrl(config, "stt") : cfg.baseUrl);
+  const res = await fetch(url, { method: "POST", headers, body: fd });
   if (!res.ok) return upstreamError(res);
   const ct = res.headers.get("content-type") || "application/json";
   const txt = await res.text();
@@ -178,7 +184,7 @@ export async function handleSttCore({ provider, model, formData, credentials, st
   // whose address only the operator knows. Opt-in: absent unless the connection
   // sets it, so cloud providers are untouched. Mirrors the custom embedding
   // providers, which already resolve baseUrl the same way.
-  const overrideUrl = credentials?.providerSpecificData?.baseUrl;
+  const overrideUrl = credentials?.providerSpecificData?.endpointUrl || credentials?.providerSpecificData?.baseUrl;
   if (overrideUrl) cfg = { ...cfg, baseUrl: String(overrideUrl).replace(/\/+$/, "") };
 
   const token = cfg.authType === "none" ? null : (credentials?.apiKey || credentials?.accessToken);

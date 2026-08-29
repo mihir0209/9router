@@ -20,7 +20,8 @@
     "deploy:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare deploy",
     "upload:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare upload",
     "cf:typegen": "wrangler types --env-interface CloudflareEnv",
-    "db:init:cloudflare": "wrangler d1 create 9router-db"
+    "db:init:cloudflare": "wrangler d1 create 9router-db",
+    "geo:sync": "node scripts/opencode-geo-sync.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

@@ -130,6 +130,28 @@ describe("DB SQLite layer — public API parity", () => {
     expect(await sqliteDb.getProviderNodeById(n.id)).toBeNull();
   });
 
+  it("providerNodes: persists custom media configuration", async () => {
+    const node = await sqliteDb.createProviderNode({
+      type: "custom-media",
+      name: "Images",
+      prefix: "images",
+      mediaKind: "image",
+      baseUrl: "https://images.test/v1",
+      endpointUrl: "https://images.test/generate",
+      authHeader: "x-api-key",
+      models: ["flux-1", "flux-2"],
+      customHeaders: { "X-Tenant": "acme" },
+    });
+    const stored = await sqliteDb.getProviderNodeById(node.id);
+    expect(stored).toMatchObject({
+      mediaKind: "image",
+      endpointUrl: "https://images.test/generate",
+      authHeader: "x-api-key",
+      models: ["flux-1", "flux-2"],
+      customHeaders: { "X-Tenant": "acme" },
+    });
+  });
+
   it("proxyPools: CRUD with sort by updatedAt desc", async () => {
     const p1 = await sqliteDb.createProxyPool({ name: "p1", proxyUrl: "http://a", type: "http" });
     await new Promise((r) => setTimeout(r, 10));

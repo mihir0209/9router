@@ -21,6 +21,10 @@ vi.mock("@/lib/network/connectionProxy", () => ({
 vi.mock("@/shared/constants/providers.js", () => ({
   FREE_PROVIDERS: {},
   resolveProviderId: (provider) => provider,
+  isOpenAICompatibleProvider: () => false,
+  isAnthropicCompatibleProvider: () => false,
+  isCustomEmbeddingProvider: () => false,
+  isCustomMediaProvider: () => false,
 }));
 vi.mock("open-sse/services/usage/google.js", () => ({
   getAntigravityUsage: mocks.getAntigravityUsage,

@@ -3,9 +3,9 @@
 import { useParams, notFound, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useState, useEffect } from "react";
-import { Card, Badge, Button, AddCustomEmbeddingModal, NoAuthProxyCard, ProviderInfoCard } from "@/shared/components";
+import { Card, Badge, Button, CustomMediaProviderModal, NoAuthProxyCard, ProviderInfoCard } from "@/shared/components";
 import ProviderIcon from "@/shared/components/ProviderIcon";
-import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS, isCustomEmbeddingProvider } from "@/shared/constants/providers";
+import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS, isCustomEmbeddingProvider, isCustomMediaProvider } from "@/shared/constants/providers";
 import ConnectionsCard from "@/app/(dashboard)/dashboard/providers/components/ConnectionsCard";
 import ModelsCard from "@/app/(dashboard)/dashboard/providers/components/ModelsCard";
 import { KIND_EXAMPLE_CONFIG } from "./components/exampleShared";
@@ -19,10 +19,10 @@ export default function MediaProviderDetailPage() {
   const { kind, id } = useParams();
   const router = useRouter();
   const kindConfig = MEDIA_PROVIDER_KINDS.find((k) => k.id === kind);
-  const isCustom = isCustomEmbeddingProvider(id) && kind === "embedding";
+  const isCustom = (isCustomEmbeddingProvider(id) && kind === "embedding") || isCustomMediaProvider(id);
 
   const handleDeleteCustom = async () => {
-    if (!confirm("Delete this Custom Embedding node?")) return;
+    if (!confirm("Delete this custom media provider?")) return;
     try {
       const res = await fetch(`/api/provider-nodes/${id}`, { method: "DELETE" });
       if (res.ok) router.push(`/dashboard/media-providers/${kind}`);
@@ -65,8 +65,8 @@ export default function MediaProviderDetailPage() {
     return <div className="text-text-muted text-sm py-12 text-center">Loading...</div>;
   }
 
-  const kinds = isCustom ? ["embedding"] : (provider.serviceKinds ?? ["llm"]);
-  if (!isCustom && !kinds.includes(kind)) return notFound();
+  const kinds = isCustom ? [customNode.mediaKind || "embedding"] : (provider.serviceKinds ?? ["llm"]);
+  if (!kinds.includes(kind)) return notFound();
 
   return (
     <div className="flex flex-col gap-8">
@@ -168,6 +168,7 @@ export default function MediaProviderDetailPage() {
           providerId={id}
           kindFilter={kind}
           providerAliasOverride={isCustom ? customNode?.prefix : undefined}
+          configuredModels={isCustom ? customNode?.models : undefined}
         />
       )}
 
@@ -191,12 +192,13 @@ export default function MediaProviderDetailPage() {
         <EmbeddingExampleCard providerId={id} customAlias={customNode?.prefix} />
       )}
       {kind === "tts" && <TtsExampleCard providerId={id} />}
-      {kind === "stt" && !isCustom && <SttExampleCard providerId={id} />}
-      {!isCustom && KIND_EXAMPLE_CONFIG[kind] && <GenericExampleCard providerId={id} kind={kind} />}
+       {kind === "stt" && <SttExampleCard providerId={id} />}
+       {KIND_EXAMPLE_CONFIG[kind] && <GenericExampleCard providerId={id} kind={kind} customAlias={customNode?.prefix} />}
 
       {isCustom && (
-        <AddCustomEmbeddingModal
+        <CustomMediaProviderModal
           isOpen={showEditModal}
+          kind={kind}
           node={customNode}
           onClose={() => setShowEditModal(false)}
           onSaved={(updated) => {

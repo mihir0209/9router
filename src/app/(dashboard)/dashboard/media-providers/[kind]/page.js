@@ -3,7 +3,7 @@
 import { useParams, notFound, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Card, Badge, Button, Toggle, AddCustomEmbeddingModal } from "@/shared/components";
+import { Card, Badge, Button, Toggle, CustomMediaProviderModal } from "@/shared/components";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS, getProvidersByKind } from "@/shared/constants/providers";
 
@@ -143,7 +143,7 @@ export default function MediaProviderKindPage() {
   const [connections, setConnections] = useState([]);
   const [customNodes, setCustomNodes] = useState([]);
   const [combos, setCombos] = useState([]);
-  const [showAddCustomEmbedding, setShowAddCustomEmbedding] = useState(false);
+  const [showAddCustom, setShowAddCustom] = useState(false);
 
   // webSearch/webFetch listing pages are merged into /web
   useEffect(() => {
@@ -153,7 +153,7 @@ export default function MediaProviderKindPage() {
   }, [kind, router]);
 
   const kindConfig = MEDIA_PROVIDER_KINDS.find((k) => k.id === kind);
-  const isEmbedding = kind === "embedding";
+  const supportsCustom = new Set(["embedding", "image", "video", "tts", "stt"]).has(kind);
   const supportsCombo = COMBO_KINDS.has(kind);
 
   useEffect(() => {
@@ -162,10 +162,10 @@ export default function MediaProviderKindPage() {
       .then((r) => r.json())
       .then((d) => setConnections(d.connections || []))
       .catch(() => {});
-    if (isEmbedding) {
+    if (supportsCustom) {
       fetch("/api/provider-nodes", { cache: "no-store" })
         .then((r) => r.json())
-        .then((d) => setCustomNodes((d.nodes || []).filter((n) => n.type === "custom-embedding")))
+        .then((d) => setCustomNodes((d.nodes || []).filter((n) => (n.type === "custom-media" && n.mediaKind === kind) || (kind === "embedding" && n.type === "custom-embedding"))))
         .catch(() => {});
     }
     if (supportsCombo) {
@@ -174,7 +174,7 @@ export default function MediaProviderKindPage() {
         .then((d) => setCombos(d.combos || []))
         .catch(() => {});
     }
-  }, [isEmbedding, supportsCombo, kindConfig]);
+  }, [supportsCustom, supportsCombo, kindConfig, kind]);
 
   if (!kindConfig) return notFound();
 
@@ -184,7 +184,7 @@ export default function MediaProviderKindPage() {
   // Map custom nodes to MediaProviderCard shape
   const customProviders = customNodes.map((n) => ({
     id: n.id,
-    name: n.name || "Custom Embedding",
+    name: n.name || `Custom ${kindConfig.label}`,
     color: "#6366F1",
     textIcon: "CE",
   }));
@@ -229,14 +229,14 @@ export default function MediaProviderKindPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {(isEmbedding || supportsCombo) && (
+      {(supportsCustom || supportsCombo) && (
         <div className="flex items-center justify-end gap-2">
           {supportsCombo && (
             <Button size="sm" icon="add" onClick={handleCreateCombo}>Create Combo</Button>
           )}
-          {isEmbedding && (
-            <Button size="sm" icon="add" onClick={() => setShowAddCustomEmbedding(true)}>
-              Add Custom Embedding
+          {supportsCustom && (
+            <Button size="sm" icon="add" onClick={() => setShowAddCustom(true)}>
+              Add Custom Provider
             </Button>
           )}
         </div>
@@ -274,13 +274,14 @@ export default function MediaProviderKindPage() {
         </div>
       )}
 
-      {isEmbedding && (
-        <AddCustomEmbeddingModal
-          isOpen={showAddCustomEmbedding}
-          onClose={() => setShowAddCustomEmbedding(false)}
-          onCreated={(node) => {
+      {supportsCustom && (
+        <CustomMediaProviderModal
+          isOpen={showAddCustom}
+          kind={kind}
+          onClose={() => setShowAddCustom(false)}
+          onSaved={(node) => {
             setCustomNodes((prev) => [...prev, node]);
-            setShowAddCustomEmbedding(false);
+            setShowAddCustom(false);
           }}
         />
       )}

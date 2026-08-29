@@ -2,6 +2,7 @@ import { createErrorResult } from "../utils/error.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { refreshTokenByProvider } from "../services/tokenRefresh.js";
 import { PROVIDER_MEDIA } from "../providers/index.js";
+import { buildCustomMediaHeaders, resolveCustomMediaUrl } from "../config/customMedia.js";
 
 // Upstream fetch deadline for video job submission/polling (the job itself is
 // async upstream — this only bounds the HTTP round-trip, not video rendering).
@@ -14,6 +15,7 @@ const VIDEO_FETCH_TIMEOUT_MS = Number(process.env.VIDEO_FETCH_TIMEOUT_MS || 1200
 export const VIDEO_ACTIONS = new Set(["generations", "edits", "extensions"]);
 
 export function getVideoConfig(provider) {
+  if (provider?.startsWith?.("custom-media-")) return { custom: true };
   return PROVIDER_MEDIA[provider]?.videoConfig || null;
 }
 
@@ -86,22 +88,27 @@ export async function handleVideoProxyCore({
   log,
   onCredentialsRefreshed,
 }) {
-  const config = getVideoConfig(provider);
+  let config = getVideoConfig(provider);
   if (!config) {
     return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Provider '${provider}' does not support video generation`);
   }
   if (!requestId && !VIDEO_ACTIONS.has(action)) {
     return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Unknown video action: ${action}`);
   }
+  if (config.custom) config = { ...credentials?.providerSpecificData, custom: true };
 
   const method = requestId ? "GET" : "POST";
-  const url = buildUpstreamUrl(config, action, requestId);
+  const url = config.custom
+    ? resolveCustomMediaUrl(config, "video", action, requestId)
+    : buildUpstreamUrl(config, action, requestId);
   const fetchSignal = combineSignals(signal, timeoutMs);
 
   const doFetch = (token) =>
     fetch(url, {
       method,
-      headers: buildHeaders({ token, contentType: method === "POST" ? contentType : null, idempotencyKey: method === "POST" ? idempotencyKey : null }),
+      headers: config.custom
+        ? { ...buildCustomMediaHeaders(config, { apiKey: token }, method === "POST" ? contentType : null), ...(idempotencyKey && method === "POST" ? { "Idempotency-Key": idempotencyKey } : {}) }
+        : buildHeaders({ token, contentType: method === "POST" ? contentType : null, idempotencyKey: method === "POST" ? idempotencyKey : null }),
       body: method === "POST" ? rawBody : undefined,
       signal: fetchSignal,
     });

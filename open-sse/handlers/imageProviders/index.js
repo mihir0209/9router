@@ -12,6 +12,7 @@ import blackForestLabs from "./blackForestLabs.js";
 import runwayml from "./runwayml.js";
 import cloudflareAi from "./cloudflareAi.js";
 import antigravity from "./antigravity.js";
+import openaiCompatNode from "./openaiCompatNode.js";
 
 const ADAPTERS = {
   openai: createOpenAIAdapter("openai"),
@@ -35,9 +36,10 @@ const ADAPTERS = {
 };
 
 export function getImageAdapter(provider) {
+  if (provider?.startsWith?.("custom-media-")) return openaiCompatNode;
   return ADAPTERS[provider] || null;
 }
 
 export function isImageProvider(provider) {
-  return provider in ADAPTERS;
+  return provider in ADAPTERS || provider?.startsWith?.("custom-media-");
 }

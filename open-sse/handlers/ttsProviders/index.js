@@ -10,6 +10,7 @@ import xiaomiMimo from "./xiaomi-mimo.js";
 import selfhostedTts from "./selfhostedTts.js";
 import { FORMAT_HANDLERS } from "./genericFormats.js";
 import { parseModelVoice } from "./_base.js";
+import openaiCompatNode from "./openaiCompatNode.js";
 
 // Special providers with custom synthesize() logic
 const SPECIAL_ADAPTERS = {
@@ -25,6 +26,7 @@ const SPECIAL_ADAPTERS = {
 };
 
 export function getTtsAdapter(provider) {
+  if (provider?.startsWith?.("custom-media-")) return openaiCompatNode;
   return SPECIAL_ADAPTERS[provider] || null;
 }
 

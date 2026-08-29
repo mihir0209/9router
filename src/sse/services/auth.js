@@ -3,7 +3,7 @@ import { decryptByokCredential } from "@/lib/byokCrypto.js";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
-import { resolveProviderId, FREE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers.js";
+import { resolveProviderId, FREE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomMediaProvider } from "@/shared/constants/providers.js";
 import { getProxyPoolQuarantine, isProxyQuarantined } from "@/lib/proxy/quarantine";
 import { getAntigravityQuotaCache } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
@@ -251,11 +251,21 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // For compatible providers, merge node's customHeaders and headerBlacklist into providerSpecificData
     let nodeCustomHeaders = null;
     let nodeHeaderBlacklist = null;
-    if (isOpenAICompatibleProvider(providerId) || isAnthropicCompatibleProvider(providerId)) {
+    if (isOpenAICompatibleProvider(providerId) || isAnthropicCompatibleProvider(providerId) || isCustomMediaProvider(providerId)) {
       const node = await getProviderNodeById(providerId);
       if (node) {
         nodeCustomHeaders = node.customHeaders || null;
         nodeHeaderBlacklist = node.headerBlacklist || null;
+        if (isCustomMediaProvider(providerId)) {
+          connection.providerSpecificData = {
+            ...(connection.providerSpecificData || {}),
+            baseUrl: node.baseUrl,
+            endpointUrl: node.endpointUrl,
+            mediaKind: node.mediaKind,
+            authHeader: node.authHeader,
+            models: node.models,
+          };
+        }
       }
     }
 

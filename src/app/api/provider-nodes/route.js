@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { createProviderNode, getProviderNodes } from "@/models";
-import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX } from "@/shared/constants/providers";
+import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX, CUSTOM_MEDIA_PREFIX } from "@/shared/constants/providers";
 import { generateId } from "@/shared/utils";
 import { normalizeUserRetryConfig } from "open-sse/retry/index.js";
+import { CUSTOM_MEDIA_KINDS, sanitizeCustomHeaders } from "open-sse/config/customMedia.js";
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +40,7 @@ export async function GET() {
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { name, prefix, apiType, baseUrl, type, retry } = body;
+    const { name, prefix, apiType, baseUrl, endpointUrl, type, retry, mediaKind, authHeader, models, customHeaders } = body;
     const retryConfig = sanitizeRetry(retry);
 
     if (!name?.trim()) {
@@ -84,6 +85,29 @@ export async function POST(request) {
         prefix: prefix.trim(),
         baseUrl: sanitizedBaseUrl,
         name: name.trim(),
+        ...retryFields,
+      });
+      return NextResponse.json({ node }, { status: 201 });
+    }
+
+    if (nodeType === "custom-media") {
+      if (!CUSTOM_MEDIA_KINDS.has(mediaKind)) {
+        return NextResponse.json({ error: "Invalid custom media kind" }, { status: 400 });
+      }
+      if (!baseUrl?.trim() && !endpointUrl?.trim()) {
+        return NextResponse.json({ error: "Base URL or full endpoint URL is required" }, { status: 400 });
+      }
+      const node = await createProviderNode({
+        id: `${CUSTOM_MEDIA_PREFIX}${generateId()}`,
+        type: "custom-media",
+        name: name.trim(),
+        prefix: prefix.trim(),
+        mediaKind,
+        baseUrl: baseUrl?.trim().replace(/\/$/, "") || "",
+        endpointUrl: endpointUrl?.trim() || "",
+        authHeader: ["bearer", "x-api-key", "api-key"].includes(authHeader) ? authHeader : "bearer",
+        models: Array.isArray(models) ? models.map(String).map((v) => v.trim()).filter(Boolean) : [],
+        customHeaders: sanitizeCustomHeaders(customHeaders),
         ...retryFields,
       });
       return NextResponse.json({ node }, { status: 201 });

@@ -7,7 +7,7 @@ import {
   extractApiKey,
 } from "../services/auth.js";
 import { validateAndEnforceApiKey } from "../services/validateApiKey.js";
-import { getSettings } from "@/lib/localDb";
+import { getProviderConnectionById, getSettings } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
 import { handleVideoProxyCore, getVideoConfig, sanitizeSecrets } from "open-sse/handlers/videoCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
@@ -193,8 +193,11 @@ export async function handleVideoGet(request, requestId) {
 
   if (!requestId) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing video request id");
 
-  const provider = DEFAULT_VIDEO_PROVIDER;
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
+  const preferredConnection = preferredConnectionId ? await getProviderConnectionById(preferredConnectionId) : null;
+  const provider = preferredConnection?.provider?.startsWith("custom-media-")
+    ? preferredConnection.provider
+    : DEFAULT_VIDEO_PROVIDER;
 
   const credentials = await getProviderCredentials(provider, null, null, { preferredConnectionId, ...keyCheck });
   const credentialsError = credentialsErrorResponse(credentials);

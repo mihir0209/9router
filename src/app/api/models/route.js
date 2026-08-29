@@ -8,8 +8,10 @@ import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 // GET /api/models - Get models with aliases
 export async function GET() {
   try {
-    const modelAliases = await getModelAliases();
-    const disabled = await getDisabledModels();
+    const [modelAliases, disabled] = await Promise.all([
+      getModelAliases(),
+      getDisabledModels(),
+    ]);
 
     const models = AI_MODELS
       .filter((m) => {

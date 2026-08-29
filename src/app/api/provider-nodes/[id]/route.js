@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { deleteProviderConnectionsByProvider, deleteProviderNode, getProviderConnections, getProviderNodeById, updateProviderConnection, updateProviderNode } from "@/models";
 import { normalizeUserRetryConfig } from "open-sse/retry/index.js";
+import { sanitizeCustomHeaders } from "open-sse/config/customMedia.js";
 
 function sanitizeRetry(raw) {
   if (raw === undefined) return undefined;
@@ -13,7 +14,7 @@ export async function PUT(request, { params }) {
   try {
     const { id } = await params;
     const body = await request.json();
-    const { name, prefix, apiType, baseUrl, retry } = body;
+    const { name, prefix, apiType, baseUrl, endpointUrl, retry, authHeader, models, customHeaders } = body;
     const node = await getProviderNodeById(id);
 
     if (!node) {
@@ -33,11 +34,14 @@ export async function PUT(request, { params }) {
       return NextResponse.json({ error: "Invalid OpenAI compatible API type" }, { status: 400 });
     }
 
-    if (!baseUrl?.trim()) {
+    if (node.type === "custom-media" && !baseUrl?.trim() && !endpointUrl?.trim()) {
+      return NextResponse.json({ error: "Base URL or full endpoint URL is required" }, { status: 400 });
+    }
+    if (node.type !== "custom-media" && !baseUrl?.trim()) {
       return NextResponse.json({ error: "Base URL is required" }, { status: 400 });
     }
 
-    let sanitizedBaseUrl = baseUrl.trim();
+    let sanitizedBaseUrl = baseUrl?.trim() || "";
     
     // Sanitize Base URL for Anthropic Compatible
     if (node.type === "anthropic-compatible") {
@@ -61,6 +65,13 @@ export async function PUT(request, { params }) {
       baseUrl: sanitizedBaseUrl,
     };
 
+    if (node.type === "custom-media") {
+      updates.endpointUrl = endpointUrl?.trim() || "";
+      updates.authHeader = ["bearer", "x-api-key", "api-key"].includes(authHeader) ? authHeader : "bearer";
+      updates.models = Array.isArray(models) ? models.map(String).map((v) => v.trim()).filter(Boolean) : [];
+      updates.customHeaders = sanitizeCustomHeaders(customHeaders);
+    }
+
     if (node.type === "openai-compatible") {
       updates.apiType = apiType;
     }
@@ -79,6 +90,11 @@ export async function PUT(request, { params }) {
         prefix: prefix.trim(),
         apiType: node.type === "openai-compatible" ? apiType : undefined,
         baseUrl: sanitizedBaseUrl,
+        endpointUrl: updated.endpointUrl,
+        mediaKind: updated.mediaKind,
+        authHeader: updated.authHeader,
+        models: updated.models,
+        customHeaders: updated.customHeaders,
         nodeName: updated.name,
       };
       if (retryConfig !== undefined) {

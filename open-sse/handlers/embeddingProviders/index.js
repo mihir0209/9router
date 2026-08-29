@@ -1,7 +1,7 @@
 // Embeddings provider adapter registry
 import createOpenAIEmbeddingAdapter from "./openai.js";
 import gemini from "./gemini.js";
-import openaiCompatNode from "./openaiCompatNode.js";
+import openaiCompatNode, { customMediaEmbedding } from "./openaiCompatNode.js";
 import selfhostedEmbedding from "./selfhostedEmbedding.js";
 
 const OPENAI_COMPAT_PROVIDERS = [
@@ -27,5 +27,6 @@ export function getEmbeddingAdapter(provider) {
   if (provider?.startsWith?.("openai-compatible-") || provider?.startsWith?.("custom-embedding-")) {
     return openaiCompatNode;
   }
+  if (provider?.startsWith?.("custom-media-")) return customMediaEmbedding;
   return null;
 }

@@ -22,15 +22,19 @@ let initPromise = null;
  */
 function ensureInitialized() {
   if (!initPromise) {
-    initPromise = Promise.all([
-      import("./proxyscrape.js"),
-      import("./geonode.js"),
-      import("./thespeedx.js"),
-      import("./monosans.js"),
-      import("./stormsia.js"),
-      import("./freeproxy.js"),
-      import("./custom.js"),
-    ]).catch(() => {});
+    initPromise = (async () => {
+      await Promise.all([
+        import("./proxyscrape.js"),
+        import("./geonode.js"),
+        import("./thespeedx.js"),
+        import("./monosans.js"),
+        import("./stormsia.js"),
+        import("./freeproxy.js"),
+        import("./custom.js"),
+      ]);
+      // Registered strictly after the free-list sources so ProxyRise renders last.
+      await import("./proxyrise.js");
+    })().catch(() => {});
   }
   return initPromise;
 }

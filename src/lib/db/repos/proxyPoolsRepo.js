@@ -102,6 +102,27 @@ export async function deleteProxyPool(id) {
   return removed;
 }
 
+export async function deleteInactiveProxyPools(protectedIds = []) {
+  const protect = new Set(Array.isArray(protectedIds) ? protectedIds : []);
+  const db = await getAdapter();
+  const deletedIds = [];
+  const skippedIds = [];
+
+  db.transaction(() => {
+    const rows = db.all(`SELECT id FROM proxyPools WHERE isActive = 0`);
+    for (const row of rows) {
+      if (protect.has(row.id)) {
+        skippedIds.push(row.id);
+        continue;
+      }
+      db.run(`DELETE FROM proxyPools WHERE id = ?`, [row.id]);
+      deletedIds.push(row.id);
+    }
+  });
+
+  return { deletedCount: deletedIds.length, deletedIds, skippedIds };
+}
+
 export async function replaceProxyPoolsBySource(source, pools = []) {
   const normalizedSource = typeof source === "string" ? source.trim() : "";
   if (!normalizedSource) throw new Error("source is required");

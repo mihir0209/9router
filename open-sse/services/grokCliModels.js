@@ -85,6 +85,7 @@ export async function resolveGrokCliModels(credentials, options = {}) {
     {
       method: "GET",
       headers: buildHeaders(token, credentials?.providerSpecificData),
+      signal: options.signal,
     },
     proxyOptions,
   );

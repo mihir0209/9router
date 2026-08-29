@@ -74,7 +74,7 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language, st
   log.info("ROUTING", `Provider: ${provider}, Voice: ${model}`);
 
   // noAuth providers — no credential needed
-  if (!CREDENTIALED_PROVIDERS.has(provider) && keyContext?.keyRecord?.billingMode !== "byok") {
+  if (!CREDENTIALED_PROVIDERS.has(provider) && !provider.startsWith("custom-media-") && keyContext?.keyRecord?.billingMode !== "byok") {
     const result = await handleTtsCore({ provider, model, input: body.input, responseFormat, language, style });
     if (result.success) return result.response;
     return errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "TTS failed");

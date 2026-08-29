@@ -84,16 +84,16 @@
   --color-primary: #E56A4A;
   --color-primary-hover: #cc5236;
 
-  /* Surfaces (dark - Claude-like neutral warm) */
-  --color-bg: #1a1a1a;
-  --color-bg-alt: #1F1F1E;
-  --color-surface: #262626;
-  --color-surface-2: #303030;
-  --color-surface-3: #3a3a3a;
-  --color-sidebar: rgba(30, 30, 30, 0.85);
+  /* True-black hierarchy: canvas, elevated surfaces, then interactive surfaces. */
+  --color-bg: #000000;
+  --color-bg-alt: #050505;
+  --color-surface: #080808;
+  --color-surface-2: #101010;
+  --color-surface-3: #181818;
+  --color-sidebar: rgba(0, 0, 0, 0.96);
 
-  --color-border: #333333;
-  --color-border-subtle: #2a2a2a;
+  --color-border: #202020;
+  --color-border-subtle: #141414;
 
   --color-text: #ededed;
   --color-text-main: #ededed;
@@ -310,7 +310,7 @@ input, textarea {
   background: rgba(255, 255, 255, 0.72);
 }
 .dark .bg-vibrancy {
-  background: rgba(38, 38, 38, 0.72);
+  background: var(--color-sidebar);
 }
 
 /* macOS Traffic Lights */

@@ -68,7 +68,8 @@ describe("Provider Registry - built-in providers", () => {
     expect(ids).toContain("stormsia");
     expect(ids).toContain("freeproxy");
     expect(ids).toContain("custom");
-    expect(providers.length).toBeGreaterThanOrEqual(7);
+    expect(ids).toContain("proxyrise");
+    expect(providers.length).toBeGreaterThanOrEqual(8);
   });
 
   it("each built-in provider has required fields", async () => {

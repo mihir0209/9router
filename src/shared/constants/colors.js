@@ -24,11 +24,11 @@ export const COLORS = {
 
   // Dark theme backgrounds
   dark: {
-    bg: "#191918",
-    bgAlt: "#1F1F1E",
-    surface: "#242423",
-    sidebar: "rgba(30, 30, 30, 0.8)",
-    border: "rgba(255, 255, 255, 0.1)",
+    bg: "#000000",
+    bgAlt: "#050505",
+    surface: "#080808",
+    sidebar: "rgba(0, 0, 0, 0.96)",
+    border: "#202020",
     textMain: "#ECEBE8",
     textMuted: "#9E9D99",
   },

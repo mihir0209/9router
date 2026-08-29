@@ -44,10 +44,11 @@ export async function handleStt(request) {
   if (!modelInfo.provider) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
 
   const { provider, model } = modelInfo;
+  const isCustom = provider.startsWith("custom-media-");
   log.info("ROUTING", `Provider: ${provider}, Model: ${model}`);
 
   // noAuth providers
-  if (!CREDENTIALED_PROVIDERS.has(provider) && keyCheck.keyRecord?.billingMode !== "byok") {
+  if (!CREDENTIALED_PROVIDERS.has(provider) && !isCustom && keyCheck.keyRecord?.billingMode !== "byok") {
     const result = await handleSttCore({ provider, model, formData, sttConfig: AI_PROVIDERS[provider]?.sttConfig });
     if (result.success) return result.response;
     return errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "STT failed");
@@ -75,7 +76,17 @@ export async function handleStt(request) {
 
     log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
 
-    const result = await handleSttCore({ provider, model, formData, credentials, sttConfig: AI_PROVIDERS[provider]?.sttConfig });
+    const customConfig = isCustom ? {
+      custom: true,
+      mediaKind: credentials.providerSpecificData.mediaKind,
+      format: "openai",
+      baseUrl: credentials.providerSpecificData.endpointUrl || credentials.providerSpecificData.baseUrl,
+      authType: credentials.providerSpecificData.authHeader === "none" ? "none" : "apikey",
+      authHeader: credentials.providerSpecificData.authHeader,
+      customHeaders: credentials.providerSpecificData.customHeaders,
+      isFullEndpoint: !!credentials.providerSpecificData.endpointUrl,
+    } : null;
+    const result = await handleSttCore({ provider, model, formData, credentials, sttConfig: customConfig || AI_PROVIDERS[provider]?.sttConfig });
 
     if (result.success) return result.response;
 
