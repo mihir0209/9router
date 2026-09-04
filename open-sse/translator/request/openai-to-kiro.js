@@ -440,6 +440,7 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
   // NOTE: systemPrompt and additionalModelRequestFields are intentionally NOT sent.
   // The Kiro upstream runtime API rejects these fields for builder-id accounts.
   // Thinking tags are injected into message content instead.
+  void additionalModelRequestFields;
 
   if (maxTokens || temperature !== undefined || topP !== undefined) {
     payload.inferenceConfig = {};

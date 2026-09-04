@@ -158,6 +158,7 @@ describe("DefaultExecutor.buildHeaders() — claude provider", () => {
       headers["Anthropic-Version"] === "2023-06-01" ||
       headers["anthropic-version"] === "2023-06-01";
     expect(hasVersion).toBe(true);
+    expect(headers["User-Agent"]).toBe("claude-cli/2.1.258 (external, sdk-cli)");
   });
 
   it("includes heavy-agent beta flags for claude-opus-5", () => {
@@ -227,12 +228,18 @@ describe("DefaultExecutor.buildHeaders() — claude provider", () => {
     }, true);
 
     expect(headers["user-agent"]).toBeUndefined();
+    expect(headers["User-Agent"]).toBeUndefined();
     expect(headers["x-app"]).toBeUndefined();
+    expect(headers["X-App"]).toBeUndefined();
     expect(headers["x-stainless-runtime"]).toBeUndefined();
+    expect(headers["X-Stainless-Runtime"]).toBeUndefined();
     expect(headers["anthropic-dangerous-direct-browser-access"]).toBeUndefined();
-    expect(headers["anthropic-version"]).toBe("2023-06-01");
-    expect(headers["anthropic-beta"]).toContain("interleaved-thinking-2025-05-14");
-    expect(headers["anthropic-beta"]).not.toContain("claude-code-20250219");
+    expect(headers["Anthropic-Dangerous-Direct-Browser-Access"]).toBeUndefined();
+    const version = headers["anthropic-version"] || headers["Anthropic-Version"];
+    expect(version).toBe("2023-06-01");
+    const beta = headers["anthropic-beta"] || headers["Anthropic-Beta"] || "";
+    expect(beta).toContain("interleaved-thinking-2025-05-14");
+    expect(beta).not.toContain("claude-code-20250219");
     expect(headers["x-api-key"]).toBe("sk-test");
   });
 

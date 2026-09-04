@@ -349,6 +349,7 @@ export function claudeToKiroRequest(model, body, stream, credentials) {
 
   // NOTE: systemPrompt and additionalModelRequestFields are intentionally NOT sent.
   // The Kiro upstream runtime API rejects these fields for builder-id accounts.
+  void additionalModelRequestFields;
 
   if (maxTokens || temperature !== undefined || topP !== undefined) {
     payload.inferenceConfig = {};
