@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { deleteApiKey, getApiKeyById, updateApiKey } from "@/lib/localDb";
+import { deleteApiKey, getApiKeyById, getApiKeyByKey, updateApiKey } from "@/lib/localDb";
 import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
 import { serializeApiKey } from "@/lib/apiKeys/serializers";
 import { getBudgetState } from "@/lib/budgetService.js";
@@ -78,6 +78,19 @@ export async function PUT(request, { params }) {
         updateData[field] = body[field];
       }
     }
+    // Custom key value (e.g. register an existing license key). Empty means
+    // "keep the current key" — only a non-empty value replaces it.
+    if (body.key !== undefined && body.key !== null && String(body.key).trim() !== "") {
+      const customKey = String(body.key).trim();
+      if (customKey.length > 512) {
+        return NextResponse.json({ error: "Custom key must be 512 characters or fewer" }, { status: 400 });
+      }
+      const clash = await getApiKeyByKey(customKey);
+      if (clash && clash.id !== id) {
+        return NextResponse.json({ error: "API key already in use" }, { status: 409 });
+      }
+      updateData.key = customKey;
+    }
     for (const field of ["allowedModels", "blockedModels", "allowedIPs", "blockedIPs"]) {
       if (updateData[field] !== undefined) updateData[field] = normalizeList(updateData[field]);
     }
@@ -102,6 +115,9 @@ export async function PUT(request, { params }) {
     const serialized = serializeApiKey(updated);
     return NextResponse.json(isAdminApi ? serialized : { key: serialized });
   } catch (error) {
+    if (error?.code === "DUPLICATE_API_KEY") {
+      return NextResponse.json({ error: "API key already in use" }, { status: 409 });
+    }
     console.log("Error updating key:", error);
     return NextResponse.json({ error: "Failed to update key" }, { status: 500 });
   }

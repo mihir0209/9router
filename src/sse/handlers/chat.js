@@ -12,14 +12,14 @@ import {
 import { validateAndEnforceApiKey } from "../services/validateApiKey.js";
 import { cacheClaudeHeaders } from "open-sse/utils/claudeHeaderCache.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
-import { getSettings } from "@/lib/localDb";
+import { getSettings, getCombos } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
-import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
+import { handleComboChat, handleFusionChat, detectRequiredCapabilities, createComboMemberResolver } from "open-sse/services/combo.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
@@ -37,6 +37,20 @@ import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
  * Format detection and translation handled by translator
  */
+
+// Resolve nested combo names for capability scoring, so auto-switch traverses
+// combos (members in line order) instead of scoring combo names as unknown
+// bare models. Fetches the combo list only when the request actually needs a
+// capability and some member is a bare id; otherwise returns null (no-op).
+async function getComboMemberResolver(requiredCapabilities, models) {
+  if (!requiredCapabilities || requiredCapabilities.size === 0) return null;
+  if (!Array.isArray(models) || !models.some((m) => typeof m === "string" && !m.includes("/"))) return null;
+  try {
+    return createComboMemberResolver(await getCombos());
+  } catch {
+    return null;
+  }
+}
 export async function handleChat(request, clientRawRequest = null) {
   let body;
   try {
@@ -114,7 +128,8 @@ export async function handleChat(request, clientRawRequest = null) {
     const comboStrategies = settings.comboStrategies || {};
     const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
-    const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings);
+    const resolveComboMembers = await getComboMemberResolver(requiredCapabilities, comboModels);
+    const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings, resolveComboMembers);
     const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
 
     if (comboStrategy === "fusion") {
@@ -149,7 +164,8 @@ export async function handleChat(request, clientRawRequest = null) {
       log,
       comboName: modelStr,
       comboStrategy,
-      comboStickyLimit
+      comboStickyLimit,
+      resolveComboMembers
     });
   }
 
@@ -197,7 +213,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
       const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
       const requiredCapabilities = detectRequiredCapabilities(body);
-      const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings);
+      const resolveComboMembers = await getComboMemberResolver(requiredCapabilities, comboModels);
+      const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings, resolveComboMembers);
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
 
       if (comboStrategy === "fusion") {
@@ -232,7 +249,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         log,
         comboName: modelStr,
         comboStrategy,
-        comboStickyLimit
+        comboStickyLimit,
+        resolveComboMembers
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });

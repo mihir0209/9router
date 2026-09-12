@@ -1,5 +1,14 @@
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 
+// The port the dashboard is actually served on. `UPDATER_CONFIG.appPort`
+// derives from process.env.PORT, which client bundles bake at build time —
+// always the default port — so prefer the browser URL at runtime. Falls back
+// to the config value for SSR where window is unavailable.
+export function getLocalAppPort() {
+  if (typeof window !== "undefined" && window.location.port) return window.location.port;
+  return String(UPDATER_CONFIG.appPort);
+}
+
 // Browser-local preset stores (endpoints, API keys) shared by every CLI tool card
 function createStore({ storageKey, changeEvent, itemField, normalize = (v) => v, defaultName = (v) => v }) {
   const read = () => {
@@ -80,7 +89,7 @@ export function rememberEndpoint(baseUrl, { tunnelPublicUrl, tailscaleUrl, cloud
   const url = stripSlash(baseUrl);
   if (!url) return null;
 
-  const builtIns = [`http://127.0.0.1:${UPDATER_CONFIG.appPort}`, tunnelPublicUrl, tailscaleUrl, cloudUrl]
+  const builtIns = [`http://127.0.0.1:${getLocalAppPort()}`, tunnelPublicUrl, tailscaleUrl, cloudUrl]
     .filter(Boolean)
     .flatMap((u) => [stripSlash(u), `${stripSlash(u)}/v1`]);
   if (builtIns.includes(url)) return null;

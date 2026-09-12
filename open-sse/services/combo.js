@@ -140,18 +140,38 @@ function flattenToolHistory(messages) {
 
 // Reorder combo models by capability fit. Stable; never drops a model (fallback intact).
 // Tier 0: satisfies all hard + all soft. Tier 1: all hard only. Tier 2: rest.
-export function reorderByCapabilities(models, required) {
+//
+// Bare ids (no "provider/" prefix) may be nested combo names rather than models.
+// When resolveMembers is provided, such an entry is scored by traversing the
+// combo's members (best member tier wins) instead of being scored as an
+// unknown bare model — so a combo that contains a vision model is floated
+// ahead of pools that merely declare the capability. Cycles (A→B→A,
+// self-reference) terminate via the `seen` guard and fall back to bare-model
+// scoring for the repeated entry.
+export function reorderByCapabilities(models, required, resolveMembers = null) {
   if (!required || required.size === 0 || !Array.isArray(models) || models.length <= 1) return models;
   const hard = [...required].filter((c) => HARD_CAPS.has(c));
   const soft = [...required].filter((c) => !HARD_CAPS.has(c));
 
-  const tierOf = (m) => {
-    const slash = typeof m === "string" ? m.indexOf("/") : -1;
-    const provider = slash > 0 ? m.slice(0, slash) : "";
-    const model = slash > 0 ? m.slice(slash + 1) : m;
+  const tierOfModel = (provider, model) => {
     const caps = getCapabilitiesForModel(provider, model);
     if (!hard.every((c) => caps[c] === true)) return 2;
     return soft.every((c) => caps[c] === true) ? 0 : 1;
+  };
+
+  const tierOf = (m, seen = null) => {
+    if (typeof m !== "string") return 2;
+    const slash = m.indexOf("/");
+    if (slash > 0) return tierOfModel(m.slice(0, slash), m.slice(slash + 1));
+    if (resolveMembers) {
+      const members = resolveMembers(m);
+      if (Array.isArray(members) && members.length > 0 && !(seen && seen.has(m))) {
+        const next = new Set(seen);
+        next.add(m);
+        return Math.min(...members.map((sub) => tierOf(sub, next)));
+      }
+    }
+    return tierOfModel("", m);
   };
 
   // Stable sort by tier (Array.prototype.sort is stable in modern engines).
@@ -159,6 +179,17 @@ export function reorderByCapabilities(models, required) {
     .map((m, i) => ({ m, i, t: tierOf(m) }))
     .sort((a, b) => a.t - b.t || a.i - b.i)
     .map((x) => x.m);
+}
+
+// Build a sync nested-combo resolver from combos data (array or { combos }).
+// Returns null for provider/model ids and unknown names.
+export function createComboMemberResolver(combosData) {
+  const combos = Array.isArray(combosData) ? combosData : (combosData?.combos || []);
+  return (name) => {
+    if (typeof name !== "string" || name.includes("/")) return null;
+    const combo = combos.find((c) => c?.name === name);
+    return combo && Array.isArray(combo.models) && combo.models.length > 0 ? combo.models : null;
+  };
 }
 
 /**
@@ -357,7 +388,7 @@ export function getComboModelsFromData(modelStr, combosData) {
  * @param {number|string} [options.comboStickyLimit=1] - Requests per combo model before switching
  * @returns {Promise<Response>}
  */
-export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true }) {
+export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, resolveComboMembers = null }) {
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
@@ -365,7 +396,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   if (autoSwitch) {
     const required = detectRequiredCapabilities(body);
     if (required.size > 0) {
-      const reordered = reorderByCapabilities(rotatedModels, required);
+      const reordered = reorderByCapabilities(rotatedModels, required, resolveComboMembers);
       if (reordered[0] !== rotatedModels[0]) {
         log.info("COMBO", `auto-switch for [${[...required].join(",")}] → ${reordered[0]}`);
       }

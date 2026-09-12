@@ -23,6 +23,8 @@ export default function APIPageClient({ machineId }) {
   const [showAddModal, setShowAddModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [createdKey, setCreatedKey] = useState(null);
+  const [customKeyValue, setCustomKeyValue] = useState("");
+  const [keyError, setKeyError] = useState("");
   const [confirmState, setConfirmState] = useState(null);
 
   // API Key creation/editing form state
@@ -671,6 +673,7 @@ export default function APIPageClient({ machineId }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: newKeyName,
+          ...(customKeyValue.trim() ? { key: customKeyValue.trim() } : {}),
           ...keyForm,
           rateLimitRequests: parseInt(keyForm.rateLimitRequests) || 0,
           rateLimitWindowSeconds: parseInt(keyForm.rateLimitWindowSeconds) || 60,
@@ -684,11 +687,16 @@ export default function APIPageClient({ machineId }) {
         setCreatedKey(data.key);
         await fetchData();
         setNewKeyName("");
+        setCustomKeyValue("");
+        setKeyError("");
         resetKeyForm();
         setShowAddModal(false);
+      } else {
+        setKeyError(data.error || "Failed to create key");
       }
     } catch (error) {
       console.log("Error creating key:", error);
+      setKeyError("Failed to create key");
     }
   };
 
@@ -771,6 +779,7 @@ export default function APIPageClient({ machineId }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...keyForm,
+          ...(customKeyValue.trim() ? { key: customKeyValue.trim() } : {}),
           rateLimitRequests: parseInt(keyForm.rateLimitRequests) || 0,
           rateLimitWindowSeconds: parseInt(keyForm.rateLimitWindowSeconds) || 60,
           tokenLimitDaily: parseInt(keyForm.tokenLimitDaily) || 0,
@@ -782,10 +791,16 @@ export default function APIPageClient({ machineId }) {
         await fetchData();
         setShowEditModal(false);
         setEditingKey(null);
+        setCustomKeyValue("");
+        setKeyError("");
         resetKeyForm();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setKeyError(data.error || "Failed to update key");
       }
     } catch (error) {
       console.log("Error editing key:", error);
+      setKeyError("Failed to update key");
     }
   };
 
@@ -1280,6 +1295,8 @@ export default function APIPageClient({ machineId }) {
         onClose={() => {
           setShowAddModal(false);
           setNewKeyName("");
+          setCustomKeyValue("");
+          setKeyError("");
           resetKeyForm();
         }}
         size="lg"
@@ -1292,12 +1309,26 @@ export default function APIPageClient({ machineId }) {
             placeholder="Production Key"
             required
           />
+          <div>
+            <Input
+              label="Custom Key Value (optional)"
+              value={customKeyValue}
+              onChange={(e) => setCustomKeyValue(e.target.value)}
+              placeholder="Leave empty to auto-generate — or paste an existing license key"
+            />
+            <p className="mt-1 text-xs text-text-muted">
+              Register an already-issued license key from your own app as this API key. Must be unique.
+            </p>
+          </div>
           <Input
             label="Description"
             value={keyForm.description}
             onChange={(e) => setKeyForm({ ...keyForm, description: e.target.value })}
             placeholder="Optional description for this key"
           />
+          {keyError && (
+            <p className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{keyError}</p>
+          )}
 
           <div className="border-t border-border pt-4">
             <p className="text-sm font-medium text-text-main mb-3">Rate Limiting</p>
@@ -1397,6 +1428,8 @@ export default function APIPageClient({ machineId }) {
               onClick={() => {
                 setShowAddModal(false);
                 setNewKeyName("");
+                setCustomKeyValue("");
+                setKeyError("");
                 resetKeyForm();
               }}
               variant="ghost"
@@ -1415,17 +1448,33 @@ export default function APIPageClient({ machineId }) {
         onClose={() => {
           setShowEditModal(false);
           setEditingKey(null);
+          setCustomKeyValue("");
+          setKeyError("");
           resetKeyForm();
         }}
         size="lg"
       >
         <div className="flex flex-col gap-4">
+          <div>
+            <Input
+              label="Set Custom Key Value"
+              value={customKeyValue}
+              onChange={(e) => setCustomKeyValue(e.target.value)}
+              placeholder="Leave empty to keep the current key"
+            />
+            <p className="mt-1 text-xs text-text-muted">
+              Replace this key&apos;s value with an existing license key from your own app. Must be unique.
+            </p>
+          </div>
           <Input
             label="Description"
             value={keyForm.description}
             onChange={(e) => setKeyForm({ ...keyForm, description: e.target.value })}
             placeholder="Optional description for this key"
           />
+          {keyError && (
+            <p className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{keyError}</p>
+          )}
 
           <div className="border-t border-border pt-4">
             <p className="text-sm font-medium text-text-main mb-3">Rate Limiting</p>
@@ -1525,6 +1574,8 @@ export default function APIPageClient({ machineId }) {
               onClick={() => {
                 setShowEditModal(false);
                 setEditingKey(null);
+                setCustomKeyValue("");
+                setKeyError("");
                 resetKeyForm();
               }}
               variant="ghost"

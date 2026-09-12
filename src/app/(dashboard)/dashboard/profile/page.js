@@ -75,8 +75,10 @@ export default function ProfilePage() {
   const importFileRef = useRef(null);
   const mergeFileRef = useRef(null);
   const pendingMergeRef = useRef(null);
-  const [mergePreview, setMergePreview] = useState(null);
   const [mergeStrategy, setMergeStrategy] = useState("newer-wins");
+  // Import mode: "merge" keeps existing rows and only applies the backup's
+  // additions/conflicts; "replace" restores the backup wholesale (destructive).
+  const [importMode, setImportMode] = useState("merge");
   const [proxyForm, setProxyForm] = useState({
     outboundProxyEnabled: false,
     outboundProxyUrl: "",
@@ -648,6 +650,23 @@ export default function ProfilePage() {
     }
   };
 
+  const lowWriteMode = settings.lowWriteMode === true ? "on" : settings.lowWriteMode === false ? "off" : "auto";
+  const updateLowWriteMode = async (mode) => {
+    const value = mode === "auto" ? null : mode === "on";
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lowWriteMode: value }),
+      });
+      if (res.ok) {
+        setSettings(prev => ({ ...prev, lowWriteMode: value }));
+      }
+    } catch (err) {
+      console.error("Failed to update lowWriteMode:", err);
+    }
+  };
+
   const updateStripRequestUser = async (enabled) => {
     try {
       const res = await fetch("/api/settings", {
@@ -724,6 +743,41 @@ export default function ProfilePage() {
       const raw = await file.text();
       const payload = JSON.parse(raw);
 
+      if (importMode === "merge") {
+        // Non-destructive import: fetch the live DB, merge the backup into it,
+        // then write the merged result. Existing rows are kept unless the
+        // strategy resolves a conflict in favor of the incoming value.
+        const baseRes = await fetch("/api/settings/database", {
+          headers: { "x-9r-password": password },
+        });
+        if (!baseRes.ok) {
+          const data = await baseRes.json().catch(() => ({}));
+          throw new Error(data.error || "Failed to load current database");
+        }
+        const base = await baseRes.json();
+
+        const { valid, errors } = validateBackup(payload);
+        if (!valid) throw new Error(`Invalid backup: ${errors.join(", ")}`);
+
+        const preview = previewMerge(base, payload, mergeStrategy);
+        const merged = mergeBackups(base, payload, mergeStrategy);
+
+        const res = await fetch("/api/settings/database", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...merged, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Failed to import database");
+
+        await reloadSettings();
+        setDbStatus({
+          type: "success",
+          message: `Import (merge) complete: ${preview.added} added, ${preview.updated} updated, ${preview.unchanged} unchanged`,
+        });
+        return;
+      }
+
       const res = await fetch("/api/settings/database", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -736,7 +790,7 @@ export default function ProfilePage() {
       }
 
       await reloadSettings();
-      setDbStatus({ type: "success", message: "Database imported successfully" });
+      setDbStatus({ type: "success", message: "Database imported (replaced) successfully" });
     } catch (err) {
       setDbStatus({ type: "error", message: err.message || "Invalid backup file" });
     } finally {
@@ -753,9 +807,10 @@ export default function ProfilePage() {
     try {
       const raw = await file.text();
       const incoming = JSON.parse(raw);
-      const error = validateBackup(incoming);
-      if (error) {
-        setDbStatus({ type: "error", message: `Invalid backup: ${error}` });
+      // validateBackup returns { valid, errors } — check the verdict, not the object.
+      const { valid, errors } = validateBackup(incoming);
+      if (!valid) {
+        setDbStatus({ type: "error", message: `Invalid backup: ${errors.join(", ")}` });
         return;
       }
       pendingMergeRef.current = incoming;
@@ -770,16 +825,18 @@ export default function ProfilePage() {
     if (!incoming) return;
     setDbLoading(true);
     try {
+      // Load the current database with GET (the exporter). POSTing here would
+      // run the importer and wipe the live DB before the merge even starts.
       const baseRes = await fetch("/api/settings/database", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "export", password }),
+        headers: { "x-9r-password": password },
       });
-      if (!baseRes.ok) throw new Error("Failed to load current database");
+      if (!baseRes.ok) {
+        const data = await baseRes.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to load current database");
+      }
       const base = await baseRes.json();
 
       const preview = previewMerge(base, incoming, mergeStrategy);
-      setMergePreview(preview);
 
       const merged = mergeBackups(base, incoming, mergeStrategy);
       const res = await fetch("/api/settings/database", {
@@ -1728,6 +1785,24 @@ export default function ProfilePage() {
               disabled={loading}
             />
           </div>
+          <div className="flex items-start sm:items-center justify-between gap-4 pt-4 mt-4 border-t border-border">
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-sm sm:text-base">Low-write analytics mode</p>
+              <p className="text-xs sm:text-sm text-text-muted">
+                Skip per-request log writes and keep daily aggregates only. Recommended for Cloudflare D1 (500k writes/day limit). Auto = on for Cloudflare, off locally.
+              </p>
+            </div>
+            <select
+              value={lowWriteMode}
+              onChange={e => updateLowWriteMode(e.target.value)}
+              disabled={loading}
+              className="shrink-0 rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm"
+            >
+              <option value="auto">Auto</option>
+              <option value="on">Always on</option>
+              <option value="off">Always off</option>
+            </select>
+          </div>
         </Card>
 
         {/* Account actions */}
@@ -1797,11 +1872,21 @@ export default function ProfilePage() {
         <p className="text-text-muted mb-3 text-sm">
           Enter your current password to {dbAuth.mode === "export" ? "export" : dbAuth.mode === "merge" ? "merge" : "import"} the database.
         </p>
-        {dbAuth.mode === "merge" && (
+        {dbAuth.mode === "import" && (
+          <div className="mb-3">
+            <label className="block text-sm font-medium mb-1">Import Mode</label>
+            <select value={importMode} onChange={e => setImportMode(e.target.value)}
+              className="w-full rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm">
+              <option value="merge">Merge — keep existing data (recommended)</option>
+              <option value="replace">Replace — wipe current data and restore backup</option>
+            </select>
+          </div>
+        )}
+        {(dbAuth.mode === "merge" || (dbAuth.mode === "import" && importMode === "merge")) && (
           <div className="mb-3">
             <label className="block text-sm font-medium mb-1">Conflict Strategy</label>
             <select value={mergeStrategy} onChange={e => setMergeStrategy(e.target.value)}
-              className="w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm">
+              className="w-full rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm">
               <option value="newer-wins">Newer Wins (recommended)</option>
               <option value="incoming-wins">Incoming Wins (overwrite)</option>
               <option value="base-wins">Keep Current</option>

@@ -68,12 +68,25 @@ export async function getApiKeyByKey(key) {
 export async function createApiKey(name, machineId, options = {}) {
   if (!machineId) throw new Error("machineId is required");
   const db = await getAdapter();
-  const { generateApiKeyWithMachine } = await import("@/shared/utils/apiKey");
-  const result = generateApiKeyWithMachine(machineId);
+  let keyValue;
+  const customKey = options.key !== undefined && options.key !== null ? String(options.key).trim() : "";
+  if (customKey) {
+    if (customKey.length > 512) throw new Error("API key must be 512 characters or fewer");
+    const clash = db.get(`SELECT id FROM apiKeys WHERE key = ?`, [customKey]);
+    if (clash) {
+      const err = new Error("API key already in use");
+      err.code = "DUPLICATE_API_KEY";
+      throw err;
+    }
+    keyValue = customKey;
+  } else {
+    const { generateApiKeyWithMachine } = await import("@/shared/utils/apiKey");
+    keyValue = generateApiKeyWithMachine(machineId).key;
+  }
   const apiKey = {
     id: uuidv4(),
     name,
-    key: result.key,
+    key: keyValue,
     machineId,
     isActive: true,
     createdAt: new Date().toISOString(),
@@ -111,12 +124,29 @@ export async function updateApiKey(id, data) {
     const row = db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]);
     if (!row) return;
     const existing = rowToKey(row);
+    if (data.key !== undefined && data.key !== null && String(data.key).trim() !== "" && String(data.key).trim() !== existing.key) {
+      const nextKey = String(data.key).trim();
+      if (nextKey.length > 512) throw new Error("API key must be 512 characters or fewer");
+      const clash = db.get(`SELECT id FROM apiKeys WHERE key = ?`, [nextKey]);
+      if (clash && clash.id !== id) {
+        const err = new Error("API key already in use");
+        err.code = "DUPLICATE_API_KEY";
+        throw err;
+      }
+      data = { ...data, key: nextKey };
+    } else if (data.key !== undefined) {
+      data = { ...data };
+      delete data.key;
+    }
     const merged = { ...existing, ...data };
     const updateFields = API_KEY_FIELDS.filter(f => f !== "id");
     db.run(
       `UPDATE apiKeys SET ${updateFields.map(f => `${f} = ?`).join(", ")} WHERE id = ?`,
       [...updateFields.map(f => f === "isActive" ? (merged[f] ? 1 : 0) : merged[f]), id]
     );
+    if (merged.key !== existing.key) {
+      db.run(`UPDATE usageHistory SET apiKey = ? WHERE apiKey = ?`, [merged.key, existing.key]);
+    }
     result = merged;
   });
   return result;

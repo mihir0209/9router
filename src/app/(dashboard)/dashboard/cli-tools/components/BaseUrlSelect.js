@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { UPDATER_CONFIG } from "@/shared/constants/config";
-import { readPresets, upsertPreset, deletePreset, subscribePresets, stripSlash } from "./cliEndpointPresets";
+import { readPresets, upsertPreset, deletePreset, subscribePresets, stripSlash, getLocalAppPort } from "./cliEndpointPresets";
 
 const CUSTOM_VALUE = "__custom__";
 const SAVE_VALUE = "__save__";
@@ -13,11 +12,11 @@ const ensureV1 = (url) => {
   return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
 };
 
-const buildOptions = ({ requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1 }) => {
+const buildOptions = ({ requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1, port }) => {
   const opts = [];
   const wrap = (url) => (withV1 ? ensureV1(url) : (url || "").replace(/\/+$/, ""));
   if (!requiresExternalUrl) {
-    const localUrl = wrap(`http://127.0.0.1:${UPDATER_CONFIG.appPort}`);
+    const localUrl = wrap(`http://127.0.0.1:${port}`);
     opts.push({ value: "local", label: localUrl, url: localUrl });
   }
   if (tunnelEnabled && tunnelPublicUrl) {
@@ -54,6 +53,7 @@ export default function BaseUrlSelect({
 }) {
   const [savedPresets, setSavedPresets] = useState([]);
   const [presetsLoaded, setPresetsLoaded] = useState(false);
+  const [port, setPort] = useState(getLocalAppPort());
   const [mode, setMode] = useState("");
   const [customInput, setCustomInput] = useState("");
   const initializedRef = useRef(false);
@@ -61,6 +61,7 @@ export default function BaseUrlSelect({
 
   useEffect(() => {
     const sync = () => {
+      setPort(getLocalAppPort());
       const presets = readPresets();
       setSavedPresets(presets);
       // A preset saved elsewhere (e.g. on Apply) takes over the custom slot
@@ -74,15 +75,15 @@ export default function BaseUrlSelect({
         });
         return match ? `saved:${match.name}` : prev;
       });
+      setPresetsLoaded(true);
     };
     sync();
-    setPresetsLoaded(true);
     return subscribePresets(sync);
   }, []);
 
   const options = useMemo(
-    () => buildOptions({ requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1 }),
-    [requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1]
+    () => buildOptions({ requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1, port }),
+    [requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1, port]
   );
 
   // Prefer a saved preset matching the currently configured URL, else first option
@@ -90,17 +91,20 @@ export default function BaseUrlSelect({
     if (initializedRef.current) return;
     if (!presetsLoaded || options.length === 0) return;
     initializedRef.current = true;
-    const current = stripSlash(currentUrl);
-    const matched = current
-      ? options.find((o) => o.saved && stripSlash(o.url) === current)
-      : null;
-    const target = matched || options.find((o) => o.value !== CUSTOM_VALUE);
-    if (target) {
-      setMode(target.value);
-      onChange(target.url);
-    } else {
-      setMode(CUSTOM_VALUE);
-    }
+    const applyInitialSelection = () => {
+      const current = stripSlash(currentUrl);
+      const matched = current
+        ? options.find((o) => o.saved && stripSlash(o.url) === current)
+        : null;
+      const target = matched || options.find((o) => o.value !== CUSTOM_VALUE);
+      if (target) {
+        setMode(target.value);
+        onChange(target.url);
+      } else {
+        setMode(CUSTOM_VALUE);
+      }
+    };
+    applyInitialSelection();
   }, [presetsLoaded, options, onChange, currentUrl]);
 
   const handleSelect = (e) => {

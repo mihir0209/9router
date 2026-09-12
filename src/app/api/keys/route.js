@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getApiKeys, createApiKey } from "@/lib/localDb";
+import { getApiKeys, getApiKeyByKey, createApiKey } from "@/lib/localDb";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
 import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
 import { serializeApiKey, serializeApiKeys } from "@/lib/apiKeys/serializers";
@@ -54,7 +54,7 @@ export async function GET(request) {
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { name, machineId: requestedMachineId } = body;
+    const { name, machineId: requestedMachineId, key: requestedKey } = body;
     const isAdminApi = await hasValidAdminApiToken(request);
     const options = {};
     for (const field of CREATE_FIELDS) {
@@ -67,6 +67,18 @@ export async function POST(request) {
 
     if (!name) {
       return NextResponse.json({ error: "Name is required" }, { status: 400 });
+    }
+    // Custom key value (e.g. an existing license key to register as an API
+    // key). Empty/missing falls back to auto-generation.
+    let customKey = null;
+    if (requestedKey !== undefined && requestedKey !== null && String(requestedKey).trim() !== "") {
+      customKey = String(requestedKey).trim();
+      if (customKey.length > 512) {
+        return NextResponse.json({ error: "Custom key must be 512 characters or fewer" }, { status: 400 });
+      }
+      if (await getApiKeyByKey(customKey)) {
+        return NextResponse.json({ error: "API key already in use" }, { status: 409 });
+      }
     }
     if (isAdminApi && !options.ownerRef) {
       return NextResponse.json({ error: "ownerRef is required" }, { status: 400 });
@@ -81,10 +93,13 @@ export async function POST(request) {
     if (validationError) return NextResponse.json({ error: validationError }, { status: 400 });
 
     const machineId = (isAdminApi && requestedMachineId) || await getConsistentMachineId();
-    const apiKey = await createApiKey(name, machineId, options);
+    const apiKey = await createApiKey(name, machineId, customKey ? { ...options, key: customKey } : options);
 
     return NextResponse.json(serializeApiKey(apiKey, { includeSecret: true }), { status: 201 });
   } catch (error) {
+    if (error?.code === "DUPLICATE_API_KEY") {
+      return NextResponse.json({ error: "API key already in use" }, { status: 409 });
+    }
     console.log("Error creating key:", error);
     return NextResponse.json({ error: "Failed to create key" }, { status: 500 });
   }

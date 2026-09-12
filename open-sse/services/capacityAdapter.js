@@ -75,11 +75,24 @@ export function getActiveAdapterStrategy(requiredCapabilities, settings) {
   return "fallback";
 }
 
-function modelSatisfies(modelStr, requiredHard) {
+function modelSatisfies(modelStr, requiredHard, resolveMembers = null, seen = null) {
+  if (typeof modelStr !== "string") return false;
   const slash = modelStr.indexOf("/");
-  const provider = slash > 0 ? modelStr.slice(0, slash) : "";
-  const model = slash > 0 ? modelStr.slice(slash + 1) : modelStr;
-  const caps = getCapabilitiesForModel(provider, model);
+  if (slash > 0) {
+    const caps = getCapabilitiesForModel(modelStr.slice(0, slash), modelStr.slice(slash + 1));
+    return requiredHard.every((c) => caps[c] === true);
+  }
+  // Bare id: may be a nested combo — satisfied when any member (transitively)
+  // satisfies the requirement. Cycle-guarded like reorderByCapabilities.
+  if (resolveMembers) {
+    const members = resolveMembers(modelStr);
+    if (Array.isArray(members) && members.length > 0 && !(seen && seen.has(modelStr))) {
+      const next = new Set(seen);
+      next.add(modelStr);
+      return members.some((sub) => modelSatisfies(sub, requiredHard, resolveMembers, next));
+    }
+  }
+  const caps = getCapabilitiesForModel("", modelStr);
   return requiredHard.every((c) => caps[c] === true);
 }
 
@@ -89,12 +102,12 @@ function modelSatisfies(modelStr, requiredHard) {
 // original models follow as fallback. Leaves `models` untouched when the
 // original list already covers it (combo.js's reorderByCapabilities handles
 // that case via autoSwitch).
-export function augmentModelsWithCapacityAdapter(models, requiredCapabilities, settings) {
+export function augmentModelsWithCapacityAdapter(models, requiredCapabilities, settings, resolveMembers = null) {
   const hard = [...(requiredCapabilities || [])].filter((c) => HARD_CAPS.has(c));
   if (hard.length === 0 || !Array.isArray(models) || models.length === 0) return models;
-  if (models.some((m) => modelSatisfies(m, hard))) return models;
+  if (models.some((m) => modelSatisfies(m, hard, resolveMembers))) return models;
 
-  const pool = getCapacityAdapterModels(settings).filter((m) => !models.includes(m) && modelSatisfies(m, hard));
+  const pool = getCapacityAdapterModels(settings).filter((m) => !models.includes(m) && modelSatisfies(m, hard, resolveMembers));
   if (pool.length === 0) return models;
   return [...pool, ...models];
 }

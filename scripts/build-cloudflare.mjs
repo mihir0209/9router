@@ -1,4 +1,4 @@
-import { renameSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { renameSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -173,6 +173,15 @@ async function guardCloudflareAdminRequest(request, env) {
 }
 
 try {
+  // Always build from a clean state: Next's webpack filesystem cache can
+  // otherwise reuse modules compiled from pre-swap sources (e.g. the local
+  // SQLite driver), poisoning the worker bundle with unresolvable natives
+  // like bun:sqlite. NOTE: this deletes the local .next output — rerun the
+  // regular `npm run build` afterwards if you also serve locally.
+  for (const dir of [join(root, ".next"), join(root, ".open-next")]) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
   if (existsSync(disabledProxyPath)) {
     throw new Error(`${disabledProxyPath} already exists; refusing to overwrite`);
   }

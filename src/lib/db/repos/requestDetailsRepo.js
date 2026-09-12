@@ -143,6 +143,12 @@ async function flushToDatabase() {
 export async function saveRequestDetail(detail) {
   const config = await getObservabilityConfig();
   if (!config.enabled) {return;}
+  // Low-write mode never stores per-request details, even with observability
+  // on — the detail rows are the largest single write source.
+  try {
+    const { isLowWriteMode } = await import("./usageRepo.js");
+    if (await isLowWriteMode()) {return;}
+  } catch {}
 
   writeBuffer.push(detail);
 

@@ -44,6 +44,10 @@ const DEFAULT_SETTINGS = {
   observabilityBatchSize: 20,
   observabilityFlushIntervalMs: 5000,
   observabilityMaxJsonSize: 5,
+  // Tri-state: null = Auto (on for Cloudflare, off locally), true = always
+  // on, false = always off. Skips per-request log writes (usageHistory rows,
+  // request details) while keeping daily aggregates for analytics.
+  lowWriteMode: null,
   outboundProxyEnabled: false,
   outboundProxyUrl: "",
   outboundNoProxy: "",

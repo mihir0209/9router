@@ -6,6 +6,25 @@ const { pathToFileURL } = require("url");
 
 const origCreate = http.createServer.bind(http);
 
+// Propagate an explicit --port/-p CLI argument into process.env.PORT before the
+// server boots, so every runtime `process.env.PORT || "20128"` derivation (docs
+// URLs, tunnels, OAuth redirects, model tests) matches the port the server
+// actually listens on. The env var wins when already set (the CLI launcher
+// always sets PORT for its child process).
+(function propagatePortArg() {
+  if (process.env.PORT) return;
+  const argv = process.argv.slice(2);
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--port" || argv[i] === "-p") {
+      const value = parseInt(argv[i + 1], 10);
+      if (Number.isInteger(value) && value > 0 && value <= 65535) {
+        process.env.PORT = String(value);
+      }
+      break;
+    }
+  }
+})();
+
 // Per-process secret proving x-9r-real-ip was stamped below rather than sent by the client.
 // A bare `next start` / `next dev` never loads this file, so it cannot produce a matching
 // header even though the env var is inherited by child processes. Named like x-9r-cli-token

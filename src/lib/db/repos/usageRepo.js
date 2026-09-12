@@ -35,6 +35,57 @@ const statsEmitTimers = global._statsEmitTimers;
 
 export const statsEmitter = global._statsEmitter;
 
+if (!global._lowWriteCache) global._lowWriteCache = { value: undefined, ts: 0 };
+const lowWriteCache = global._lowWriteCache;
+const LOW_WRITE_CACHE_TTL_MS = 30 * 1000;
+if (!global._usageDedup) global._usageDedup = new Map();
+const usageDedup = global._usageDedup;
+const DEDUP_WINDOW_MS = 60 * 1000;
+const DEDUP_MAX_ENTRIES = 500;
+
+// Low-write analytics mode: skip per-request log rows (usageHistory inserts,
+// request details) while still maintaining the daily aggregates that power
+// the usage dashboard, charts and token-limit enforcement. Explicit user
+// setting (settings.lowWriteMode true/false) wins; unset (null) auto-enables
+// on the Cloudflare runtime where D1 writes are metered, and stays off
+// locally where per-request logs cost nothing.
+async function shouldLowWrite() {
+  if (lowWriteCache.value !== undefined && Date.now() - lowWriteCache.ts < LOW_WRITE_CACHE_TTL_MS) {
+    return lowWriteCache.value;
+  }
+  let value = process.env.NINEROUTER_RUNTIME === "cloudflare";
+  try {
+    const { getSettings } = await import("./settingsRepo.js");
+    const setting = (await getSettings())?.lowWriteMode;
+    if (setting === true) value = true;
+    else if (setting === false) value = false;
+  } catch {}
+  lowWriteCache.value = value;
+  lowWriteCache.ts = Date.now();
+  return value;
+}
+
+export async function isLowWriteMode() {
+  try {
+    return await shouldLowWrite();
+  } catch {
+    return false;
+  }
+}
+
+// Test/maintenance helper: drop the cached mode verdict so the next read
+// picks up a fresh settings value immediately.
+export function resetLowWriteCache() {
+  lowWriteCache.value = undefined;
+  lowWriteCache.ts = 0;
+}
+
+// In-memory recent-request ring (no DB cost). In low-write mode this is the
+// only per-request record kept, and readers fall back to it.
+export function getRecentRingEntries() {
+  return [...recentRing.items];
+}
+
 function scheduleStatsEvent(event, delayMs = 150) {
   const key = event === "update" ? "update" : "pending";
   if (statsEmitTimers[key]) return;
@@ -254,43 +305,65 @@ export async function saveRequestUsage(entry) {
     const completionTokens = tokens.completion_tokens || tokens.output_tokens || 0;
 
     let inserted = false;
+    const lowWrite = await shouldLowWrite().catch(() => false);
 
-    // All 3 writes (history insert, daily upsert, lifetime counter) in ONE transaction.
-    // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.
-    db.transaction(() => {
-      const existing = db.get(
-        `SELECT id, endpoint FROM usageHistory
-         WHERE timestamp = ?
-           AND COALESCE(provider, '') = COALESCE(?, '')
-           AND COALESCE(model, '') = COALESCE(?, '')
-           AND COALESCE(connectionId, '') = COALESCE(?, '')
-           AND COALESCE(apiKey, '') = COALESCE(?, '')
-           AND promptTokens = ?
-           AND completionTokens = ?
-         ORDER BY id DESC LIMIT 1`,
-        [
-          entry.timestamp, entry.provider || null, entry.model || null,
-          entry.connectionId || null, entry.apiKey || null,
-          promptTokens, completionTokens,
-        ]
-      );
-
-      if (existing) {
-        if (!existing.endpoint && entry.endpoint) {
-          db.run(`UPDATE usageHistory SET endpoint = ? WHERE id = ?`, [entry.endpoint, existing.id]);
+    if (lowWrite) {
+      // In-memory stand-in for the SQL dedup below: same fingerprint fields,
+      // so a retried/double-flushed identical save still counts once.
+      const fp = [entry.timestamp, entry.provider || "", entry.model || "", entry.connectionId || "", entry.apiKey || "", promptTokens, completionTokens].join("|");
+      const now = Date.now();
+      const last = usageDedup.get(fp);
+      if (last !== undefined && now - last < DEDUP_WINDOW_MS) return;
+      usageDedup.set(fp, now);
+      if (usageDedup.size > DEDUP_MAX_ENTRIES) {
+        for (const [k, t] of usageDedup) {
+          if (now - t >= DEDUP_WINDOW_MS) usageDedup.delete(k);
+          if (usageDedup.size <= DEDUP_MAX_ENTRIES) break;
         }
-        return;
       }
+    }
 
-      db.run(
-        `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          entry.timestamp, entry.provider || null, entry.model || null,
-          entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
-          promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
-          stringifyJson(tokens), stringifyJson({}),
-        ]
-      );
+    // All writes in ONE transaction.
+    // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.
+    // Low-write mode skips the per-request usageHistory row (on Cloudflare this
+    // also skips the full-table D1 rewrite); the daily aggregate + lifetime
+    // counter still land, so analytics keep working.
+    db.transaction(() => {
+      if (!lowWrite) {
+        const existing = db.get(
+          `SELECT id, endpoint FROM usageHistory
+           WHERE timestamp = ?
+             AND COALESCE(provider, '') = COALESCE(?, '')
+             AND COALESCE(model, '') = COALESCE(?, '')
+             AND COALESCE(connectionId, '') = COALESCE(?, '')
+             AND COALESCE(apiKey, '') = COALESCE(?, '')
+             AND promptTokens = ?
+             AND completionTokens = ?
+           ORDER BY id DESC LIMIT 1`,
+          [
+            entry.timestamp, entry.provider || null, entry.model || null,
+            entry.connectionId || null, entry.apiKey || null,
+            promptTokens, completionTokens,
+          ]
+        );
+
+        if (existing) {
+          if (!existing.endpoint && entry.endpoint) {
+            db.run(`UPDATE usageHistory SET endpoint = ? WHERE id = ?`, [entry.endpoint, existing.id]);
+          }
+          return;
+        }
+
+        db.run(
+          `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            entry.timestamp, entry.provider || null, entry.model || null,
+            entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
+            promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
+            stringifyJson(tokens), stringifyJson({}),
+          ]
+        );
+      }
 
       const dateKey = getLocalDateKey(entry.timestamp);
       const row = db.get(`SELECT data FROM usageDaily WHERE dateKey = ?`, [dateKey]);
@@ -351,7 +424,7 @@ export async function getApiKeyDailyUsage(apiKey, { from, to } = {}) {
     params.push(to);
   }
 
-  return db.all(
+  const rows = db.all(
     `SELECT substr(timestamp, 1, 10) AS date,
             COUNT(*) AS requests,
             COALESCE(SUM(promptTokens), 0) AS promptTokens,
@@ -364,6 +437,31 @@ export async function getApiKeyDailyUsage(apiKey, { from, to } = {}) {
       ORDER BY date ASC`,
     params
   );
+  if (rows.length) return rows;
+
+  // Low-write mode stores no per-request history rows: rebuild the same
+  // per-day shape from the daily aggregates instead.
+  if (!(await shouldLowWrite().catch(() => false))) return rows;
+  const fromDay = from ? String(from).slice(0, 10) : null;
+  const toDay = to ? String(to).slice(0, 10) : null;
+  const out = [];
+  for (const dr of db.all(`SELECT dateKey, data FROM usageDaily ORDER BY dateKey ASC`)) {
+    if (fromDay && dr.dateKey < fromDay) continue;
+    if (toDay && dr.dateKey > toDay) continue;
+    const day = parseJson(dr.data, {});
+    let requests = 0, promptTokens = 0, completionTokens = 0, cost = 0;
+    for (const ak of Object.values(day.byApiKey || {})) {
+      if ((ak.apiKey || null) !== apiKey) continue;
+      requests += ak.requests || 0;
+      promptTokens += ak.promptTokens || 0;
+      completionTokens += ak.completionTokens || 0;
+      cost += ak.cost || 0;
+    }
+    if (requests > 0 || promptTokens > 0 || completionTokens > 0) {
+      out.push({ date: dr.dateKey, requests, promptTokens, completionTokens, tokens: promptTokens + completionTokens, cost });
+    }
+  }
+  return out;
 }
 
 function loadDaysInRange(adapter, maxDays) {
@@ -478,9 +576,18 @@ export async function getUsageStats(period = "all") {
 
   const useDailySummary = period !== "24h" && period !== "today";
 
-  if (useDailySummary) {
+  // Low-write mode stores no per-request history rows, so the live-history
+  // paths below would report zeros. Route 24h/today through today's daily
+  // aggregate instead — totals and breakdowns stay correct (minute-level
+  // charts and lastUsed overlays degrade to day granularity).
+  const lowWrite = await shouldLowWrite().catch(() => false);
+  const useAggregate = lowWrite ? true : useDailySummary;
+
+  if (useAggregate) {
     const periodDays = { "7d": 7, "30d": 30, "60d": 60 };
-    const maxDays = periodDays[period] || null;
+    let maxDays = periodDays[period] || null;
+    if (lowWrite && period === "today") maxDays = 1;
+    else if (lowWrite && period === "24h") maxDays = 2;
     const dayRows = loadDaysInRange(db, maxDays);
 
     for (const dr of dayRows) {
@@ -775,11 +882,6 @@ export async function appendRequestLog() {}
 export async function getRecentLogs(limit = 200) {
   try {
     const db = await getAdapter();
-    const rows = db.all(
-      `SELECT timestamp, provider, model, connectionId, promptTokens, completionTokens, status, tokens FROM usageHistory ORDER BY id DESC LIMIT ?`,
-      [limit],
-    );
-    if (!rows.length) return [];
 
     const connMap = {};
     try {
@@ -788,7 +890,7 @@ export async function getRecentLogs(limit = 200) {
       for (const c of connections) connMap[c.id] = c.name || c.email || "";
     } catch {}
 
-    return rows.map((r) => {
+    const formatRow = (r) => {
       const ts = formatLogDate(new Date(r.timestamp));
       const p = r.provider?.toUpperCase() || "-";
       const m = r.model || "-";
@@ -797,7 +899,23 @@ export async function getRecentLogs(limit = 200) {
       const sent = r.promptTokens ?? tk.prompt_tokens ?? "-";
       const received = r.completionTokens ?? tk.completion_tokens ?? "-";
       return `${ts} | ${m} | ${p} | ${account} | ${sent} | ${received} | ${r.status || "-"}`;
-    });
+    };
+
+    const rows = db.all(
+      `SELECT timestamp, provider, model, connectionId, promptTokens, completionTokens, status, tokens FROM usageHistory ORDER BY id DESC LIMIT ?`,
+      [limit],
+    );
+    if (rows.length) return rows.map(formatRow);
+
+    // Low-write mode keeps no per-request history rows: serve the in-memory
+    // recent-request ring instead so the console log stays live.
+    if (await shouldLowWrite().catch(() => false)) {
+      return [...recentRing.items]
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+        .slice(0, limit)
+        .map(formatRow);
+    }
+    return [];
   } catch (e) {
     console.error("[usageRepo] getRecentLogs failed:", e.message);
     return [];

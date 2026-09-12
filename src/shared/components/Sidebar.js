@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import PropTypes from "prop-types";
 import Link from "next/link";
+import { createPortal } from "react-dom";
 import { usePathname } from "next/navigation";
 import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG, UPDATER_CONFIG } from "@/shared/constants/config";
@@ -38,6 +39,151 @@ const systemItems = [
   { href: "/dashboard/proxy-pools", label: "Proxy Pools", icon: "lan" },
   { href: "/dashboard/skills", label: "Skills", icon: "extension" },
 ];
+
+// Collapsed-rail tooltip. The native `title` attribute is not used because
+// browsers anchor it above the hovered element, where it covers the
+// neighbouring icons on the narrow rail. This portal label follows the icon
+// (fixed positioning is immune to the nav's overflow and the aside's
+// backdrop-filter) and appears to the right, vertically centered.
+function useRailTooltip(label, enabled) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState(null);
+
+  const show = useCallback(() => {
+    if (!enabled) return;
+    const rect = ref.current?.getBoundingClientRect();
+    if (rect) setPos({ top: rect.top + rect.height / 2, left: rect.right + 12 });
+  }, [enabled]);
+  const hide = useCallback(() => setPos(null), []);
+
+  const node = enabled && pos
+    ? createPortal(
+        <div
+          role="tooltip"
+          style={{ top: pos.top, left: pos.left }}
+          className="pointer-events-none fixed z-[100] -translate-y-1/2 whitespace-nowrap rounded-md border border-border-subtle bg-surface-3 px-2.5 py-1 text-xs font-medium text-text-main shadow-xl"
+        >
+          {label}
+        </div>,
+        document.body
+      )
+    : null;
+
+  return { ref, tooltipHandlers: { onMouseEnter: show, onMouseLeave: hide, onFocus: show, onBlur: hide }, tooltip: node };
+}
+
+function SidebarLink({ href, label, icon, collapsed, active, onClick, compact = false, iconClass = "text-[18px]" }) {
+  const { ref, tooltipHandlers, tooltip } = useRailTooltip(label, collapsed);
+  return (
+    <>
+      <Link
+        ref={ref}
+        href={href}
+        onClick={onClick}
+        {...tooltipHandlers}
+        className={cn(
+          "relative flex items-center rounded-lg py-1 transition-all group",
+          compact ? "px-4" : "px-3",
+          collapsed ? "justify-center" : "gap-3",
+          active
+            ? "bg-primary/10 text-primary"
+            : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+        )}
+      >
+        <span
+          className={cn(
+            "material-symbols-outlined",
+            iconClass,
+            active ? "fill-1" : "group-hover:text-primary transition-colors"
+          )}
+        >
+          {icon}
+        </span>
+        {!collapsed && <span className="text-[13px] font-medium">{label}</span>}
+      </Link>
+      {tooltip}
+    </>
+  );
+}
+
+function LogoLink({ collapsed }) {
+  const { ref, tooltipHandlers, tooltip } = useRailTooltip(APP_CONFIG.name, collapsed);
+  return (
+    <>
+      <Link
+        ref={ref}
+        href="/dashboard"
+        className="flex min-w-0 flex-1 items-center gap-3"
+        aria-label={APP_CONFIG.name}
+        {...tooltipHandlers}
+      >
+        <div className="flex items-center justify-center size-9 rounded-[10px] bg-gradient-to-br from-brand-500 to-brand-700 shadow-[var(--shadow-warm)]">
+          <span className="material-symbols-outlined text-white text-[20px]">hub</span>
+        </div>
+        <div className={cn("flex-col min-w-0", collapsed ? "hidden" : "flex")}>
+          <h1 className="text-lg font-semibold tracking-tight text-text-main">
+            {APP_CONFIG.name}
+          </h1>
+          <span className="text-xs text-text-muted">v{APP_CONFIG.version}</span>
+        </div>
+      </Link>
+      {tooltip}
+    </>
+  );
+}
+
+function CollapseButton({ collapsed, onToggleCollapse }) {
+  const { ref, tooltipHandlers, tooltip } = useRailTooltip(collapsed ? "Expand sidebar" : "Collapse sidebar", collapsed);
+  return (
+    <>
+      <button
+        ref={ref}
+        type="button"
+        onClick={onToggleCollapse}
+        className={cn(
+          "flex shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-2 hover:text-text-main",
+          collapsed ? "mx-auto size-9" : "size-8"
+        )}
+        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-expanded={!collapsed}
+        {...tooltipHandlers}
+      >
+        <span className={cn("material-symbols-outlined", collapsed ? "text-[22px]" : "text-[18px]")}>
+          {collapsed ? "left_panel_open" : "left_panel_close"}
+        </span>
+      </button>
+      {tooltip}
+    </>
+  );
+}
+
+function MediaProvidersToggle({ collapsed, mediaOpen, onToggle, active }) {
+  const { ref, tooltipHandlers, tooltip } = useRailTooltip("Media Providers", collapsed);
+  return (
+    <>
+      <button
+        ref={ref}
+        onClick={onToggle}
+        className={cn(
+          "w-full flex items-center px-3 py-1 rounded-lg transition-all group",
+          collapsed ? "justify-center" : "gap-3",
+          active
+            ? "bg-primary/10 text-primary"
+            : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+        )}
+        aria-expanded={mediaOpen}
+        {...tooltipHandlers}
+      >
+        <span className="material-symbols-outlined text-[18px]">perm_media</span>
+        {!collapsed && <span className="text-[13px] font-medium flex-1 text-left">Media Providers</span>}
+        {!collapsed && <span className="material-symbols-outlined text-[14px] transition-transform" style={{ transform: mediaOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
+          expand_more
+        </span>}
+      </button>
+      {tooltip}
+    </>
+  );
+}
 
 export default function Sidebar({ onClose, collapsed = false, onToggleCollapse }) {
   const pathname = usePathname();
@@ -119,33 +265,22 @@ export default function Sidebar({ onClose, collapsed = false, onToggleCollapse }
           <div className="w-3 h-3 rounded-full bg-[#27C93F]" />
         </div>
 
-        {/* Logo */}
-        <div className={cn("py-4 flex flex-col gap-2", collapsed ? "px-5" : "px-6")}>
-          <div className="flex items-center gap-2">
-          <Link href="/dashboard" className="flex min-w-0 flex-1 items-center gap-3" title={collapsed ? APP_CONFIG.name : undefined}>
-            <div className="flex items-center justify-center size-9 rounded-[10px] bg-gradient-to-br from-brand-500 to-brand-700 shadow-[var(--shadow-warm)]">
-              <span className="material-symbols-outlined text-white text-[20px]">hub</span>
+        {/* Logo / collapse toggle. Collapsed: the logo is dropped — the rail's
+            content width (40px) cannot fit logo + button side by side, so only
+            the toggle shows, centered in the logo's place. */}
+        <div className={cn("py-4 flex flex-col gap-2", collapsed ? "px-3" : "px-6")}>
+          {collapsed ? (
+            onToggleCollapse && (
+              <CollapseButton collapsed={collapsed} onToggleCollapse={onToggleCollapse} />
+            )
+          ) : (
+            <div className="flex items-center gap-2">
+              <LogoLink collapsed={collapsed} />
+              {onToggleCollapse && (
+                <CollapseButton collapsed={collapsed} onToggleCollapse={onToggleCollapse} />
+              )}
             </div>
-            <div className={cn("flex-col min-w-0", collapsed ? "hidden" : "flex")}>
-              <h1 className="text-lg font-semibold tracking-tight text-text-main">
-                {APP_CONFIG.name}
-              </h1>
-              <span className="text-xs text-text-muted">v{APP_CONFIG.version}</span>
-            </div>
-          </Link>
-          {onToggleCollapse && (
-            <button
-              type="button"
-              onClick={onToggleCollapse}
-              className="flex size-8 shrink-0 items-center justify-center rounded-lg text-text-muted hover:bg-surface-2 hover:text-text-main"
-              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              aria-expanded={!collapsed}
-            >
-              <span className="material-symbols-outlined text-[18px]">{collapsed ? "left_panel_open" : "left_panel_close"}</span>
-            </button>
           )}
-          </div>
           {updateInfo && !collapsed && (
             <div className="flex flex-col gap-1.5 rounded p-1 -m-1">
               <span className="text-xs font-semibold text-green-600 dark:text-amber-500">
@@ -175,29 +310,15 @@ export default function Sidebar({ onClose, collapsed = false, onToggleCollapse }
         {/* Navigation */}
         <nav className={cn("flex-1 py-2 space-y-0.5 overflow-y-auto custom-scrollbar", collapsed ? "px-3" : "px-4")}>
           {navItems.map((item) => (
-            <Link
+            <SidebarLink
               key={item.href}
               href={item.href}
+              label={item.label}
+              icon={item.icon}
+              collapsed={collapsed}
+              active={isActive(item.href)}
               onClick={onClose}
-              className={cn(
-                "flex items-center px-3 py-1 rounded-lg transition-all group",
-                collapsed ? "justify-center" : "gap-3",
-                isActive(item.href)
-                  ? "bg-primary/10 text-primary"
-                  : "text-text-muted hover:bg-surface-2 hover:text-text-main"
-              )}
-              title={collapsed ? item.label : undefined}
-            >
-              <span
-                className={cn(
-                  "material-symbols-outlined text-[18px]",
-                  isActive(item.href) ? "fill-1" : "group-hover:text-primary transition-colors"
-                )}
-              >
-                {item.icon}
-              </span>
-              {!collapsed && <span className="text-[13px] font-medium">{item.label}</span>}
-            </Link>
+            />
           ))}
 
           {/* System section */}
@@ -207,141 +328,73 @@ export default function Sidebar({ onClose, collapsed = false, onToggleCollapse }
             </p>
 
             {/* Media Providers accordion */}
-            <button
-              onClick={() => setMediaOpen((v) => !v)}
-              className={cn(
-                "w-full flex items-center px-3 py-1 rounded-lg transition-all group",
-                collapsed ? "justify-center" : "gap-3",
-                pathname.startsWith("/dashboard/media-providers")
-                  ? "bg-primary/10 text-primary"
-                  : "text-text-muted hover:bg-surface-2 hover:text-text-main"
-              )}
-              title={collapsed ? "Media Providers" : undefined}
-            >
-              <span className="material-symbols-outlined text-[18px]">perm_media</span>
-              {!collapsed && <span className="text-[13px] font-medium flex-1 text-left">Media Providers</span>}
-              {!collapsed && <span className="material-symbols-outlined text-[14px] transition-transform" style={{ transform: mediaOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
-                expand_more
-              </span>}
-            </button>
+            <MediaProvidersToggle collapsed={collapsed} mediaOpen={mediaOpen} onToggle={() => setMediaOpen((v) => !v)} active={pathname.startsWith("/dashboard/media-providers")} />
+
             {mediaOpen && (
               <div className={collapsed ? "" : "pl-4"}>
                 {MEDIA_PROVIDER_KINDS.filter((k) => VISIBLE_MEDIA_KINDS.includes(k.id)).map((kind) => (
-                  <Link
+                  <SidebarLink
                     key={kind.id}
                     href={`/dashboard/media-providers/${kind.id}`}
+                    label={kind.label}
+                    icon={kind.icon}
+                    collapsed={collapsed}
+                    active={pathname.startsWith(`/dashboard/media-providers/${kind.id}`)}
                     onClick={onClose}
-                    className={cn(
-                      "flex items-center px-4 py-1 rounded-lg transition-all group",
-                      collapsed ? "justify-center" : "gap-3",
-                      pathname.startsWith(`/dashboard/media-providers/${kind.id}`)
-                        ? "bg-primary/10 text-primary"
-                        : "text-text-muted hover:bg-surface-2 hover:text-text-main"
-                    )}
-                    title={collapsed ? kind.label : undefined}
-                  >
-                    <span className="material-symbols-outlined text-[16px]">{kind.icon}</span>
-                    {!collapsed && <span className="text-sm">{kind.label}</span>}
-                  </Link>
+                    compact
+                    iconClass="text-[16px]"
+                  />
                 ))}
-                <Link
-                  key={COMBINED_WEB_ITEM.id}
+                <SidebarLink
                   href={COMBINED_WEB_ITEM.href}
+                  label={COMBINED_WEB_ITEM.label}
+                  icon={COMBINED_WEB_ITEM.icon}
+                  collapsed={collapsed}
+                  active={pathname.startsWith(COMBINED_WEB_ITEM.href)}
                   onClick={onClose}
-                  className={cn(
-                    "flex items-center px-4 py-1 rounded-lg transition-all group",
-                    collapsed ? "justify-center" : "gap-3",
-                    pathname.startsWith(COMBINED_WEB_ITEM.href)
-                      ? "bg-primary/10 text-primary"
-                      : "text-text-muted hover:bg-surface-2 hover:text-text-main"
-                  )}
-                  title={collapsed ? COMBINED_WEB_ITEM.label : undefined}
-                >
-                  <span className="material-symbols-outlined text-[16px]">{COMBINED_WEB_ITEM.icon}</span>
-                  {!collapsed && <span className="text-sm">{COMBINED_WEB_ITEM.label}</span>}
-                </Link>
+                  compact
+                  iconClass="text-[16px]"
+                />
               </div>
             )}
 
             {systemItems.map((item) => (
-              <Link
+              <SidebarLink
                 key={item.href}
                 href={item.href}
+                label={item.label}
+                icon={item.icon}
+                collapsed={collapsed}
+                active={isActive(item.href)}
                 onClick={onClose}
-                className={cn(
-                  "flex items-center px-3 py-1 rounded-lg transition-all group",
-                  collapsed ? "justify-center" : "gap-3",
-                  isActive(item.href)
-                    ? "bg-primary/10 text-primary"
-                    : "text-text-muted hover:bg-surface-2 hover:text-text-main"
-                )}
-                title={collapsed ? item.label : undefined}
-              >
-                <span
-                  className={cn(
-                    "material-symbols-outlined text-[18px]",
-                    isActive(item.href) ? "fill-1" : "group-hover:text-primary transition-colors"
-                  )}
-                >
-                  {item.icon}
-                </span>
-                {!collapsed && <span className="text-[13px] font-medium">{item.label}</span>}
-              </Link>
+              />
             ))}
 
             {/* Debug items (inside System section, before Settings) */}
             {debugItems.map((item) => {
               const show = item.href !== "/dashboard/translator" || enableTranslator;
               return show ? (
-                <Link
+                <SidebarLink
                   key={item.href}
                   href={item.href}
+                  label={item.label}
+                  icon={item.icon}
+                  collapsed={collapsed}
+                  active={isActive(item.href)}
                   onClick={onClose}
-                  className={cn(
-                    "flex items-center px-3 py-1 rounded-lg transition-all group",
-                    collapsed ? "justify-center" : "gap-3",
-                    isActive(item.href)
-                      ? "bg-primary/10 text-primary"
-                      : "text-text-muted hover:bg-surface-2 hover:text-text-main"
-                  )}
-                  title={collapsed ? item.label : undefined}
-                >
-                  <span
-                    className={cn(
-                      "material-symbols-outlined text-[18px]",
-                      isActive(item.href) ? "fill-1" : "group-hover:text-primary transition-colors"
-                    )}
-                  >
-                    {item.icon}
-                  </span>
-                  {!collapsed && <span className="text-[13px] font-medium">{item.label}</span>}
-                </Link>
+                />
               ) : null;
             })}
 
             {/* Settings */}
-            <Link
+            <SidebarLink
               href="/dashboard/profile"
+              label="Settings"
+              icon="settings"
+              collapsed={collapsed}
+              active={isActive("/dashboard/profile")}
               onClick={onClose}
-              className={cn(
-                "flex items-center px-3 py-1 rounded-lg transition-all group",
-                collapsed ? "justify-center" : "gap-3",
-                isActive("/dashboard/profile")
-                  ? "bg-primary/10 text-primary"
-                  : "text-text-muted hover:bg-surface-2 hover:text-text-main"
-              )}
-              title={collapsed ? "Settings" : undefined}
-            >
-              <span
-                className={cn(
-                  "material-symbols-outlined text-[18px]",
-                  isActive("/dashboard/profile") ? "fill-1" : "group-hover:text-primary transition-colors"
-                )}
-              >
-                settings
-              </span>
-              {!collapsed && <span className="text-[13px] font-medium">Settings</span>}
-            </Link>
+            />
           </div>
         </nav>
 
@@ -396,8 +449,7 @@ Sidebar.propTypes = {
   onToggleCollapse: PropTypes.func,
 };
 
-function ManualUpdatePanel({ latestVersion, installCmd, copied, onCopyAndShutdown, onCancel, countdown, isDisconnected }) {
-  const isCountingDown = countdown > 0;
+function ManualUpdatePanel({ latestVersion, installCmd, copied, onCopyAndShutdown, onCancel, countdown, isDisconnected }) {  const isCountingDown = countdown > 0;
   return (
     <div className="w-full max-w-lg rounded-xl bg-neutral-900/95 border border-white/10 p-6 text-white">
       <div className="flex items-center gap-3 mb-4">
