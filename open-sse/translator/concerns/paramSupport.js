@@ -6,6 +6,10 @@ import { getCapabilitiesForModel } from "../../providers/capabilities.js";
 // Each rule: optional provider, regex match on model, list of params to drop.
 // A param is removed only when it is present (!== undefined).
 const STRIP_RULES = [
+  // Auth material some clients send in-body (custom apps commonly include
+  // api_key in JSON). Never a valid OpenAI body param; strict upstreams
+  // (Azure, Azure-fronted compatibles) 400 unknown_parameter on it.
+  { drop: ["api_key", "apiKey"] },
   // All Claude models: temperature deprecated/rejected upstream (Anthropic 400). #1748
   { match: /claude/i, drop: ["temperature"] },
   // GitHub Copilot gpt-5.4: temperature unsupported.

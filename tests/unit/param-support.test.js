@@ -52,4 +52,20 @@ describe("stripUnsupportedParams", () => {
 
     expect(body.max_tokens).toBe(64000);
   });
+
+  it("drops in-body api_key/apiKey for Azure (strict unknown_parameter 400)", () => {
+    const body = { model: "gpt-5.6-terra", messages: [], api_key: "sk-test", apiKey: "sk-test" };
+
+    stripUnsupportedParams("azure", "gpt-5.6-terra", body);
+
+    expect(body).toEqual({ model: "gpt-5.6-terra", messages: [] });
+  });
+
+  it("drops in-body api_key for openai-compatible providers regardless of model", () => {
+    const body = { model: "grok-4.6", messages: [], api_key: "sk-test" };
+
+    stripUnsupportedParams("openai-compatible-chat-719da27b", "grok-4.6", body);
+
+    expect(body).toEqual({ model: "grok-4.6", messages: [] });
+  });
 });
