@@ -295,7 +295,10 @@ describe("openaiToKiroRequest", () => {
       const result = openaiToKiroRequest("claude-sonnet-4.6", body, true, {});
 
       expect(contentOf(result)).toContain("<max_thinking_length>1024</max_thinking_length>");
-      expect(result.additionalModelRequestFields).toBeUndefined();
+      expect(result.additionalModelRequestFields).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        output_config: { effort: "low" },
+      });
     });
 
     it("maps reasoning_effort high to max_thinking_length 24576", () => {
@@ -307,7 +310,10 @@ describe("openaiToKiroRequest", () => {
       const result = openaiToKiroRequest("claude-sonnet-4.6", body, true, {});
 
       expect(contentOf(result)).toContain("<max_thinking_length>24576</max_thinking_length>");
-      expect(result.additionalModelRequestFields).toBeUndefined();
+      expect(result.additionalModelRequestFields).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        output_config: { effort: "high" },
+      });
     });
 
     it.each([
@@ -322,7 +328,9 @@ describe("openaiToKiroRequest", () => {
 
       const result = openaiToKiroRequest(model, body, true, {});
 
-      expect(result.additionalModelRequestFields).toBeUndefined();
+      expect(result.additionalModelRequestFields).toEqual({
+        reasoning: { effort },
+      });
       expect(contentOf(result)).not.toContain("<thinking_mode>");
       expect(contentOf(result)).not.toContain("<max_thinking_length>");
     });
@@ -338,7 +346,9 @@ describe("openaiToKiroRequest", () => {
 
       const result = openaiToKiroRequest(model, body, true, {});
 
-      expect(result.additionalModelRequestFields).toBeUndefined();
+      expect(result.additionalModelRequestFields).toEqual({
+        reasoning: { effort: wireEffort },
+      });
       expect(contentOf(result)).not.toContain("<thinking_mode>");
       expect(contentOf(result)).not.toContain("<max_thinking_length>");
     });
@@ -418,11 +428,11 @@ describe("openaiToKiroRequest", () => {
     ])("normalizes unsupported Kiro intensity suffix for %s", (model, upstream) => {
       const result = openaiToKiroRequest(model, {
         messages: [{ role: "user", content: "hello" }],
-      }, true, {});
+      }, true, { providerSpecificData: { kiroAgenticPromptMode: "once" }, connectionId: "o2k-intensity-1" });
 
       expect(result.conversationState.currentMessage.userInputMessage.modelId).toBe(upstream);
       expect(result.additionalModelRequestFields).toBeUndefined();
-      expect(systemPromptOf(result)).toContain("CHUNKED WRITE PROTOCOL");
+      expect(contentOf(result)).toContain("CHUNKED WRITE PROTOCOL");
     });
 
     it("maps a supported Kiro Claude intensity suffix to native effort fields", () => {
@@ -505,7 +515,10 @@ describe("openaiToKiroRequest", () => {
 
       const result = openaiToKiroRequest("claude-sonnet-4.60", body, true, {});
 
-      expect(result.additionalModelRequestFields).toBeUndefined();
+      expect(result.additionalModelRequestFields).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        output_config: { effort: "high" },
+      });
     });
 
     it("clamps reasoning_effort max to Kiro max_thinking_length 32000", () => {
@@ -517,7 +530,10 @@ describe("openaiToKiroRequest", () => {
       const result = openaiToKiroRequest("claude-sonnet-4.6", body, true, {});
 
       expect(contentOf(result)).toContain("<max_thinking_length>32000</max_thinking_length>");
-      expect(result.additionalModelRequestFields).toBeUndefined();
+      expect(result.additionalModelRequestFields).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        output_config: { effort: "high" },
+      });
     });
 
     it("clamps OpenAI Responses reasoning.effort xhigh to max_thinking_length 32000", () => {
@@ -529,7 +545,10 @@ describe("openaiToKiroRequest", () => {
       const result = openaiToKiroRequest("claude-sonnet-4.6", body, true, {});
 
       expect(contentOf(result)).toContain("<max_thinking_length>32000</max_thinking_length>");
-      expect(result.additionalModelRequestFields).toBeUndefined();
+      expect(result.additionalModelRequestFields).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        output_config: { effort: "high" },
+      });
     });
 
     it("uses Claude thinking.budget_tokens as max_thinking_length", () => {
@@ -591,7 +610,7 @@ describe("openaiToKiroRequest", () => {
       );
 
       expect(second.conversationState.conversationId).toBe("hermes-session-openai-replay");
-      expect(second.conversationState.agentContinuationId).toBe(first.conversationState.agentContinuationId);
+      expect(second.conversationState).not.toHaveProperty("agentContinuationId");
       expect(second.conversationState.history[0].userInputMessage.content).toBe(
         first.conversationState.currentMessage.userInputMessage.content
       );

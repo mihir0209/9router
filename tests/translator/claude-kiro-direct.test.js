@@ -27,9 +27,8 @@ describe("Claude → Kiro (direct route)", () => {
 
     expect(first.conversationState.conversationId).toBe("hermes-session-123-claude-replay");
     expect(second.conversationState.conversationId).toBe("hermes-session-123-claude-replay");
-    expect(first.conversationState.agentContinuationId).toBeTruthy();
-    expect(second.conversationState.agentContinuationId).toBe(first.conversationState.agentContinuationId);
-    expect(first.conversationState.agentTaskType).toBe("vibe");
+    expect(first.conversationState).not.toHaveProperty("agentContinuationId");
+    expect(second.conversationState).not.toHaveProperty("agentTaskType");
     expect(second.conversationState.history[0].userInputMessage.content).toBe(
       first.conversationState.currentMessage.userInputMessage.content
     );
@@ -86,7 +85,7 @@ describe("Claude → Kiro (direct route)", () => {
       "<thinking_mode>enabled</thinking_mode>"
     );
     expect(out.systemPrompt).toBeUndefined();
-    expect(out.agentMode).toBe("vibe");
+    expect(out).not.toHaveProperty("agentMode");
   });
 
   it("does not send additionalModelRequestFields for Kiro models without effort support", () => {
@@ -104,13 +103,14 @@ describe("Claude → Kiro (direct route)", () => {
   it("normalizes an unsupported Kiro intensity suffix while preserving agentic behavior", () => {
     const out = C2K(
       { messages: [{ role: "user", content: "hello" }] },
-      null,
+      { providerSpecificData: { kiroAgenticPromptMode: "once" }, connectionId: "agentic-once-1" },
       "claude-sonnet-4.5-thinking-agentic(high)",
     );
 
     expect(out.conversationState.currentMessage.userInputMessage.modelId).toBe("claude-sonnet-4.5");
     expect(out.additionalModelRequestFields).toBeUndefined();
-    expect(out.systemPrompt).toContain("CHUNKED WRITE PROTOCOL");
+    expect(out.systemPrompt).toBeUndefined();
+    expect(contentOf(out)).toContain("CHUNKED WRITE PROTOCOL");
   });
 
   it("maps output_config.effort high to Kiro CLI-style additionalModelRequestFields for effort models", () => {
@@ -119,19 +119,33 @@ describe("Claude → Kiro (direct route)", () => {
       messages: [{ role: "user", content: "think with adaptive effort" }],
     }, null, "claude-sonnet-5");
 
-    expect(out.additionalModelRequestFields).toBeUndefined();
+    expect(out.additionalModelRequestFields).toEqual({
+      thinking: { type: "adaptive", display: "summarized" },
+      output_config: { effort: "high" },
+    });
     expect(out.thinking).toBeUndefined();
     expect(out.systemPrompt).toBeUndefined();
     expect(contentOf(out)).toContain("<max_thinking_length>24576</max_thinking_length>");
   });
 
-  it("does not send additionalModelRequestFields for GPT-5.6 reasoning", () => {
+  it("withholds additionalModelRequestFields for builder-id api_key accounts", () => {
+    const out = C2K({
+      output_config: { effort: "high" },
+      messages: [{ role: "user", content: "think with adaptive effort" }],
+    }, { providerSpecificData: { authMethod: "api_key" } }, "claude-sonnet-5");
+
+    expect(out.additionalModelRequestFields).toBeUndefined();
+  });
+
+  it("maps Claude-format effort to GPT-5.6 reasoning fields without legacy prompt tags", () => {
     const out = C2K({
       output_config: { effort: "low" },
       messages: [{ role: "user", content: "think lightly" }],
     }, null, "gpt-5.6-sol");
 
-    expect(out.additionalModelRequestFields).toBeUndefined();
+    expect(out.additionalModelRequestFields).toEqual({
+      reasoning: { effort: "low" },
+    });
     expect(out.systemPrompt).toBeUndefined();
   });
 
@@ -169,7 +183,9 @@ describe("Claude → Kiro (direct route)", () => {
       messages: [{ role: "user", content: "honor the client effort" }],
     }, null, "gpt-5.6-sol");
 
-    expect(out.additionalModelRequestFields).toBeUndefined();
+    expect(out.additionalModelRequestFields).toEqual({
+      reasoning: { effort: "low" },
+    });
   });
 
   it("sends Claude system as content fallback (no top-level systemPrompt)", () => {

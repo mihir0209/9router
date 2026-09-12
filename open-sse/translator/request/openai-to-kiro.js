@@ -340,29 +340,30 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
 
   const timestamp = new Date().toISOString();
 
-  // Kiro CLI/KAS sends system prompt as top-level `systemPrompt`, but the
-  // runtime API rejects it for builder-id accounts. We always inject into
-  // user message content instead.
-  
+  // The system prompt travels inside the first user turn's content (contentPrefix):
+  // the CodeWhisperer surface rejects a top-level `systemPrompt` with
+  // 400 REQUEST_BODY_INVALID, so the value below is only a replay cache key.
+
   // Kiro agentic prompt injection mode: "always", "once", or "never"
   // - "always": inject into currentContentPrefix (every turn)
   // - "once": inject into contentPrefix (frozen in first message by session replay)
   // - "never": don't inject custom prompt
   const agenticPromptMode = credentials?.providerSpecificData?.kiroAgenticPromptMode || "always";
   const shouldInjectAgentic = agentic && agenticPromptMode !== "never";
-  
-  const currentTimeContext = `[Context: Current time is ${timestamp}]`;
-  
-  // contentPrefix: frozen into first message by session replay
-  const contentPrefixParts = [];
+
+  const systemPromptParts = [];
   if (thinkingBudget !== null && !usesNativeGptEffort) {
-    contentPrefixParts.push(buildThinkingSystemPrefix(thinkingBudget));
+    systemPromptParts.push(buildThinkingSystemPrefix(thinkingBudget));
   }
   if (shouldInjectAgentic && agenticPromptMode === "once") {
-    contentPrefixParts.push(KIRO_AGENTIC_SYSTEM_PROMPT);
+    systemPromptParts.push(KIRO_AGENTIC_SYSTEM_PROMPT);
   }
-  const contentPrefix = [...contentPrefixParts, currentTimeContext].filter(Boolean).join("\n\n");
-  
+  const systemPrompt = systemPromptParts.filter(Boolean).join("\n\n");
+  const currentTimeContext = `[Context: Current time is ${timestamp}]`;
+
+  // contentPrefix: frozen into first message by session replay
+  const contentPrefix = [systemPrompt, currentTimeContext].filter(Boolean).join("\n\n");
+
   // currentContentPrefix: applied to every turn
   const currentContentPrefixParts = [];
   if (shouldInjectAgentic && agenticPromptMode === "always") {
@@ -382,7 +383,7 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
     conversationId,
     connectionId: credentials?.connectionId,
     modelId: upstreamModel,
-    systemPrompt: "",  // Not sent in payload; use contentPrefix for injection
+    systemPrompt,
     contentPrefix,
     currentContentPrefix,
     history,
@@ -413,8 +414,6 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
     conversationState: {
       chatTriggerType: "MANUAL",
       conversationId,
-      agentContinuationId: continuationId,
-      agentTaskType: "vibe",
       currentMessage: {
         userInputMessage: {
           content: replayCurrent.content || "",
@@ -430,17 +429,18 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
       },
       history: canonical.history
     },
-    agentMode: "vibe",
   };
 
   if (profileArn) {
     payload.profileArn = profileArn;
   }
 
-  // NOTE: systemPrompt and additionalModelRequestFields are intentionally NOT sent.
-  // The Kiro upstream runtime API rejects these fields for builder-id accounts.
-  // Thinking tags are injected into message content instead.
-  void additionalModelRequestFields;
+  // additionalModelRequestFields carries native effort fields for effort models.
+  // Builder-id/headless accounts (api_key/idc/external_idp) reject the field,
+  // so it is only sent for OAuth/social accounts.
+  if (additionalModelRequestFields && !accountBoundAuth) {
+    payload.additionalModelRequestFields = additionalModelRequestFields;
+  }
 
   if (maxTokens || temperature !== undefined || topP !== undefined) {
     payload.inferenceConfig = {};
