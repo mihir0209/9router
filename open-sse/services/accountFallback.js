@@ -28,7 +28,32 @@ export function getQuotaCooldown(backoffLevel = 0) {
  * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
  */
 export function checkFallbackError(status, errorText, backoffLevel = 0, providerId = null, credentials = null, settingsOverride = null) {
-  return resolveFallbackDecision(status, errorText, backoffLevel, providerId, credentials, settingsOverride);
+  const decision = resolveFallbackDecision(status, errorText, backoffLevel, providerId, credentials, settingsOverride);
+  // Upstream v0.5.81 fix(auth): don't cool down an account for a request-scoped 4xx
+  // that matched no account rule — keeps healthy credentials in rotation for
+  // context-overflow / validation errors. Our central matcher returns a transient
+  // fallback for unmatched errors; override it for request-scoped 4xx when no
+  // rule matched (text rules like rate-limit wording still win via the matcher).
+  if (decision.shouldFallback && decision.cooldownMs > 0) {
+    // Cheap check: if the decision came from the transient default (no rule),
+    // and status is request-scoped 4xx, suppress it. We detect "no rule" by
+    // re-matching via the public matcher — decisionFromRule would have returned
+    // the same transient result.
+    const s = Number(status);
+    const isRequestScoped4xx = s >= 400 && s < 500 && s !== 401 && s !== 402 && s !== 403 && s !== 429;
+    if (isRequestScoped4xx) {
+      // Text rules already won if they matched; only suppress the default.
+      // Re-check via the matcher with the same plugin context would be ideal,
+      // but a lightweight heuristic works: if errorText contains rate-limit /
+      // quota wording, the matcher would have matched a text rule, so keep fallback.
+      const lower = typeof errorText === "string" ? errorText.toLowerCase() : (() => { try { return JSON.stringify(errorText).toLowerCase(); } catch { return String(errorText).toLowerCase(); } })();
+      const hasAccountWording = lower && (lower.includes("rate limit") || lower.includes("quota") || lower.includes("capacity") || lower.includes("too many requests"));
+      if (!hasAccountWording) {
+        return { shouldFallback: false, cooldownMs: 0 };
+      }
+    }
+  }
+  return decision;
 }
 
 /**

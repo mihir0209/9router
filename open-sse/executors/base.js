@@ -182,7 +182,7 @@ export class BaseExecutor {
       const priorRemediation = remediatedRequestsByUrl[urlIndex];
       let url = priorRemediation?.url || this.buildUrl(model, stream, urlIndex, credentials);
       let transformedBody = priorRemediation?.transformedBody || this.transformRequest(model, body, stream, credentials);
-      let headers = priorRemediation?.headers || this.buildHeaders(credentials, stream, url, model);
+      let headers = priorRemediation?.headers || this.buildHeaders(credentials, stream, url, model, transformedBody);
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
