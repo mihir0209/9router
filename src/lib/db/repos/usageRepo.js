@@ -38,6 +38,8 @@ export const statsEmitter = global._statsEmitter;
 if (!global._lowWriteCache) global._lowWriteCache = { value: undefined, ts: 0 };
 const lowWriteCache = global._lowWriteCache;
 const LOW_WRITE_CACHE_TTL_MS = 30 * 1000;
+if (!global._extremeWriteCache) global._extremeWriteCache = { value: undefined, ts: 0 };
+const extremeWriteCache = global._extremeWriteCache;
 if (!global._usageDedup) global._usageDedup = new Map();
 const usageDedup = global._usageDedup;
 const DEDUP_WINDOW_MS = 60 * 1000;
@@ -49,6 +51,9 @@ const DEDUP_MAX_ENTRIES = 500;
 // setting (settings.lowWriteMode true/false) wins; unset (null) auto-enables
 // on the Cloudflare runtime where D1 writes are metered, and stays off
 // locally where per-request logs cost nothing.
+// "extreme" implies low-write AND additionally skips the daily aggregates +
+// lifetime counters (see isExtremeWriteMode): near-zero DB writes for metered
+// stores. Dashboard usage and budget enforcement degrade to in-memory.
 async function shouldLowWrite() {
   if (lowWriteCache.value !== undefined && Date.now() - lowWriteCache.ts < LOW_WRITE_CACHE_TTL_MS) {
     return lowWriteCache.value;
@@ -57,7 +62,7 @@ async function shouldLowWrite() {
   try {
     const { getSettings } = await import("./settingsRepo.js");
     const setting = (await getSettings())?.lowWriteMode;
-    if (setting === true) value = true;
+    if (setting === true || setting === "extreme") value = true;
     else if (setting === false) value = false;
   } catch {}
   lowWriteCache.value = value;
@@ -78,6 +83,28 @@ export async function isLowWriteMode() {
 export function resetLowWriteCache() {
   lowWriteCache.value = undefined;
   lowWriteCache.ts = 0;
+  extremeWriteCache.value = undefined;
+  extremeWriteCache.ts = 0;
+}
+
+// Extreme write mode: explicit opt-in only (settings.lowWriteMode ===
+// "extreme", any runtime). Skips every analytics DB write for the request —
+// usageHistory row, usageDaily aggregate, lifetime counter — keeping only the
+// in-memory ring. Trade-off: usage dashboard, charts and budget enforcement
+// degrade (they read the DB). Use for metered stores (D1 100k writes/day).
+export async function isExtremeWriteMode() {
+  try {
+    if (extremeWriteCache.value !== undefined && Date.now() - extremeWriteCache.ts < LOW_WRITE_CACHE_TTL_MS) {
+      return extremeWriteCache.value;
+    }
+    const { getSettings } = await import("./settingsRepo.js");
+    const value = (await getSettings())?.lowWriteMode === "extreme";
+    extremeWriteCache.value = value;
+    extremeWriteCache.ts = Date.now();
+    return value;
+  } catch {
+    return false;
+  }
 }
 
 // In-memory recent-request ring (no DB cost). In low-write mode this is the
@@ -291,6 +318,21 @@ export async function getActiveRequests() {
 
 export async function saveRequestUsage(entry) {
   try {
+    // Extreme mode: memory only. No usageHistory row, no usageDaily
+    // aggregate, no lifetime counter — zero analytics DB writes.
+    // Exception: forcePersist entries (e.g. the budget debit ledger) are
+    // correctness state, not analytics — they persist even here.
+    if (await isExtremeWriteMode().catch(() => false)) {
+      if (!entry.timestamp) entry.timestamp = new Date().toISOString();
+      if (entry.forcePersist) {
+        entry.lowWrite = false;
+      } else {
+        pushToRing(entry);
+        scheduleStatsEvent("update", 250);
+        return;
+      }
+    }
+
     const db = await getAdapter();
 
     if (!entry.timestamp) entry.timestamp = new Date().toISOString();
@@ -305,7 +347,7 @@ export async function saveRequestUsage(entry) {
     const completionTokens = tokens.completion_tokens || tokens.output_tokens || 0;
 
     let inserted = false;
-    const lowWrite = await shouldLowWrite().catch(() => false);
+    const lowWrite = entry.lowWrite === false ? false : await shouldLowWrite().catch(() => false);
 
     if (lowWrite) {
       // In-memory stand-in for the SQL dedup below: same fingerprint fields,

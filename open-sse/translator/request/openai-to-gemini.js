@@ -57,6 +57,30 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
   }
   if (body.max_tokens !== undefined) {
     result.generationConfig.maxOutputTokens = body.max_tokens;
+  } else if (body.max_completion_tokens !== undefined) {
+    result.generationConfig.maxOutputTokens = body.max_completion_tokens;
+  } else if (body.max_output_tokens !== undefined) {
+    result.generationConfig.maxOutputTokens = body.max_output_tokens;
+  }
+
+  // Structured output: OpenAI response_format -> Gemini native constrained
+  // decoding (responseMimeType + responseSchema). Previously response_format
+  // was silently dropped for all Gemini targets. The schema is cleaned with
+  // the same helper used for tool-call parameters (Gemini rejects keywords
+  // like additionalProperties / strict / const).
+  if (body.response_format && typeof body.response_format === "object") {
+    const rf = body.response_format;
+    if (rf.type === "json_schema" && rf.json_schema?.schema) {
+      result.generationConfig.responseMimeType = "application/json";
+      try {
+        result.generationConfig.responseSchema =
+          cleanJSONSchemaForAntigravity(structuredClone(rf.json_schema.schema));
+      } catch {
+        result.generationConfig.responseSchema = rf.json_schema.schema;
+      }
+    } else if (rf.type === "json_object") {
+      result.generationConfig.responseMimeType = "application/json";
+    }
   }
 
   // Build tool_call_id -> name map

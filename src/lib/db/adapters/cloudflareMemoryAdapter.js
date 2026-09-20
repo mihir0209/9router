@@ -174,6 +174,12 @@ export async function createCloudflareMemoryAdapter() {
   const d1 = context?.env?.DB || null;
   let transactionDepth = 0;
   const dirtyTables = new Set();
+  // Row-level dirty tracking inside transactions: table -> Map(rowKey, "upsert"|"delete").
+  // Commit persists ONLY touched rows. Previously every transaction rewrote each
+  // touched table wholesale (DELETE all + re-INSERT all), so a kv model sync
+  // cost ~7000 D1 row writes and a requestDetails save ~700. On metered D1
+  // (100k writes/day) that amplification is the budget killer.
+  const dirtyRows = new Map();
 
   async function initializeD1() {
     if (!d1) return;
@@ -198,6 +204,18 @@ export async function createCloudflareMemoryAdapter() {
         // Ignore corrupt persisted rows; the in-memory adapter is fail-open.
       }
     }
+  }
+
+  // Last-op-wins per row key: delete-then-insert resolves to upsert (row is
+  // present at commit), insert-then-delete resolves to delete (row is gone).
+  function markDirty(table, row = null, op = "upsert") {
+    if (transactionDepth <= 0) return false;
+    dirtyTables.add(table);
+    if (row) {
+      if (!dirtyRows.has(table)) dirtyRows.set(table, new Map());
+      dirtyRows.get(table).set(primaryKeyFor(table, row), op);
+    }
+    return true;
   }
 
   function persistTable(table) {
@@ -226,10 +244,7 @@ export async function createCloudflareMemoryAdapter() {
 
   function persistRow(table, row) {
     if (!d1 || !state.tables[table]) return;
-    if (transactionDepth > 0) {
-      dirtyTables.add(table);
-      return;
-    }
+    if (markDirty(table, row, "upsert")) return;
     const task = d1.prepare(
       `INSERT INTO ${D1_TABLE}(table_name, row_key, data, updated_at) ` +
       `VALUES(?, ?, ?, CURRENT_TIMESTAMP) ` +
@@ -242,7 +257,7 @@ export async function createCloudflareMemoryAdapter() {
   function deletePersistedRows(table, rows) {
     if (!d1 || !state.tables[table] || !rows.length) return;
     if (transactionDepth > 0) {
-      dirtyTables.add(table);
+      for (const row of rows) markDirty(table, row, "delete");
       return;
     }
     const task = d1.batch(rows.map((row) =>
@@ -332,10 +347,7 @@ export async function createCloudflareMemoryAdapter() {
     const before = existingRows.length;
     state.tables[table] = existingRows.filter((row) => !where(row));
     const changes = before - state.tables[table].length;
-    if (changes) {
-      if (transactionDepth > 0) persistTable(table);
-      else deletePersistedRows(table, deletedRows);
-    }
+    if (changes) deletePersistedRows(table, deletedRows);
     return { changes, lastInsertRowid: null };
   }
 
@@ -394,9 +406,54 @@ export async function createCloudflareMemoryAdapter() {
       if (transactionDepth === 0 && dirtyTables.size) {
         const tables = [...dirtyTables];
         dirtyTables.clear();
-        for (const table of tables) persistTable(table);
+        for (const table of tables) persistDirtyRows(table);
       }
     }
+  }
+
+  // Commit path: persist only rows touched inside the transaction. Tables
+  // with no row-level record (defensive; all writers record rows) fall back
+  // to the legacy whole-table rewrite.
+  function persistDirtyRows(table) {
+    if (!d1 || !state.tables[table]) {
+      dirtyRows.delete(table);
+      return;
+    }
+    const touched = dirtyRows.get(table);
+    dirtyRows.delete(table);
+    if (!touched || !touched.size) {
+      persistTable(table);
+      return;
+    }
+    const upserts = [];
+    const deletes = [];
+    for (const [key, op] of touched) {
+      if (op === "delete") {
+        deletes.push(key);
+        continue;
+      }
+      const row = rowsFor(table).find((r) => primaryKeyFor(table, r) === key);
+      if (row) upserts.push(row);
+      else deletes.push(key);
+    }
+    const task = (async () => {
+      if (deletes.length) {
+        await d1.batch(deletes.map((key) =>
+          d1.prepare(`DELETE FROM ${D1_TABLE} WHERE table_name = ? AND row_key = ?`).bind(table, key)
+        ));
+      }
+      const chunkSize = 50;
+      for (let i = 0; i < upserts.length; i += chunkSize) {
+        await d1.batch(upserts.slice(i, i + chunkSize).map((row) =>
+          d1.prepare(
+            `INSERT INTO ${D1_TABLE}(table_name, row_key, data, updated_at) ` +
+            `VALUES(?, ?, ?, CURRENT_TIMESTAMP) ` +
+            `ON CONFLICT(table_name, row_key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`
+          ).bind(table, primaryKeyFor(table, row), JSON.stringify(row))
+        ));
+      }
+    })().catch((error) => console.warn(`[DB] D1 persist failed for ${table}: ${error.message}`));
+    context?.ctx?.waitUntil?.(task);
   }
 
   return {

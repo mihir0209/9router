@@ -3,6 +3,8 @@ import { getSettings, updateSettings } from "@/lib/localDb";
 const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES = 30;
 const DEFAULT_NETWORK_COOLDOWN_MINUTES = 10;
 
+let inMemoryQuarantine = null;
+
 function normalizeString(value) {
   return value === undefined || value === null ? "" : String(value).trim();
 }
@@ -63,6 +65,14 @@ function addMinutes(minutes) {
 }
 
 export async function getProxyPoolQuarantine() {
+  const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
+  if (await isExtremeWriteMode().catch(() => false)) {
+    if (!inMemoryQuarantine) {
+      const settings = await getSettings();
+      inMemoryQuarantine = pruneStore(settings.proxyPoolQuarantine);
+    }
+    return pruneStore(inMemoryQuarantine);
+  }
   const settings = await getSettings();
   return pruneStore(settings.proxyPoolQuarantine);
 }
@@ -71,8 +81,11 @@ export async function quarantineProxyPool(proxyPoolId, { provider, model, reason
   const id = normalizeString(proxyPoolId);
   if (!id) return null;
 
+  const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
+  const extreme = await isExtremeWriteMode().catch(() => false);
+
   const settings = await getSettings();
-  const store = pruneStore(settings.proxyPoolQuarantine);
+  const store = pruneStore(extreme && inMemoryQuarantine ? inMemoryQuarantine : settings.proxyPoolQuarantine);
   const reasonText = normalizeString(reason).slice(0, 300) || "Proxy quarantined";
 
   if (kind === "global") {
@@ -91,6 +104,11 @@ export async function quarantineProxyPool(proxyPoolId, { provider, model, reason
       reason: reasonText,
       count: (store.scoped[scopeKey][id]?.count || 0) + 1,
     };
+  }
+
+  if (extreme) {
+    inMemoryQuarantine = store;
+    return store;
   }
 
   await updateSettings({ proxyPoolQuarantine: store });

@@ -48,6 +48,27 @@ const DEFAULT_SETTINGS = {
   // on, false = always off. Skips per-request log writes (usageHistory rows,
   // request details) while keeping daily aggregates for analytics.
   lowWriteMode: null,
+  // Structured output (response_format / json_schema) handling.
+  // Values: "auto" (default) | "passthrough" | "fallback".
+  //   "auto" — preserve/translate natively for doc-verified base providers
+  //     (openai, azure, groq, together, fireworks, xai, mistral, openrouter,
+  //     vertex-partner; Gemini/Ollama via their native equivalents),
+  //     prompt-injection fallback otherwise (Claude-family, Kiro,
+  //     json_object-only bases like deepseek, undocumented bases, and custom
+  //     openai-compatible-* gateway nodes).
+  //   "passthrough" — never downgrade; forward verbatim (OpenAI targets) or
+  //     via native equivalents (Gemini/Ollama/Responses). Upstreams that
+  //     reject it 400 are skipped via combo fallback.
+  //   "fallback" — legacy: always downgrade json_schema to json_object +
+  //     system-prompt injection. Maximum compatibility, no enforcement.
+  // Per-provider overrides: { [providerOrNodeId]: "auto"|"passthrough"|"fallback" }
+  structuredOutputMode: "auto",
+  structuredOutputOverrides: {},
+  // Extreme low-write mode: lowWriteMode === "extreme" skips ALL analytics DB
+  // writes (usageDaily aggregates + lifetime counters included — dashboard
+  // usage and budget enforcement degrade to in-memory). For metered stores
+  // (Cloudflare D1 100k writes/day). Plain true/false/null keep prior behavior.
+  // See usageRepo.isExtremeWriteMode().
   outboundProxyEnabled: false,
   outboundProxyUrl: "",
   outboundNoProxy: "",

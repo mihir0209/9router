@@ -1,7 +1,7 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools, getProviderNodeById, getApiKeyByKey } from "@/lib/localDb";
 import { decryptByokCredential } from "@/lib/byokCrypto.js";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
-import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
+import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil, setExtremeModelLock, clearExtremeModelLock, clearExpiredExtremeModelLocks, isExtremeModelLockActive, getEarliestExtremeModelLockUntil, getExtremeModelLockEntry, extremeModelLockKey } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomMediaProvider } from "@/shared/constants/providers.js";
 import { getProxyPoolQuarantine, isProxyQuarantined } from "@/lib/proxy/quarantine";
@@ -10,6 +10,40 @@ import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
 let selectionMutex = Promise.resolve();
+
+// Round-robin rotation state (lastUsedAt / consecutiveUseCount) normally
+// persists to providerConnections on every request — a per-request DB write.
+// In extreme write mode it lives in this process-global registry instead and
+// is overlaid onto freshly-read connection objects (see applyExtremeRotation).
+// Per-isolate only (Workers: per colo) — fairness degrades to a per-isolate
+// approximation, which round-robin tolerates.
+if (!global._extremeRotation) global._extremeRotation = new Map(); // connectionId → { lastUsedAt, consecutiveUseCount }
+
+async function applyExtremeRotation(connections) {
+  try {
+    const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
+    if (!(await isExtremeWriteMode().catch(() => false))) return connections;
+  } catch {
+    return connections;
+  }
+  const now = new Date().toISOString();
+  for (const c of connections) {
+    const mem = global._extremeRotation.get(c.id);
+    if (mem) {
+      c.lastUsedAt = mem.lastUsedAt;
+      c.consecutiveUseCount = mem.consecutiveUseCount;
+    }
+  }
+  return { connections, now };
+}
+
+function recordExtremeRotation(connectionId, lastUsedAt, consecutiveUseCount) {
+  global._extremeRotation.set(connectionId, { lastUsedAt, consecutiveUseCount });
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
 
 export class ByokCredentialsError extends Error {
   constructor(message = "The BYOK credential is invalid") {
@@ -118,6 +152,24 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     }
 
     const connections = await getProviderConnections({ provider: providerId, isActive: true });
+    // Extreme mode: overlay in-memory rotation state onto fresh DB objects so
+    // round-robin recency survives without any providerConnections write.
+    let extremeRotation = false;
+    if (connections.length > 0) {
+      try {
+        const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
+        extremeRotation = await isExtremeWriteMode().catch(() => false);
+      } catch { extremeRotation = false; }
+      if (extremeRotation) {
+        for (const c of connections) {
+          const mem = global._extremeRotation.get(c.id);
+          if (mem) {
+            c.lastUsedAt = mem.lastUsedAt;
+            c.consecutiveUseCount = mem.consecutiveUseCount;
+          }
+        }
+      }
+    }
     log.debug("AUTH", `${provider} | total connections: ${connections.length}, excludeIds: ${excludeSet.size > 0 ? [...excludeSet].join(",") : "none"}, model: ${model || "any"}`);
 
     if (connections.length === 0) {
@@ -129,10 +181,13 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const isAntigravity = providerId === "antigravity";
     const antigravityQuotaCache = isAntigravity && model ? getAntigravityQuotaCache() : null;
 
+    // Helper: locked either by persisted fields or the extreme-mode memory registry.
+    const connLocked = (c) => isModelLockActive(c, model) || isExtremeModelLockActive(c.id, model);
+
     // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
-      if (isModelLockActive(c, model)) return false;
+      if (connLocked(c)) return false;
       // Antigravity: skip if live quota exhausted for this model
       if (isAntigravity && model && antigravityQuotaCache) {
         const quota = antigravityQuotaCache.get(c.id)?.[model];
@@ -148,17 +203,17 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     log.debug("AUTH", `${provider} | available: ${availableConnections.length}/${connections.length}`);
     connections.forEach(c => {
       const excluded = excludeSet.has(c.id);
-      const locked = isModelLockActive(c, model);
+      const locked = connLocked(c);
       if (excluded || locked) {
-        const lockUntil = getEarliestModelLockUntil(c);
+        const lockUntil = getEarliestModelLockUntil(c) || getEarliestExtremeModelLockUntil(c.id);
         log.debug("AUTH", `  → ${c.id?.slice(0, 8)} | ${excluded ? "excluded" : ""} ${locked ? `modelLocked(${model}) until ${lockUntil}` : ""}`);
       }
     });
 
     if (availableConnections.length === 0) {
       // Find earliest persistent lock or lazy Antigravity quota-cache reset for retry timing.
-      const lockedConns = connections.filter(c => isModelLockActive(c, model));
-      const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);
+      const lockedConns = connections.filter(c => connLocked(c));
+      const expiries = lockedConns.map(c => getEarliestModelLockUntil(c) || getEarliestExtremeModelLockUntil(c.id)).filter(Boolean);
       if (isAntigravity && model && antigravityQuotaCache) {
         connections.forEach((c) => {
           const resetAt = antigravityQuotaCache.get(c.id)?.[model]?.resetAt;
@@ -168,13 +223,14 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const earliest = expiries.sort()[0] || null;
       if (earliest) {
         const earliestConn = lockedConns[0];
-        log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
+        const lockEntry = earliestConn ? getExtremeModelLockEntry(earliestConn.id, model) : null;
+        log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${lockEntry?.reason || earliestConn?.lastError?.slice(0, 50)}`);
         return {
           allRateLimited: true,
           retryAfter: earliest,
           retryAfterHuman: formatRetryAfter(earliest),
-          lastError: earliestConn?.lastError || null,
-          lastErrorCode: earliestConn?.errorCode || null
+          lastError: lockEntry?.reason || earliestConn?.lastError || null,
+          lastErrorCode: lockEntry?.status || earliestConn?.errorCode || null
         };
       }
       log.warn("AUTH", `${provider} | all ${connections.length} accounts unavailable`);
@@ -217,10 +273,16 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         // Stay with current account
         connection = current;
         // Update lastUsedAt and increment count (await to ensure persistence)
-        await updateProviderConnection(connection.id, {
-          lastUsedAt: new Date().toISOString(),
-          consecutiveUseCount: (connection.consecutiveUseCount || 0) + 1
-        });
+        if (extremeRotation) {
+          recordExtremeRotation(connection.id, nowIso(), (connection.consecutiveUseCount || 0) + 1);
+          connection.lastUsedAt = nowIso();
+          connection.consecutiveUseCount = (connection.consecutiveUseCount || 0) + 1;
+        } else {
+          await updateProviderConnection(connection.id, {
+            lastUsedAt: new Date().toISOString(),
+            consecutiveUseCount: (connection.consecutiveUseCount || 0) + 1
+          });
+        }
       } else {
         // Pick the least recently used (excluding current if possible)
         const sortedByOldest = [...availableConnections].sort((a, b) => {
@@ -233,10 +295,16 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connection = sortedByOldest[0];
 
         // Update lastUsedAt and reset count to 1 (await to ensure persistence)
-        await updateProviderConnection(connection.id, {
-          lastUsedAt: new Date().toISOString(),
-          consecutiveUseCount: 1
-        });
+        if (extremeRotation) {
+          recordExtremeRotation(connection.id, nowIso(), 1);
+          connection.lastUsedAt = nowIso();
+          connection.consecutiveUseCount = 1;
+        } else {
+          await updateProviderConnection(connection.id, {
+            lastUsedAt: new Date().toISOString(),
+            consecutiveUseCount: 1
+          });
+        }
       }
     } else {
       // Default: fill-first (already sorted by priority in getProviderConnections)
@@ -362,6 +430,20 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   const reason = typeof errorText === "string" ? errorText.slice(0, 200) : "Provider error";
   const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
 
+  const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
+  const extreme = await isExtremeWriteMode().catch(() => false);
+  if (extreme) {
+    // Registry, not the conn object: getProviderConnections() returns fresh
+    // objects per read, so an in-memory mutation would be discarded. The
+    // registry lives per process/isolate (Workers: per colo) — losing it on
+    // eviction costs one wasted retry, absorbed by fallback.
+    setExtremeModelLock(connectionId, githubResetAtMs ? null : model, cooldownMs, { status, reason });
+    const lockKey = Object.keys(lockUpdate)[0];
+    const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
+    log.warn("AUTH", `[extreme-mode: memory lock] ${connName} locked ${lockKey} for ${Math.round(cooldownMs / 1000)}s [${status}]`);
+    return { shouldFallback: true, cooldownMs };
+  }
+
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
     testStatus: "unavailable",
@@ -427,6 +509,17 @@ export async function clearAccountError(connectionId, currentConnection, model =
       lastErrorAt: null,
       backoffLevel: 0
     });
+  }
+
+  const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
+  if (await isExtremeWriteMode().catch(() => false)) {
+    // Clear from the extreme-mode lock registry (locks were never persisted).
+    clearExpiredExtremeModelLocks(connectionId);
+    if (model) {
+      clearExtremeModelLock(connectionId, model);
+      clearExtremeModelLock(connectionId, null); // account-level lock
+    }
+    return;
   }
 
   await updateProviderConnection(connectionId, clearObj);

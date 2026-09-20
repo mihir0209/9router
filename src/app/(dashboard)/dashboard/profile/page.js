@@ -656,9 +656,9 @@ export default function ProfilePage() {
     }
   };
 
-  const lowWriteMode = settings.lowWriteMode === true ? "on" : settings.lowWriteMode === false ? "off" : "auto";
+  const lowWriteMode = settings.lowWriteMode === true ? "on" : settings.lowWriteMode === false ? "off" : settings.lowWriteMode === "extreme" ? "extreme" : "auto";
   const updateLowWriteMode = async (mode) => {
-    const value = mode === "auto" ? null : mode === "on";
+    const value = mode === "auto" ? null : mode === "on" ? true : mode === "extreme" ? "extreme" : false;
     try {
       const res = await fetch("/api/settings", {
         method: "PATCH",
@@ -673,8 +673,25 @@ export default function ProfilePage() {
     }
   };
 
-  const updateStripRequestUser = async (enabled) => {
+  const structuredOutputMode = ["auto", "passthrough", "fallback"].includes(settings.structuredOutputMode)
+    ? settings.structuredOutputMode
+    : "auto";
+  const updateStructuredOutputMode = async (mode) => {
     try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ structuredOutputMode: mode }),
+      });
+      if (res.ok) {
+        setSettings(prev => ({ ...prev, structuredOutputMode: mode }));
+      }
+    } catch (err) {
+      console.error("Failed to update structuredOutputMode:", err);
+    }
+  };
+
+  const updateStripRequestUser = async (enabled) => {    try {
       const res = await fetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1795,7 +1812,7 @@ export default function ProfilePage() {
             <div className="flex-1 min-w-0">
               <p className="font-medium text-sm sm:text-base">Low-write analytics mode</p>
               <p className="text-xs sm:text-sm text-text-muted">
-                Skip per-request log writes and keep daily aggregates only. Recommended for Cloudflare D1 (500k writes/day limit). Auto = on for Cloudflare, off locally.
+                Skip per-request log writes and keep daily aggregates only. Recommended for Cloudflare D1 (500k writes/day limit). Auto = on for Cloudflare, off locally. Extreme = zero analytics DB writes (usage dashboard and budget enforcement degrade) — for tight D1 budgets.
               </p>
             </div>
             <select
@@ -1806,7 +1823,26 @@ export default function ProfilePage() {
             >
               <option value="auto">Auto</option>
               <option value="on">Always on</option>
+              <option value="extreme">Extreme (no analytics writes)</option>
               <option value="off">Always off</option>
+            </select>
+          </div>
+          <div className="flex items-start sm:items-center justify-between gap-4 pt-4 mt-4 border-t border-border">
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-sm sm:text-base">Structured output (JSON schema) handling</p>
+              <p className="text-xs sm:text-sm text-text-muted">
+                How response_format json_schema is sent upstream. Auto = enforce natively where the provider supports it (OpenAI, Azure, Gemini, Ollama, …), prompt fallback otherwise. Passthrough = never downgrade (rejecting members are skipped via combo fallback). Fallback = legacy prompt-injection everywhere.
+              </p>
+            </div>
+            <select
+              value={structuredOutputMode}
+              onChange={e => updateStructuredOutputMode(e.target.value)}
+              disabled={loading}
+              className="shrink-0 rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm"
+            >
+              <option value="auto">Auto</option>
+              <option value="passthrough">Passthrough</option>
+              <option value="fallback">Fallback</option>
             </select>
           </div>
         </Card>

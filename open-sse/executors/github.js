@@ -9,6 +9,7 @@ import { FORMATS } from "../translator/formats.js";
 import { parseSSELine, formatSSE } from "../utils/streamHelpers.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
+import { downgradeJsonSchemaToJsonObject, shouldPreserveJsonSchema } from "../config/structuredOutput.js";
 import { SSE_DONE } from "../utils/sseConstants.js";
 import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
 import crypto from "crypto";
@@ -96,7 +97,13 @@ export class GithubExecutor extends BaseExecutor {
   }
 
   transformRequest(model, body, stream, credentials) {
-    const transformed = { ...body };
+    let transformed = { ...body };
+    // The Copilot API is undocumented for response_format: no conclusive
+    // evidence it enforces json_schema, so the shared policy downgrades in
+    // "auto" mode (overridable per-provider / globally via "passthrough").
+    if (!shouldPreserveJsonSchema("github", credentials)) {
+      transformed = downgradeJsonSchemaToJsonObject(transformed);
+    }
     if (this.requiresMaxCompletionTokens(model) && transformed.max_tokens !== undefined) {
       transformed.max_completion_tokens = transformed.max_tokens;
       delete transformed.max_tokens;

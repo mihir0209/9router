@@ -31,10 +31,13 @@ export function openaiToOllamaRequest(model, body, stream) {
     result.options.temperature = body.temperature;
   }
 
-  // Max tokens (Ollama uses num_predict)
-  if (body.max_tokens !== undefined) {
+  // Max tokens (Ollama uses num_predict). Accept all three OpenAI-side
+  // aliases — previously only max_tokens was read, so a client sending only
+  // max_completion_tokens silently lost its token limit on Ollama targets.
+  const maxOut = body.max_tokens ?? body.max_completion_tokens ?? body.max_output_tokens;
+  if (maxOut !== undefined) {
     result.options = result.options || {};
-    result.options.num_predict = body.max_tokens;
+    result.options.num_predict = maxOut;
   }
 
   // Top_p
@@ -51,6 +54,19 @@ export function openaiToOllamaRequest(model, body, stream) {
   // Tool choice
   if (body.tool_choice) {
     result.tool_choice = body.tool_choice;
+  }
+
+  // Structured output: OpenAI response_format -> Ollama native `format`.
+  // Previously response_format was silently dropped for Ollama targets.
+  // json_schema forwards the schema (Ollama >= 0.5 honours it for
+  // constrained decoding); json_object maps to Ollama's json mode.
+  if (body.response_format && typeof body.response_format === "object") {
+    const rf = body.response_format;
+    if (rf.type === "json_schema" && rf.json_schema?.schema) {
+      result.format = rf.json_schema.schema;
+    } else if (rf.type === "json_object") {
+      result.format = "json";
+    }
   }
 
   return result;

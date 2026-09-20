@@ -134,6 +134,9 @@ export async function debitBudget(apiKey, { requestId, reserveUsd, commitUsd }, 
       status: "success",
       tokens: {},
       cost: amount,
+      // Ledger entry, not analytics: must survive extreme write mode, else
+      // budget accounting resets on process/isolate recycle (overspend risk).
+      forcePersist: true,
     });
 
     return { ...await readBudgetState(keyRecord, now), committed: true };

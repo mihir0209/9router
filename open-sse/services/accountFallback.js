@@ -1,5 +1,6 @@
 import { BACKOFF_CONFIG } from "../config/errorConfig.js";
-import { resolveFallbackDecision } from "../retry/index.js";
+import { resolveFallbackDecision, resolveRetryPlugin } from "../retry/index.js";
+import { buildRuleList, matchErrorRule } from "../retry/schema.js";
 
 /**
  * Calculate exponential backoff cooldown for rate limits (429)
@@ -31,24 +32,16 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
   const decision = resolveFallbackDecision(status, errorText, backoffLevel, providerId, credentials, settingsOverride);
   // Upstream v0.5.81 fix(auth): don't cool down an account for a request-scoped 4xx
   // that matched no account rule — keeps healthy credentials in rotation for
-  // context-overflow / validation errors. Our central matcher returns a transient
-  // fallback for unmatched errors; override it for request-scoped 4xx when no
-  // rule matched (text rules like rate-limit wording still win via the matcher).
+  // context-overflow / validation errors. The central matcher returns a transient
+  // fallback for any unmatched error; suppress it when no rule actually matched.
   if (decision.shouldFallback && decision.cooldownMs > 0) {
-    // Cheap check: if the decision came from the transient default (no rule),
-    // and status is request-scoped 4xx, suppress it. We detect "no rule" by
-    // re-matching via the public matcher — decisionFromRule would have returned
-    // the same transient result.
     const s = Number(status);
     const isRequestScoped4xx = s >= 400 && s < 500 && s !== 401 && s !== 402 && s !== 403 && s !== 429;
     if (isRequestScoped4xx) {
-      // Text rules already won if they matched; only suppress the default.
-      // Re-check via the matcher with the same plugin context would be ideal,
-      // but a lightweight heuristic works: if errorText contains rate-limit /
-      // quota wording, the matcher would have matched a text rule, so keep fallback.
-      const lower = typeof errorText === "string" ? errorText.toLowerCase() : (() => { try { return JSON.stringify(errorText).toLowerCase(); } catch { return String(errorText).toLowerCase(); } })();
-      const hasAccountWording = lower && (lower.includes("rate limit") || lower.includes("quota") || lower.includes("capacity") || lower.includes("too many requests"));
-      if (!hasAccountWording) {
+      // Text/status rules already won if they matched; only suppress the default.
+      const plugin = providerId ? resolveRetryPlugin(providerId, credentials, settingsOverride) : { errorRules: [] };
+      const rules = buildRuleList(plugin);
+      if (!matchErrorRule(rules, status, errorText)) {
         return { shouldFallback: false, cooldownMs: 0 };
       }
     }
@@ -154,6 +147,67 @@ export function getEarliestModelLockUntil(connection) {
 export function buildModelLockUpdate(model, cooldownMs) {
   const key = getModelLockKey(model);
   return { [key]: new Date(Date.now() + cooldownMs).toISOString() };
+}
+
+// ─── Extreme-write-mode in-memory lock registry ─────────────────────────────
+// In extreme write mode, model locks are NOT persisted to providerConnections
+// (zero DB writes). Instead they live in a process-global registry. Runtime
+// notes: on Node this survives for the process lifetime; on Cloudflare Workers
+// it lives per isolate — isolates are reused across requests but may be
+// evicted or split across PoPs, so a lock loss (or per-colo divergence) only
+// means the next request may retry a cooling account once. That failure mode
+// is acceptable: the combo/account fallback absorbs a single wasted attempt.
+// getProviderConnections() returns FRESH objects per read, so locks must live
+// in this registry — mutating a connection object in memory is discarded.
+if (!global._extremeModelLocks) global._extremeModelLocks = new Map(); // key: `${connectionId}|${model||__all}` → { untilMs, reason, status }
+
+export function extremeModelLockKey(connectionId, model) {
+  return `${connectionId}|${model || MODEL_LOCK_ALL}`;
+}
+
+export function setExtremeModelLock(connectionId, model, cooldownMs, meta = {}) {
+  if (!connectionId) return;
+  global._extremeModelLocks.set(extremeModelLockKey(connectionId, model), {
+    untilMs: Date.now() + Math.max(0, cooldownMs),
+    status: meta.status ?? null,
+    reason: typeof meta.reason === "string" ? meta.reason.slice(0, 100) : null,
+  });
+}
+
+export function clearExtremeModelLock(connectionId, model) {
+  if (!connectionId) return;
+  global._extremeModelLocks.delete(extremeModelLockKey(connectionId, model));
+}
+
+export function clearExpiredExtremeModelLocks(connectionId, now = Date.now()) {
+  if (!connectionId) return;
+  for (const [key, entry] of global._extremeModelLocks) {
+    if (key.startsWith(`${connectionId}|`) && entry.untilMs <= now) {
+      global._extremeModelLocks.delete(key);
+    }
+  }
+}
+
+export function isExtremeModelLockActive(connectionId, model, now = Date.now()) {
+  if (!connectionId) return false;
+  const entry = global._extremeModelLocks.get(extremeModelLockKey(connectionId, model));
+  return !!entry && entry.untilMs > now;
+}
+
+export function getEarliestExtremeModelLockUntil(connectionId, now = Date.now()) {
+  if (!connectionId) return null;
+  let earliest = null;
+  const prefix = `${connectionId}|`;
+  for (const [key, entry] of global._extremeModelLocks) {
+    if (!key.startsWith(prefix) || entry.untilMs <= now) continue;
+    if (!earliest || entry.untilMs < earliest) earliest = entry.untilMs;
+  }
+  return earliest ? new Date(earliest).toISOString() : null;
+}
+
+export function getExtremeModelLockEntry(connectionId, model) {
+  if (!connectionId) return null;
+  return global._extremeModelLocks.get(extremeModelLockKey(connectionId, model)) || null;
 }
 
 /**

@@ -73,6 +73,19 @@ export const ERROR_RULES = [
   { text: "temporarily unavailable",  backoff: true, retryHttp: true, attempts: 3, delayMs: 2000 },
   { text: "service unavailable",      backoff: true, retryHttp: true, attempts: 3, delayMs: 2000 },
 
+  // --- Structured-output rejections: a member that 400s on response_format /
+  // json_schema simply doesn't implement it — the next combo member may.
+  // Checked before the generic status:400 no-fallback rule so combos skip
+  // schema-rejecting members instead of hard-failing (429/balance fallback
+  // behaviour is unaffected). Applies when "passthrough" forwards the schema
+  // to a gateway that can't honour it.
+  { text: "response_format",        shouldFallback: true },
+  { text: "json_schema",            shouldFallback: true },
+  { text: "response.schema",        shouldFallback: true },
+  { text: "unknown_parameter",      shouldFallback: true },
+  { text: "unknown parameter",      shouldFallback: true },
+  { text: "unrecognized request argument", shouldFallback: true },
+
   // --- Status-based rules (fallback when text doesn't match) ---
   // Generic request-shape errors are deterministic across accounts. Return them
   // directly instead of locking every credential for the same invalid payload.

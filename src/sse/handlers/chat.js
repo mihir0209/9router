@@ -306,6 +306,20 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+    // Structured-output policy (response_format / json_schema): effective
+    // mode = per-provider override, else global setting, else "auto".
+    // Attached to credentials so the standalone open-sse engine
+    // (executors + translators) can honour it without importing app DB code.
+    // Combo members each pass through here, so fallback members resolve
+    // their own override by node id.
+    {
+      const { normalizeStructuredOutputMode } = await import("open-sse/config/structuredOutput.js");
+      const overrides = chatSettings.structuredOutputOverrides || {};
+      const raw = overrides[provider] ?? chatSettings.structuredOutputMode;
+      const mode = normalizeStructuredOutputMode(raw);
+      refreshedCredentials.structuredOutputMode = mode;
+      refreshedCredentials.structuredOutputOverrides = overrides;
+    }
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },

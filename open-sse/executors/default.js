@@ -9,6 +9,7 @@ import { filterClaudeIdentityHeaders, getCachedClaudeHeaders } from "../utils/cl
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
+import { downgradeJsonSchemaToJsonObject, shouldPreserveJsonSchema } from "../config/structuredOutput.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -77,7 +78,7 @@ export class DefaultExecutor extends BaseExecutor {
 
   transformRequest(model, body, stream, credentials) {
     const isResponses = resolveOpenAICompatibleApiType(this.provider, credentials) === "responses";
-    const transformed = isResponses ? body : this.applyJsonSchemaFallback(body);
+    const transformed = isResponses ? body : this.applyJsonSchemaFallback(body, credentials);
 
     if (transformed && typeof transformed === "object") {
       // quirk: some openai-compatible providers reject Anthropic's client_metadata field
@@ -98,24 +99,26 @@ export class DefaultExecutor extends BaseExecutor {
       : injected;
   }
 
-  // Fallback json_schema → json_object for openai-compatible providers without native Structured Output.
-  applyJsonSchemaFallback(body) {
-    if (!this.provider?.startsWith?.("openai-compatible-")) return body;
-    const rf = body?.response_format;
-    if (rf?.type !== "json_schema" || !rf.json_schema?.schema) return body;
-
-    const schemaJson = JSON.stringify(rf.json_schema.schema, null, 2);
-    const prompt = `You must respond with valid JSON that strictly follows this JSON schema:\n\`\`\`json\n${schemaJson}\n\`\`\`\nRespond ONLY with the JSON object, no other text.`;
-
-    const messages = Array.isArray(body.messages) ? body.messages.map(m => ({ ...m })) : [];
-    const sys = messages.find(m => m.role === "system");
-    if (sys) {
-      if (typeof sys.content === "string") sys.content = `${sys.content}\n\n${prompt}`;
-      else if (Array.isArray(sys.content)) sys.content.push({ type: "text", text: `\n\n${prompt}` });
-    } else {
-      messages.unshift({ role: "system", content: prompt });
-    }
-    return { ...body, messages, response_format: { type: "json_object" } };
+  // Fallback json_schema → json_object for targets without native Structured Output.
+  // Policy lives in config/structuredOutput.js:
+  //   - known-native base providers (openai, azure, groq, together, fireworks,
+  //     xai, mistral, openrouter, vertex-partner) keep the schema verbatim in
+  //     "auto" mode;
+  //   - custom openai-compatible-* gateway nodes, json_object-only bases
+  //     (deepseek, xiaomi-mimo) and bases without conclusive docs keep the
+  //     legacy downgrade in "auto" mode;
+  //   - global "passthrough" disables this downgrade everywhere;
+  //   - global "fallback" forces it everywhere it applies (legacy behaviour).
+  // Only OpenAI-format targets are touched here (custom gateways + base
+  // providers with format "openai"). Responses-API targets bypass earlier via
+  // isResponses; claude/gemini/ollama/kiro targets own their mapping (native
+  // translation or prompt injection) in their translators.
+  applyJsonSchemaFallback(body, credentials = null) {
+    if (shouldPreserveJsonSchema(this.provider, credentials)) return body;
+    const isCustomCompat = !!this.provider?.startsWith?.("openai-compatible-");
+    const isBaseOpenAI = this.config?.format === "openai";
+    if (!isCustomCompat && !isBaseOpenAI) return body;
+    return downgradeJsonSchemaToJsonObject(body);
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {

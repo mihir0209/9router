@@ -18,6 +18,7 @@ import {
   buildKiroAdditionalModelRequestFieldsForModel,
 } from "../../config/kiroConstants.js";
 import { parseDataUri } from "../concerns/image.js";
+import { buildJsonSchemaPrompt } from "../../config/structuredOutput.js";
 import { DEFAULT_IMAGE_MIME } from "../schema/index.js";
 import { ROLE, OPENAI_BLOCK, CLAUDE_BLOCK } from "../schema/index.js";
 import {
@@ -356,6 +357,25 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
   const systemPromptParts = [];
   if (thinkingBudget !== null && !usesNativeGptEffort) {
     systemPromptParts.push(buildThinkingSystemPrefix(thinkingBudget));
+  }
+  // Structured output: Kiro's GenerateAssistantResponse has no native
+  // response_format field, so a json_schema was previously dropped silently
+  // (no prompt, no constraint). Inject the schema as an instruction into the
+  // first-turn prefix, mirroring the Claude translator. Enforcement stays
+  // best-effort here — the explicit global modes can't conjure an upstream
+  // knob that doesn't exist.
+  if (body?.response_format && typeof body.response_format === "object") {
+    const rf = body.response_format;
+    if (rf.type === "json_schema" && rf.json_schema?.schema) {
+      try {
+        const schemaJson = JSON.stringify(rf.json_schema.schema, null, 2);
+        systemPromptParts.push(buildJsonSchemaPrompt(schemaJson));
+      } catch {
+        systemPromptParts.push("You must respond with valid JSON. Respond ONLY with a JSON object, no other text.");
+      }
+    } else if (rf.type === "json_object") {
+      systemPromptParts.push("You must respond with valid JSON. Respond ONLY with a JSON object, no other text.");
+    }
   }
   if (shouldInjectAgentic && agenticPromptMode === "once") {
     systemPromptParts.push(KIRO_AGENTIC_SYSTEM_PROMPT);
