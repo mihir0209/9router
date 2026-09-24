@@ -63,6 +63,7 @@ const PUBLIC_CLOUDFLARE_PATHS = [
   "/api/auth/oidc",
   "/api/settings/require-login",
   "/api/version",
+  "/api/cron/flush",
   "/callback",
   "/login",
   "/landing",
@@ -164,10 +165,31 @@ async function guardCloudflareAdminRequest(request, env) {
 }
 `;
 
-  const withGuard = source.replace("export default {", `${guard}\nexport default {`)
+  const scheduled = `
+async function __9ROUTER_SCHEDULED__(event, env, ctx) {
+  if (env) { for (const [k, v] of Object.entries(env)) { if (typeof v === 'string' && !process.env[k]) process.env[k] = v; } }
+  const secret = env.CRON_SECRET;
+  const headers = { 'content-type': 'application/json' };
+  if (secret) headers.authorization = 'Bearer ' + secret;
+  const target = (env.ORIGIN || 'https://mihir-router.themihir.workers.dev') + '/api/cron/flush';
+  const run = (async () => {
+    try {
+      const res = await fetch(target, { method: 'POST', headers });
+      const body = await res.text();
+      console.log('[cron flush]', res.status, body.slice(0, 400));
+    } catch (err) {
+      console.log('[cron flush] failed', err && err.message);
+    }
+  })();
+  if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(run);
+  else await run;
+}
+`;
+
+  let withGuard = source.replace("export default {", `${guard}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
     .replace(
       "return runWithCloudflareRequestContext(request, env, ctx, async () => {",
-      "const guardResponse = await guardCloudflareAdminRequest(request, env);\n        if (guardResponse) return guardResponse;\n        return runWithCloudflareRequestContext(request, env, ctx, async () => {"
+      "if (env) { for (const [k, v] of Object.entries(env)) { if (typeof v === 'string' && !process.env[k]) process.env[k] = v; } }\n        const guardResponse = await guardCloudflareAdminRequest(request, env);\n        if (guardResponse) return guardResponse;\n        return runWithCloudflareRequestContext(request, env, ctx, async () => {"
     );
   writeFileSync(workerPath, withGuard);
 }

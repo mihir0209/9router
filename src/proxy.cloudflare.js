@@ -9,6 +9,7 @@ const PUBLIC_CLOUDFLARE_PATHS = [
   "/api/auth/oidc/callback",
   "/api/settings/require-login",
   "/api/version",
+  "/api/cron/flush",
   "/callback",
   "/login",
   "/landing",

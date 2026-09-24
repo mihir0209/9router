@@ -21,10 +21,12 @@ if (!global._extremeRotation) global._extremeRotation = new Map(); // connection
 
 async function applyExtremeRotation(connections) {
   try {
-    const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
-    if (!(await isExtremeWriteMode().catch(() => false))) return connections;
+    const { isExtremeWriteMode, isLowWriteMode } = await import("@/lib/db/repos/usageRepo.js");
+    const extreme = await isExtremeWriteMode().catch(() => false);
+    const low = await isLowWriteMode().catch(() => false);
+    if (!extreme && !low && process.env.NINEROUTER_RUNTIME !== "cloudflare") return connections;
   } catch {
-    return connections;
+    if (process.env.NINEROUTER_RUNTIME !== "cloudflare") return connections;
   }
   const now = new Date().toISOString();
   for (const c of connections) {
@@ -35,6 +37,19 @@ async function applyExtremeRotation(connections) {
     }
   }
   return { connections, now };
+}
+
+async function shouldUseInMemoryRotation() {
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare") return true;
+  try {
+    const { isExtremeWriteMode, isLowWriteMode } = await import("@/lib/db/repos/usageRepo.js");
+    const extreme = await isExtremeWriteMode().catch(() => false);
+    if (extreme) return true;
+    const low = await isLowWriteMode().catch(() => false);
+    return low;
+  } catch {
+    return process.env.NINEROUTER_RUNTIME === "cloudflare";
+  }
 }
 
 function recordExtremeRotation(connectionId, lastUsedAt, consecutiveUseCount) {
@@ -152,15 +167,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     }
 
     const connections = await getProviderConnections({ provider: providerId, isActive: true });
-    // Extreme mode: overlay in-memory rotation state onto fresh DB objects so
-    // round-robin recency survives without any providerConnections write.
-    let extremeRotation = false;
+    // In-memory rotation state (extreme/low-write/cloudflare): overlay onto fresh DB objects
+    // so round-robin recency survives without any providerConnections write.
+    let inMemoryRotation = false;
     if (connections.length > 0) {
-      try {
-        const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
-        extremeRotation = await isExtremeWriteMode().catch(() => false);
-      } catch { extremeRotation = false; }
-      if (extremeRotation) {
+      inMemoryRotation = await shouldUseInMemoryRotation();
+      if (inMemoryRotation) {
         for (const c of connections) {
           const mem = global._extremeRotation.get(c.id);
           if (mem) {
@@ -273,7 +285,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         // Stay with current account
         connection = current;
         // Update lastUsedAt and increment count (await to ensure persistence)
-        if (extremeRotation) {
+        if (inMemoryRotation) {
           recordExtremeRotation(connection.id, nowIso(), (connection.consecutiveUseCount || 0) + 1);
           connection.lastUsedAt = nowIso();
           connection.consecutiveUseCount = (connection.consecutiveUseCount || 0) + 1;
@@ -295,7 +307,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connection = sortedByOldest[0];
 
         // Update lastUsedAt and reset count to 1 (await to ensure persistence)
-        if (extremeRotation) {
+        if (inMemoryRotation) {
           recordExtremeRotation(connection.id, nowIso(), 1);
           connection.lastUsedAt = nowIso();
           connection.consecutiveUseCount = 1;
@@ -511,9 +523,12 @@ export async function clearAccountError(connectionId, currentConnection, model =
     });
   }
 
-  const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
-  if (await isExtremeWriteMode().catch(() => false)) {
-    // Clear from the extreme-mode lock registry (locks were never persisted).
+  const { isExtremeWriteMode, isLowWriteMode } = await import("@/lib/db/repos/usageRepo.js");
+  const skipDbClear = (await isExtremeWriteMode().catch(() => false)) ||
+                      (await isLowWriteMode().catch(() => false)) ||
+                      process.env.NINEROUTER_RUNTIME === "cloudflare";
+  if (skipDbClear) {
+    // Clear from the memory lock registry (locks were never persisted or on cloudflare).
     clearExpiredExtremeModelLocks(connectionId);
     if (model) {
       clearExtremeModelLock(connectionId, model);

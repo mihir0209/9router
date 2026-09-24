@@ -48,6 +48,8 @@ const DEFAULT_SETTINGS = {
   // on, false = always off. Skips per-request log writes (usageHistory rows,
   // request details) while keeping daily aggregates for analytics.
   lowWriteMode: null,
+  analyticsBufferMinutes: 10,
+  analyticsBufferEnabled: null,
   // Structured output (response_format / json_schema) handling.
   // Values: "auto" (default) | "passthrough" | "fallback".
   //   "auto" — preserve/translate natively for doc-verified base providers
@@ -114,10 +116,32 @@ const DEFAULT_SETTINGS = {
   proxyPoolNetworkCooldownMinutes: 10,
 };
 
+const SETTINGS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+if (!global._settingsRepoCache) {
+  global._settingsRepoCache = { data: null, ts: 0 };
+}
+const settingsRepoCache = global._settingsRepoCache;
+
+export function resetSettingsCache() {
+  settingsRepoCache.data = null;
+  settingsRepoCache.ts = 0;
+}
+
 async function readRaw() {
+  const now = Date.now();
+  if (settingsRepoCache.data && (now - settingsRepoCache.ts < SETTINGS_CACHE_TTL_MS)) {
+    return { ...settingsRepoCache.data };
+  }
   const db = await getAdapter();
+  if (typeof db.resync === "function") {
+    await db.resync().catch(() => {});
+  }
   const row = db.get(`SELECT data FROM settings WHERE id = 1`);
-  return row ? parseJson(row.data, {}) : {};
+  const data = row ? parseJson(row.data, {}) : {};
+  settingsRepoCache.data = data;
+  settingsRepoCache.ts = now;
+  return { ...data };
 }
 
 // Merge raw settings with defaults; backward-compat for missing keys
@@ -157,6 +181,7 @@ export async function updateSettings(updates) {
       [stringifyJson(next)],
     );
   });
+  resetSettingsCache();
   return mergeWithDefaults(next);
 }
 

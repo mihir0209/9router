@@ -4,7 +4,7 @@ import { stringifyJson, parseJson } from "./helpers/jsonCol.js";
 
 // Settings
 export {
-  getSettings, updateSettings, isCloudEnabled, getCloudUrl, exportSettings,
+  getSettings, updateSettings, isCloudEnabled, getCloudUrl, exportSettings, resetSettingsCache,
 } from "./repos/settingsRepo.js";
 
 // Provider connections
@@ -13,12 +13,14 @@ export {
   createProviderConnection, updateProviderConnection,
   deleteProviderConnection, deleteProviderConnectionsByProvider,
   reorderProviderConnections, cleanupProviderConnections,
+  resetConnectionsCache,
 } from "./repos/connectionsRepo.js";
 
 // Provider nodes
 export {
   getProviderNodes, getProviderNodeById,
   createProviderNode, updateProviderNode, deleteProviderNode,
+  resetNodesCache,
 } from "./repos/nodesRepo.js";
 
 // Proxy pools
@@ -31,6 +33,7 @@ export {
 // API keys
 export {
   getApiKeys, getApiKeyById, getApiKeyByKey, createApiKey, updateApiKey, regenerateApiKey, deleteApiKey, validateApiKey,
+  resetApiKeysCache,
 } from "./repos/apiKeysRepo.js";
 
 // Combos
@@ -62,11 +65,13 @@ export {
   statsEmitter, trackPendingRequest, getActiveRequests,
   saveRequestUsage, getUsageHistory, getApiKeyDailyUsage, getUsageStats, getChartData,
   appendRequestLog, getRecentLogs,
+  flushAnalyticsBuffer, resetAnalyticsBuffer, getAnalyticsBufferSize, isAnalyticsBufferingEnabled,
 } from "./repos/usageRepo.js";
 
 // Request details
 export {
   saveRequestDetail, getRequestDetails, getRequestDetailById, getDistinctProviders,
+  flushRequestDetailsBuffer,
 } from "./repos/requestDetailsRepo.js";
 
 // Export/import full DB

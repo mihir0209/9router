@@ -152,6 +152,61 @@ const CLOUDFLARE_STATIC_PROVIDER_BLOCKLIST = new Set(["opencode"]);
 const MODEL_PROVIDER_CONCURRENCY = 4;
 const MODEL_PROVIDER_TIMEOUT_MS = 6000;
 
+// Pre-serialized /v1/models body. Rebuilding capabilities for thousands of
+// models blows the Workers CPU budget (Cloudflare error 1102 → 503); serving
+// a cached string keeps warm requests near-zero CPU.
+// isolate-local (fast path) + Cache API on Workers (shared across isolates).
+const MODELS_LIST_TTL_MS = 300_000;
+const MODELS_EDGE_TTL_S = 300;
+if (!global._modelsListCache) {
+  global._modelsListCache = { body: null, ts: 0, inflight: null };
+}
+const modelsListCache = global._modelsListCache;
+const isCloudflareRuntime = () => process.env.NINEROUTER_RUNTIME === "cloudflare";
+
+function modelsListHeaders(extra = {}) {
+  return {
+    "Content-Type": "application/json; charset=utf-8",
+    "Access-Control-Allow-Origin": "*",
+    "Cache-Control": "public, max-age=30",
+    ...extra,
+  };
+}
+
+function modelsEdgeCacheKey(request) {
+  // Auth-agnostic: the catalog shape does not depend on the caller's key.
+  return new Request(new URL("/v1/models", request.url).href, {
+    method: "GET",
+    headers: { accept: "application/json" },
+  });
+}
+
+async function readModelsEdgeCache(request) {
+  if (!isCloudflareRuntime()) return null;
+  try {
+    const hit = await caches.default.match(modelsEdgeCacheKey(request));
+    if (!hit) return null;
+    const body = await hit.text();
+    return body || null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeModelsEdgeCache(request, body) {
+  if (!isCloudflareRuntime() || !body) return;
+  try {
+    const res = new Response(body, {
+      headers: modelsListHeaders({
+        "Cache-Control": `public, max-age=${MODELS_EDGE_TTL_S}`,
+      }),
+    });
+    await caches.default.put(modelsEdgeCacheKey(request), res);
+  } catch {
+    /* edge cache is best-effort */
+  }
+}
+
 // Map per-model `type` field (in PROVIDER_MODELS) to service kind.
 // Models without `type` are treated as LLM.
 const MODEL_TYPE_TO_KIND = {
@@ -280,7 +335,10 @@ export async function buildModelsList(kindFilter, options = {}) {
   // When this header is present, the /v1/models request came from another
   // 9router instance's fetchCompatibleModelIds — skip dynamic fetch to break
   // cross-instance recursive loops.
-  const skipDynamicFetch = options.skipDynamicFetch === true;
+  // On Workers, also skip live catalog / upstream discovery: they burn CPU
+  // past the free-plan budget (error 1102) while building thousands of entries.
+  const skipDynamicFetch = options.skipDynamicFetch === true || isCloudflareRuntime();
+  const skipLiveResolvers = options.skipLiveResolvers === true || isCloudflareRuntime();
   const providerConcurrency = options.providerConcurrency || MODEL_PROVIDER_CONCURRENCY;
   const providerTimeoutMs = options.providerTimeoutMs || MODEL_PROVIDER_TIMEOUT_MS;
   const dbReads = await Promise.allSettled([
@@ -399,7 +457,7 @@ export async function buildModelsList(kindFilter, options = {}) {
       // -thinking/-agentic variants per account). On failure, fall back to
       // whatever rawModelIds already holds.
       const liveResolver = LIVE_MODEL_RESOLVERS[providerId];
-      if (liveResolver && !hasExplicitEnabledModels) {
+      if (liveResolver && !hasExplicitEnabledModels && !skipLiveResolvers) {
         try {
           const live = await liveResolver(conn, signal);
           if (live?.models?.length) {
@@ -590,12 +648,71 @@ export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
-    const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
-    return Response.json({ object: "list", data }, {
-      headers: { "Access-Control-Allow-Origin": "*" },
+    const now = Date.now();
+
+    if (!skipDynamicFetch && modelsListCache.body && now - modelsListCache.ts < MODELS_LIST_TTL_MS) {
+      return new Response(modelsListCache.body, {
+        headers: modelsListHeaders({ "x-models-cache": "memory" }),
+      });
+    }
+
+    // Cross-isolate edge cache (Workers): avoids re-paying CPU on every cold isolate.
+    if (!skipDynamicFetch) {
+      const edgeBody = await readModelsEdgeCache(request);
+      if (edgeBody) {
+        modelsListCache.body = edgeBody;
+        modelsListCache.ts = Date.now();
+        return new Response(edgeBody, {
+          headers: modelsListHeaders({ "x-models-cache": "edge" }),
+        });
+      }
+    }
+
+    // Coalesce concurrent rebuilds so a burst of /v1/models only pays CPU once.
+    if (!skipDynamicFetch && modelsListCache.inflight) {
+      const body = await modelsListCache.inflight;
+      return new Response(body, {
+        headers: modelsListHeaders({ "x-models-cache": "coalesced" }),
+      });
+    }
+
+    const build = (async () => {
+      const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+      return JSON.stringify({ object: "list", data });
+    })();
+
+    if (!skipDynamicFetch) modelsListCache.inflight = build;
+
+    let body;
+    try {
+      body = await build;
+    } finally {
+      if (modelsListCache.inflight === build) modelsListCache.inflight = null;
+    }
+
+    if (!skipDynamicFetch && body) {
+      modelsListCache.body = body;
+      modelsListCache.ts = Date.now();
+      await writeModelsEdgeCache(request, body);
+    }
+
+    return new Response(body, {
+      headers: modelsListHeaders({ "x-models-cache": "miss" }),
     });
   } catch (error) {
     console.log("Error fetching models:", error);
+    // Stale cache is better than a hard failure when a rebuild throws.
+    if (modelsListCache.body) {
+      return new Response(modelsListCache.body, {
+        headers: modelsListHeaders({ "x-models-cache": "stale-memory" }),
+      });
+    }
+    const edgeBody = await readModelsEdgeCache(request).catch(() => null);
+    if (edgeBody) {
+      return new Response(edgeBody, {
+        headers: modelsListHeaders({ "x-models-cache": "stale-edge" }),
+      });
+    }
     return Response.json(
       { error: { message: error.message, type: "server_error" } },
       { status: 500 }

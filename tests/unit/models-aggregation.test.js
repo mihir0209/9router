@@ -19,7 +19,18 @@ vi.mock("@/lib/localDb", () => ({
 }));
 vi.mock("@/lib/disabledModelsDb", () => ({ getDisabledModels: mocks.getDisabledModels }));
 vi.mock("open-sse/services/kiroModels.js", () => ({ resolveKiroModels: mocks.resolveKiroModels }));
-vi.mock("open-sse/services/qoderModels.js", () => ({ resolveQoderModels: mocks.resolveQoderModels }));
+vi.mock("open-sse/services/qoderModels.js", () => ({
+  resolveQoderModels: mocks.resolveQoderModels,
+  // Route uses this to expand the live catalog; keep in sync with qoderModels.js shape.
+  routableQoderModels: (catalog) => {
+    if (!catalog) return [];
+    return (catalog.models || []).map((m) => ({
+      id: m.id,
+      name: m.name || m.id,
+      hidden: false,
+    }));
+  },
+}));
 vi.mock("open-sse/services/kimchiModels.js", () => ({ resolveKimchiModels: mocks.resolveKimchiModels }));
 vi.mock("open-sse/services/copilotModels.js", () => ({ resolveCopilotModels: vi.fn() }));
 vi.mock("open-sse/services/clinepassModels.js", () => ({ resolveClinepassModels: vi.fn() }));

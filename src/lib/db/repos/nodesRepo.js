@@ -38,18 +38,45 @@ function upsert(db, n) {
   );
 }
 
+const NODES_CACHE_TTL_MS = 5 * 60 * 1000;
+
+if (!global._nodesRepoCache) {
+  global._nodesRepoCache = { list: null, ts: 0 };
+}
+const nodesRepoCache = global._nodesRepoCache;
+
+export function resetNodesCache() {
+  nodesRepoCache.list = null;
+  nodesRepoCache.ts = 0;
+}
+
 export async function getProviderNodes(filter = {}) {
-  const db = await getAdapter();
-  const where = [];
-  const params = [];
-  if (filter.type) { where.push("type = ?"); params.push(filter.type); }
-  const sql = `SELECT * FROM providerNodes${where.length ? ` WHERE ${where.join(" AND ")}` : ""}`;
-  return db.all(sql, params).map(rowToNode);
+  const now = Date.now();
+  let list;
+  if (nodesRepoCache.list && (now - nodesRepoCache.ts < NODES_CACHE_TTL_MS)) {
+    list = nodesRepoCache.list;
+  } else {
+    const db = await getAdapter();
+    if (typeof db.resync === "function") {
+      await db.resync().catch(() => {});
+    }
+    const rows = db.all("SELECT * FROM providerNodes");
+    list = rows.map(rowToNode);
+    nodesRepoCache.list = list;
+    nodesRepoCache.ts = now;
+  }
+
+  let result = list;
+  if (filter.type) {
+    result = list.filter((n) => n.type === filter.type);
+  }
+  return result.map((n) => ({ ...n }));
 }
 
 export async function getProviderNodeById(id) {
-  const db = await getAdapter();
-  return rowToNode(db.get(`SELECT * FROM providerNodes WHERE id = ?`, [id]));
+  const all = await getProviderNodes();
+  const found = all.find((n) => n.id === id);
+  return found ? { ...found } : null;
 }
 
 export async function createProviderNode(data) {
@@ -72,6 +99,7 @@ export async function createProviderNode(data) {
   };
   if (data.retry != null) node.retry = data.retry;
   upsert(db, node);
+  resetNodesCache();
   return node;
 }
 
@@ -85,6 +113,7 @@ export async function updateProviderNode(id, data) {
     upsert(db, merged);
     result = merged;
   });
+  resetNodesCache();
   return result;
 }
 
@@ -97,5 +126,6 @@ export async function deleteProviderNode(id) {
     removed = rowToNode(row);
     db.run(`DELETE FROM providerNodes WHERE id = ?`, [id]);
   });
+  if (removed) resetNodesCache();
   return removed;
 }

@@ -85,6 +85,216 @@ export function resetLowWriteCache() {
   lowWriteCache.ts = 0;
   extremeWriteCache.value = undefined;
   extremeWriteCache.ts = 0;
+  bufferSettingCache.value = undefined;
+  bufferSettingCache.ts = 0;
+}
+
+const ANALYTICS_BUFFER_TTL_MS = 10 * 60 * 1000;
+const ANALYTICS_BUFFER_MAX_ITEMS = 100;
+
+if (!global._analyticsBatchBuffer) {
+  global._analyticsBatchBuffer = {
+    lastFlushTs: Date.now(),
+    lifetimeRequests: 0,
+    days: {},
+    historyRows: [],
+    flushTimer: null,
+    flushing: false,
+  };
+}
+const analyticsBuffer = global._analyticsBatchBuffer;
+
+if (!global._analyticsBufferSettingCache) global._analyticsBufferSettingCache = { value: undefined, ts: 0 };
+const bufferSettingCache = global._analyticsBufferSettingCache;
+
+async function shouldBufferAnalytics() {
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare") return true;
+  if (bufferSettingCache.value !== undefined && Date.now() - bufferSettingCache.ts < LOW_WRITE_CACHE_TTL_MS) {
+    return bufferSettingCache.value;
+  }
+  let value = false;
+  try {
+    const { getSettings } = await import("./settingsRepo.js");
+    const s = await getSettings();
+    if (s?.analyticsBufferEnabled === true) value = true;
+    else if (s?.analyticsBufferEnabled === false) value = false;
+    else if (process.env.NINEROUTER_RUNTIME === "cloudflare") value = true;
+  } catch {}
+  bufferSettingCache.value = value;
+  bufferSettingCache.ts = Date.now();
+  return value;
+}
+
+export async function isAnalyticsBufferingEnabled() {
+  return await shouldBufferAnalytics();
+}
+
+export function resetAnalyticsBuffer() {
+  if (analyticsBuffer.flushTimer) {
+    clearTimeout(analyticsBuffer.flushTimer);
+    analyticsBuffer.flushTimer = null;
+  }
+  analyticsBuffer.lastFlushTs = Date.now();
+  analyticsBuffer.lifetimeRequests = 0;
+  analyticsBuffer.days = {};
+  analyticsBuffer.historyRows = [];
+  analyticsBuffer.flushing = false;
+  bufferSettingCache.value = undefined;
+  bufferSettingCache.ts = 0;
+}
+
+export function getAnalyticsBufferSize() {
+  return {
+    lifetimeRequests: analyticsBuffer.lifetimeRequests,
+    daysCount: Object.keys(analyticsBuffer.days).length,
+    historyCount: analyticsBuffer.historyRows.length,
+    lastFlushTs: analyticsBuffer.lastFlushTs,
+  };
+}
+
+function mergeCounter(target, key, source) {
+  if (!target[key]) {
+    target[key] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
+  }
+  target[key].requests += source.requests || 0;
+  target[key].promptTokens += source.promptTokens || 0;
+  target[key].completionTokens += source.completionTokens || 0;
+  target[key].cachedTokens += source.cachedTokens || 0;
+  target[key].cost += source.cost || 0;
+  if (source.meta) {
+    target[key].meta = { ...(target[key].meta || {}), ...source.meta };
+  }
+  if (source.rawModel && !target[key].rawModel) target[key].rawModel = source.rawModel;
+  if (source.provider && !target[key].provider) target[key].provider = source.provider;
+  if (source.apiKey && !target[key].apiKey) target[key].apiKey = source.apiKey;
+  if (source.endpoint && !target[key].endpoint) target[key].endpoint = source.endpoint;
+  if (source.lastUsed && (!target[key].lastUsed || source.lastUsed > target[key].lastUsed)) {
+    target[key].lastUsed = source.lastUsed;
+  }
+}
+
+function mergeDayObjects(target, source) {
+  target.requests = (target.requests || 0) + (source.requests || 0);
+  target.promptTokens = (target.promptTokens || 0) + (source.promptTokens || 0);
+  target.completionTokens = (target.completionTokens || 0) + (source.completionTokens || 0);
+  target.cachedTokens = (target.cachedTokens || 0) + (source.cachedTokens || 0);
+  target.cost = (target.cost || 0) + (source.cost || 0);
+
+  target.byProvider ||= {};
+  target.byModel ||= {};
+  target.byAccount ||= {};
+  target.byApiKey ||= {};
+  target.byEndpoint ||= {};
+
+  for (const [k, v] of Object.entries(source.byProvider || {})) mergeCounter(target.byProvider, k, v);
+  for (const [k, v] of Object.entries(source.byModel || {})) mergeCounter(target.byModel, k, v);
+  for (const [k, v] of Object.entries(source.byAccount || {})) mergeCounter(target.byAccount, k, v);
+  for (const [k, v] of Object.entries(source.byApiKey || {})) mergeCounter(target.byApiKey, k, v);
+  for (const [k, v] of Object.entries(source.byEndpoint || {})) mergeCounter(target.byEndpoint, k, v);
+}
+
+function bufferUsageEntry(entry, lowWrite) {
+  const dateKey = getLocalDateKey(entry.timestamp);
+  if (!analyticsBuffer.days[dateKey]) {
+    analyticsBuffer.days[dateKey] = {
+      requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0,
+      byProvider: {}, byModel: {}, byAccount: {}, byApiKey: {}, byEndpoint: {},
+    };
+  }
+  aggregateEntryToDay(analyticsBuffer.days[dateKey], entry);
+  analyticsBuffer.lifetimeRequests++;
+  if (!lowWrite) {
+    analyticsBuffer.historyRows.push(entry);
+  }
+}
+
+function ensureAnalyticsFlushTimer() {
+  if (analyticsBuffer.flushTimer) return;
+  const elapsed = Date.now() - analyticsBuffer.lastFlushTs;
+  const remaining = Math.max(100, ANALYTICS_BUFFER_TTL_MS - elapsed);
+  analyticsBuffer.flushTimer = setTimeout(() => {
+    analyticsBuffer.flushTimer = null;
+    flushAnalyticsBuffer().catch(() => {});
+  }, remaining);
+  analyticsBuffer.flushTimer?.unref?.();
+}
+
+export async function flushAnalyticsBuffer() {
+  if (analyticsBuffer.flushing) return;
+  const dayKeys = Object.keys(analyticsBuffer.days);
+  const lifetime = analyticsBuffer.lifetimeRequests;
+  const history = analyticsBuffer.historyRows;
+  if (dayKeys.length === 0 && lifetime === 0 && history.length === 0) return;
+
+  analyticsBuffer.flushing = true;
+  if (analyticsBuffer.flushTimer) {
+    clearTimeout(analyticsBuffer.flushTimer);
+    analyticsBuffer.flushTimer = null;
+  }
+
+  const daysSnapshot = analyticsBuffer.days;
+  const lifetimeSnapshot = analyticsBuffer.lifetimeRequests;
+  const historySnapshot = analyticsBuffer.historyRows;
+
+  analyticsBuffer.days = {};
+  analyticsBuffer.lifetimeRequests = 0;
+  analyticsBuffer.historyRows = [];
+  analyticsBuffer.lastFlushTs = Date.now();
+
+  try {
+    const db = await getAdapter();
+    db.transaction(() => {
+      // 1. History rows (if any)
+      for (const entry of historySnapshot) {
+        const tokens = entry.tokens || {};
+        const promptTokens = tokens.prompt_tokens || tokens.input_tokens || 0;
+        const completionTokens = tokens.completion_tokens || tokens.output_tokens || 0;
+        db.run(
+          `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            entry.timestamp, entry.provider || null, entry.model || null,
+            entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
+            promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
+            stringifyJson(tokens), stringifyJson({}),
+          ]
+        );
+      }
+
+      // 2. Daily aggregates
+      for (const [dateKey, bufferedDay] of Object.entries(daysSnapshot)) {
+        const row = db.get(`SELECT data FROM usageDaily WHERE dateKey = ?`, [dateKey]);
+        const day = row ? parseJson(row.data, {}) : {
+          requests: 0, promptTokens: 0, completionTokens: 0, cost: 0,
+          byProvider: {}, byModel: {}, byAccount: {}, byApiKey: {}, byEndpoint: {},
+        };
+        mergeDayObjects(day, bufferedDay);
+        db.run(
+          `INSERT INTO usageDaily(dateKey, data) VALUES(?, ?) ON CONFLICT(dateKey) DO UPDATE SET data = excluded.data`,
+          [dateKey, stringifyJson(day)]
+        );
+      }
+
+      // 3. Lifetime counter
+      if (lifetimeSnapshot > 0) {
+        const cur = db.get(`SELECT value FROM _meta WHERE key = 'totalRequestsLifetime'`);
+        const next = (cur ? parseInt(cur.value, 10) : 0) + lifetimeSnapshot;
+        db.run(
+          `INSERT INTO _meta(key, value) VALUES('totalRequestsLifetime', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+          [String(next)]
+        );
+      }
+    });
+  } catch (err) {
+    console.error("[usageRepo] flushAnalyticsBuffer failed:", err);
+    for (const [dk, bd] of Object.entries(daysSnapshot)) {
+      if (!analyticsBuffer.days[dk]) analyticsBuffer.days[dk] = bd;
+      else mergeDayObjects(analyticsBuffer.days[dk], bd);
+    }
+    analyticsBuffer.lifetimeRequests += lifetimeSnapshot;
+    analyticsBuffer.historyRows.push(...historySnapshot);
+  } finally {
+    analyticsBuffer.flushing = false;
+  }
 }
 
 // Extreme write mode: explicit opt-in only (settings.lowWriteMode ===
@@ -365,6 +575,20 @@ export async function saveRequestUsage(entry) {
       }
     }
 
+    if (!entry.forcePersist && (await shouldBufferAnalytics())) {
+      bufferUsageEntry(entry, lowWrite);
+      pushToRing(entry);
+      scheduleStatsEvent("update", 250);
+
+      const elapsed = Date.now() - analyticsBuffer.lastFlushTs;
+      if (elapsed >= ANALYTICS_BUFFER_TTL_MS || analyticsBuffer.lifetimeRequests >= ANALYTICS_BUFFER_MAX_ITEMS) {
+        flushAnalyticsBuffer().catch(() => {});
+      } else {
+        ensureAnalyticsFlushTimer();
+      }
+      return;
+    }
+
     // All writes in ONE transaction.
     // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.
     // Low-write mode skips the per-request usageHistory row (on Cloudflare this
@@ -445,11 +669,33 @@ export async function getUsageHistory(filter = {}) {
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
   const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens FROM usageHistory ${where} ORDER BY id ASC`, params);
 
-  return rows.map((r) => ({
+  const list = rows.map((r) => ({
     timestamp: r.timestamp, provider: r.provider, model: r.model,
     connectionId: r.connectionId, apiKeyMasked: maskApiKey(r.apiKey), endpoint: r.endpoint,
     cost: r.cost, status: r.status, tokens: parseJson(r.tokens, {}),
   }));
+
+  if (analyticsBuffer.historyRows.length > 0) {
+    for (const r of analyticsBuffer.historyRows) {
+      if (filter.provider && r.provider !== filter.provider) continue;
+      if (filter.model && r.model !== filter.model) continue;
+      if (filter.startDate && new Date(r.timestamp) < new Date(filter.startDate)) continue;
+      if (filter.endDate && new Date(r.timestamp) > new Date(filter.endDate)) continue;
+      list.push({
+        timestamp: r.timestamp,
+        provider: r.provider,
+        model: r.model,
+        connectionId: r.connectionId,
+        apiKeyMasked: maskApiKey(r.apiKey),
+        endpoint: r.endpoint,
+        cost: r.cost || 0,
+        status: r.status || "ok",
+        tokens: r.tokens || {},
+      });
+    }
+  }
+
+  return list;
 }
 
 export async function getApiKeyDailyUsage(apiKey, { from, to } = {}) {
@@ -479,15 +725,14 @@ export async function getApiKeyDailyUsage(apiKey, { from, to } = {}) {
       ORDER BY date ASC`,
     params
   );
-  if (rows.length) return rows;
+  if (rows.length && !(await shouldLowWrite().catch(() => false)) && !(await shouldBufferAnalytics().catch(() => false))) {
+    return rows;
+  }
 
-  // Low-write mode stores no per-request history rows: rebuild the same
-  // per-day shape from the daily aggregates instead.
-  if (!(await shouldLowWrite().catch(() => false))) return rows;
   const fromDay = from ? String(from).slice(0, 10) : null;
   const toDay = to ? String(to).slice(0, 10) : null;
   const out = [];
-  for (const dr of db.all(`SELECT dateKey, data FROM usageDaily ORDER BY dateKey ASC`)) {
+  for (const dr of loadDaysInRange(db, null)) {
     if (fromDay && dr.dateKey < fromDay) continue;
     if (toDay && dr.dateKey > toDay) continue;
     const day = parseJson(dr.data, {});
@@ -507,13 +752,41 @@ export async function getApiKeyDailyUsage(apiKey, { from, to } = {}) {
 }
 
 function loadDaysInRange(adapter, maxDays) {
+  let rows;
   if (maxDays == null) {
-    return adapter.all(`SELECT dateKey, data FROM usageDaily`);
+    rows = adapter.all(`SELECT dateKey, data FROM usageDaily`);
+  } else {
+    const today = new Date();
+    const cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate() - maxDays + 1);
+    const cutoffKey = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(cutoff.getDate()).padStart(2, "0")}`;
+    rows = adapter.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ?`, [cutoffKey]);
   }
-  const today = new Date();
-  const cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate() - maxDays + 1);
-  const cutoffKey = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(cutoff.getDate()).padStart(2, "0")}`;
-  return adapter.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ?`, [cutoffKey]);
+
+  const dayMap = {};
+  for (const r of rows) {
+    dayMap[r.dateKey] = parseJson(r.data, {});
+  }
+
+  for (const [dateKey, bufferedDay] of Object.entries(analyticsBuffer.days)) {
+    if (maxDays != null) {
+      const today = new Date();
+      const cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate() - maxDays + 1);
+      const cutoffKey = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(cutoff.getDate()).padStart(2, "0")}`;
+      if (dateKey < cutoffKey) continue;
+    }
+    if (!dayMap[dateKey]) {
+      dayMap[dateKey] = {
+        requests: 0, promptTokens: 0, completionTokens: 0, cost: 0,
+        byProvider: {}, byModel: {}, byAccount: {}, byApiKey: {}, byEndpoint: {},
+      };
+    }
+    mergeDayObjects(dayMap[dateKey], bufferedDay);
+  }
+
+  return Object.entries(dayMap).map(([dateKey, day]) => ({
+    dateKey,
+    data: stringifyJson(day),
+  }));
 }
 
 export async function getUsageStats(period = "all") {

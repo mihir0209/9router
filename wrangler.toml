@@ -17,6 +17,10 @@ NODE_ENV = "production"
 NEXTJS_ENV = "production"
 NINEROUTER_RUNTIME = "cloudflare"
 
+# Flush in-memory analytics buffer + observability batch before isolate eviction.
+[triggers]
+crons = ["*/10 * * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "mihir-router-db"

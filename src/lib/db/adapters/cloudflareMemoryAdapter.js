@@ -206,6 +206,37 @@ export async function createCloudflareMemoryAdapter() {
     }
   }
 
+  let lastD1SyncTs = Date.now();
+  const D1_RESYNC_INTERVAL_MS = 5 * 60 * 1000;
+
+  async function resyncFromD1(force = false) {
+    if (!d1) return;
+    const now = Date.now();
+    if (!force && now - lastD1SyncTs < D1_RESYNC_INTERVAL_MS) return;
+    lastD1SyncTs = now;
+    try {
+      const result = await d1.prepare(`SELECT table_name, data FROM ${D1_TABLE}`).all();
+      const freshTables = {};
+      for (const table of Object.keys(TABLES)) freshTables[table] = [];
+      for (const row of result.results || []) {
+        if (!freshTables[row.table_name]) continue;
+        try {
+          const parsed = JSON.parse(row.data);
+          freshTables[row.table_name].push(parsed);
+          if (AUTOINCREMENT.has(row.table_name) && Number.isFinite(Number(parsed.id))) {
+            state.sequences[row.table_name] = Math.max(state.sequences[row.table_name] || 0, Number(parsed.id));
+          }
+        } catch {}
+      }
+      for (const table of Object.keys(TABLES)) {
+        if (dirtyTables.has(table) || transactionDepth > 0) continue;
+        state.tables[table] = freshTables[table];
+      }
+    } catch (error) {
+      console.warn(`[DB] D1 resync failed: ${error.message}`);
+    }
+  }
+
   // Last-op-wins per row key: delete-then-insert resolves to upsert (row is
   // present at commit), insert-then-delete resolves to delete (row is gone).
   function markDirty(table, row = null, op = "upsert") {
@@ -463,6 +494,7 @@ export async function createCloudflareMemoryAdapter() {
     all,
     exec,
     transaction,
+    resync: resyncFromD1,
     close: () => {},
     raw: state,
   };

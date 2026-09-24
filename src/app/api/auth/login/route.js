@@ -55,7 +55,15 @@ export async function POST(request) {
       isValid = await bcrypt.compare(password, storedHash);
     } else {
       // Use env var or default
-      const initialPassword = process.env.INITIAL_PASSWORD || "123456";
+      let initialPassword = process.env.INITIAL_PASSWORD;
+      if (!initialPassword) {
+        try {
+          const { getCloudflareContext } = await import("@opennextjs/cloudflare");
+          const ctx = await getCloudflareContext({ async: true });
+          initialPassword = ctx?.env?.INITIAL_PASSWORD;
+        } catch {}
+      }
+      initialPassword = initialPassword || "123456";
       isValid = password === initialPassword;
     }
 

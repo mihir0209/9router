@@ -45,6 +45,20 @@ function rowToKey(row) {
   };
 }
 
+const API_KEYS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+if (!global._apiKeysRepoCache) {
+  global._apiKeysRepoCache = { byKey: new Map(), byId: new Map(), list: null, ts: 0 };
+}
+const apiKeyCache = global._apiKeysRepoCache;
+
+export function resetApiKeysCache() {
+  apiKeyCache.byKey.clear();
+  apiKeyCache.byId.clear();
+  apiKeyCache.list = null;
+  apiKeyCache.ts = 0;
+}
+
 export async function getApiKeys(ownerRef) {
   const db = await getAdapter();
   const rows = ownerRef === undefined || ownerRef === null
@@ -54,15 +68,53 @@ export async function getApiKeys(ownerRef) {
 }
 
 export async function getApiKeyById(id) {
+  if (!id) return null;
+  const now = Date.now();
+  if (apiKeyCache.byId.has(id) && (now - apiKeyCache.ts < API_KEYS_CACHE_TTL_MS)) {
+    const k = apiKeyCache.byId.get(id);
+    return k ? { ...k } : null;
+  }
   const db = await getAdapter();
+  if (typeof db.resync === "function") {
+    await db.resync().catch(() => {});
+  }
   const row = db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]);
-  return rowToKey(row);
+  const parsed = rowToKey(row);
+  if (now - apiKeyCache.ts >= API_KEYS_CACHE_TTL_MS) {
+    apiKeyCache.byKey.clear();
+    apiKeyCache.byId.clear();
+    apiKeyCache.ts = now;
+  }
+  if (parsed) {
+    apiKeyCache.byId.set(id, parsed);
+    apiKeyCache.byKey.set(parsed.key, parsed);
+  }
+  return parsed ? { ...parsed } : null;
 }
 
 export async function getApiKeyByKey(key) {
+  if (!key) return null;
+  const now = Date.now();
+  if (apiKeyCache.byKey.has(key) && (now - apiKeyCache.ts < API_KEYS_CACHE_TTL_MS)) {
+    const k = apiKeyCache.byKey.get(key);
+    return k ? { ...k } : null;
+  }
   const db = await getAdapter();
+  if (typeof db.resync === "function") {
+    await db.resync().catch(() => {});
+  }
   const row = db.get(`SELECT * FROM apiKeys WHERE key = ?`, [key]);
-  return rowToKey(row);
+  const parsed = rowToKey(row);
+  if (now - apiKeyCache.ts >= API_KEYS_CACHE_TTL_MS) {
+    apiKeyCache.byKey.clear();
+    apiKeyCache.byId.clear();
+    apiKeyCache.ts = now;
+  }
+  if (parsed) {
+    apiKeyCache.byKey.set(key, parsed);
+    apiKeyCache.byId.set(parsed.id, parsed);
+  }
+  return parsed ? { ...parsed } : null;
 }
 
 export async function createApiKey(name, machineId, options = {}) {
@@ -114,6 +166,7 @@ export async function createApiKey(name, machineId, options = {}) {
     `INSERT INTO apiKeys(${API_KEY_FIELDS.join(", ")}) VALUES(${API_KEY_FIELDS.map(() => "?").join(", ")})`,
     API_KEY_FIELDS.map(f => f === "isActive" ? (apiKey[f] ? 1 : 0) : apiKey[f])
   );
+  resetApiKeysCache();
   return apiKey;
 }
 
@@ -149,6 +202,7 @@ export async function updateApiKey(id, data) {
     }
     result = merged;
   });
+  resetApiKeysCache();
   return result;
 }
 
@@ -169,18 +223,20 @@ export async function regenerateApiKey(id) {
     result = rowToKey(db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]));
   });
 
+  resetApiKeysCache();
   return result;
 }
 
 export async function deleteApiKey(id) {
   const db = await getAdapter();
   const res = db.run(`DELETE FROM apiKeys WHERE id = ?`, [id]);
-  return (res?.changes ?? 0) > 0;
+  const deleted = (res?.changes ?? 0) > 0;
+  if (deleted) resetApiKeysCache();
+  return deleted;
 }
 
 export async function validateApiKey(key) {
-  const db = await getAdapter();
-  const row = db.get(`SELECT * FROM apiKeys WHERE key = ?`, [key]);
+  const row = await getApiKeyByKey(key);
   if (!row) return false;
   if (row.isActive !== 1 && row.isActive !== true) return false;
   if (row.expiresAt && new Date(row.expiresAt) < new Date()) return false;
