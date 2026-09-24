@@ -5,6 +5,9 @@ import {
   resolveStructuredOutputMode,
   shouldPreserveJsonSchema,
   NATIVE_JSON_SCHEMA_PROVIDERS,
+  normalizeOpenAIStrictSchema,
+  normalizeOpenAISchemaInBody,
+  ensureJsonKeywordInMessages,
 } from "../../open-sse/config/structuredOutput.js";
 import { DefaultExecutor } from "../../open-sse/executors/default.js";
 import { AzureExecutor } from "../../open-sse/executors/azure.js";
@@ -224,5 +227,112 @@ describe("combo fallback on schema rejections (no hard fail)", () => {
     // shouldFallback field => matcher default true) before this change.
     expect(checkFallbackError(400, "improperly formed request", 0, "cool").shouldFallback).toBe(true);
     expect(checkFallbackError(400, "Bad request", 0, "cool").shouldFallback).toBe(false);
+  });
+});
+
+describe("provider-specific structured output caveats & middleware normalization", () => {
+  it("normalizes schema for OpenAI/Azure strict mode: adds additionalProperties: false and required", () => {
+    const rawSchema = {
+      type: "object",
+      properties: {
+        id: { type: "integer" },
+        profile: {
+          type: "object",
+          properties: {
+            bio: { type: "string" },
+            tags: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: { label: { type: "string" } },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const normalized = normalizeOpenAIStrictSchema(rawSchema);
+
+    expect(normalized.additionalProperties).toBe(false);
+    expect(normalized.required).toEqual(["id", "profile"]);
+    expect(normalized.properties.profile.additionalProperties).toBe(false);
+    expect(normalized.properties.profile.required).toEqual(["bio", "tags"]);
+    expect(normalized.properties.profile.properties.tags.items.additionalProperties).toBe(false);
+    expect(normalized.properties.profile.properties.tags.items.required).toEqual(["label"]);
+  });
+
+  it("normalizes OpenAI schema in request body when strict !== false", () => {
+    const body = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "test" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "Test",
+          schema: {
+            type: "object",
+            properties: { a: { type: "string" } },
+          },
+        },
+      },
+    };
+
+    const out = normalizeOpenAISchemaInBody(body);
+    expect(out.response_format.json_schema.strict).toBe(true);
+    expect(out.response_format.json_schema.schema.additionalProperties).toBe(false);
+    expect(out.response_format.json_schema.schema.required).toEqual(["a"]);
+  });
+
+  it("ensures 'json' keyword exists for DeepSeek json_object format", () => {
+    const withoutJson = {
+      model: "deepseek-chat",
+      messages: [{ role: "user", content: "List 3 colors" }],
+      response_format: { type: "json_object" },
+    };
+
+    const fixed = ensureJsonKeywordInMessages(withoutJson);
+    expect(fixed.messages[0].role).toBe("system");
+    expect(fixed.messages[0].content).toContain("JSON");
+
+    const withJson = {
+      model: "deepseek-chat",
+      messages: [{ role: "user", content: "List 3 colors in json format" }],
+      response_format: { type: "json_object" },
+    };
+
+    const unchanged = ensureJsonKeywordInMessages(withJson);
+    expect(unchanged.messages.length).toBe(1);
+  });
+
+  it("DefaultExecutor automatically normalizes schema for openai and adds json keyword for deepseek", () => {
+    const looseBody = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "output items" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "Items",
+          schema: {
+            type: "object",
+            properties: { items: { type: "array" } },
+          },
+        },
+      },
+    };
+
+    const openaiOut = new DefaultExecutor("openai").transformRequest("gpt-4o", looseBody, false);
+    expect(openaiOut.response_format.json_schema.schema.additionalProperties).toBe(false);
+    expect(openaiOut.response_format.json_schema.schema.required).toEqual(["items"]);
+
+    const deepseekBody = {
+      model: "deepseek-chat",
+      messages: [{ role: "user", content: "give data" }],
+      response_format: { type: "json_object" },
+    };
+
+    const deepseekOut = new DefaultExecutor("deepseek").transformRequest("deepseek-chat", deepseekBody, false);
+    const hasJson = deepseekOut.messages.some((m) => /json/i.test(m.content));
+    expect(hasJson).toBe(true);
   });
 });

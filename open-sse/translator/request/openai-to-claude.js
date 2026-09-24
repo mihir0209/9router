@@ -123,9 +123,9 @@ export function openaiToClaudeRequest(model, body, stream) {
 \`\`\`json
 ${schemaJson}
 \`\`\`
-Respond ONLY with the JSON object, no other text.`);
+Respond ONLY with the JSON object, no other text or markdown codeblocks (do not wrap in \`\`\`json).`);
     } else if (responseFormat.type === "json_object") {
-      systemParts.push("You must respond with valid JSON. Respond ONLY with a JSON object, no other text.");
+      systemParts.push("You must respond with valid JSON. Respond ONLY with a raw JSON object, no other text or markdown codeblocks.");
     }
   }
 

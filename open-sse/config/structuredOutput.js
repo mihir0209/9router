@@ -149,6 +149,96 @@ export function extractJsonSchema(body) {
   return null;
 }
 
+// Recursively ensure object schemas have additionalProperties: false and all properties in required (OpenAI strict mode requirement)
+export function normalizeOpenAIStrictSchema(schema) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
+  const copy = { ...schema };
+  if (copy.type === "object" || copy.properties) {
+    if (copy.additionalProperties === undefined) {
+      copy.additionalProperties = false;
+    }
+    if (copy.properties && typeof copy.properties === "object") {
+      const propKeys = Object.keys(copy.properties);
+      const reqSet = new Set(Array.isArray(copy.required) ? copy.required : []);
+      for (const k of propKeys) reqSet.add(k);
+      copy.required = Array.from(reqSet);
+
+      const normalizedProps = {};
+      for (const [k, v] of Object.entries(copy.properties)) {
+        normalizedProps[k] = normalizeOpenAIStrictSchema(v);
+      }
+      copy.properties = normalizedProps;
+    }
+  }
+  if (copy.items && typeof copy.items === "object") {
+    copy.items = Array.isArray(copy.items)
+      ? copy.items.map(normalizeOpenAIStrictSchema)
+      : normalizeOpenAIStrictSchema(copy.items);
+  }
+  if (copy.$defs && typeof copy.$defs === "object") {
+    const defs = {};
+    for (const [k, v] of Object.entries(copy.$defs)) defs[k] = normalizeOpenAIStrictSchema(v);
+    copy.$defs = defs;
+  }
+  if (copy.definitions && typeof copy.definitions === "object") {
+    const defs = {};
+    for (const [k, v] of Object.entries(copy.definitions)) defs[k] = normalizeOpenAIStrictSchema(v);
+    copy.definitions = defs;
+  }
+  if (Array.isArray(copy.anyOf)) copy.anyOf = copy.anyOf.map(normalizeOpenAIStrictSchema);
+  if (Array.isArray(copy.oneOf)) copy.oneOf = copy.oneOf.map(normalizeOpenAIStrictSchema);
+  if (Array.isArray(copy.allOf)) copy.allOf = copy.allOf.map(normalizeOpenAIStrictSchema);
+  return copy;
+}
+
+export function normalizeOpenAISchemaInBody(body) {
+  const rf = body?.response_format;
+  if (rf?.type === "json_schema" && rf.json_schema?.schema) {
+    if (rf.json_schema.strict !== false) {
+      return {
+        ...body,
+        response_format: {
+          ...rf,
+          json_schema: {
+            ...rf.json_schema,
+            strict: true,
+            schema: normalizeOpenAIStrictSchema(rf.json_schema.schema),
+          },
+        },
+      };
+    }
+  }
+  return body;
+}
+
+// DeepSeek and similar providers require the string "json" in messages if response_format is { type: "json_object" }
+export function ensureJsonKeywordInMessages(body) {
+  if (!body || !Array.isArray(body.messages)) return body;
+  const rf = body.response_format;
+  if (!rf || (rf.type !== "json_object" && rf.type !== "json_schema")) return body;
+
+  const hasJsonKeyword = body.messages.some(m => {
+    if (typeof m?.content === "string") return /\bjson\b/i.test(m.content);
+    if (Array.isArray(m?.content)) {
+      return m.content.some(part => part?.type === "text" && typeof part.text === "string" && /\bjson\b/i.test(part.text));
+    }
+    return false;
+  });
+
+  if (hasJsonKeyword) return body;
+
+  const messages = body.messages.map(m => ({ ...m }));
+  const sys = messages.find(m => m.role === "system");
+  const instruction = "Respond with a valid JSON object.";
+  if (sys) {
+    if (typeof sys.content === "string") sys.content = `${sys.content}\n${instruction}`;
+    else if (Array.isArray(sys.content)) sys.content.push({ type: "text", text: `\n${instruction}` });
+  } else {
+    messages.unshift({ role: "system", content: instruction });
+  }
+  return { ...body, messages };
+}
+
 // Pure downgrade: json_schema -> json_object + system-prompt schema injection.
 // Returns the original body untouched when there is nothing to downgrade.
 // Shared by DefaultExecutor (custom gateways + non-native bases) and

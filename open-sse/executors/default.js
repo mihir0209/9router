@@ -9,7 +9,13 @@ import { filterClaudeIdentityHeaders, getCachedClaudeHeaders } from "../utils/cl
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
-import { downgradeJsonSchemaToJsonObject, shouldPreserveJsonSchema } from "../config/structuredOutput.js";
+import {
+  downgradeJsonSchemaToJsonObject,
+  shouldPreserveJsonSchema,
+  normalizeOpenAISchemaInBody,
+  ensureJsonKeywordInMessages,
+  JSON_OBJECT_ONLY_PROVIDERS,
+} from "../config/structuredOutput.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -114,11 +120,24 @@ export class DefaultExecutor extends BaseExecutor {
   // isResponses; claude/gemini/ollama/kiro targets own their mapping (native
   // translation or prompt injection) in their translators.
   applyJsonSchemaFallback(body, credentials = null) {
-    if (shouldPreserveJsonSchema(this.provider, credentials)) return body;
+    if (shouldPreserveJsonSchema(this.provider, credentials)) {
+      let result = body;
+      if ((this.provider === "openai" || this.provider === "azure") && body?.response_format?.type === "json_schema") {
+        result = normalizeOpenAISchemaInBody(body);
+      }
+      if (this.provider === "deepseek" || JSON_OBJECT_ONLY_PROVIDERS.has(this.provider)) {
+        result = ensureJsonKeywordInMessages(result);
+      }
+      return result;
+    }
     const isCustomCompat = !!this.provider?.startsWith?.("openai-compatible-");
     const isBaseOpenAI = this.config?.format === "openai";
     if (!isCustomCompat && !isBaseOpenAI) return body;
-    return downgradeJsonSchemaToJsonObject(body);
+    const downgraded = downgradeJsonSchemaToJsonObject(body);
+    if (this.provider === "deepseek" || JSON_OBJECT_ONLY_PROVIDERS.has(this.provider)) {
+      return ensureJsonKeywordInMessages(downgraded);
+    }
+    return downgraded;
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
