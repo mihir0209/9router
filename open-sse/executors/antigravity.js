@@ -137,7 +137,8 @@ export class AntigravityExecutor extends BaseExecutor {
 
   transformRequest(model, body, stream, credentials) {
     const projectId = credentials?.projectId || this.generateProjectId();
-    const resolvedModel = getModelUpstreamId(PROVIDER_ID_TO_ALIAS[this.provider] || this.provider, body.model || model);
+    const baseModel = (body.model || model || "").replace(/^(?:antigravity|ag)\//, "");
+    const resolvedModel = getModelUpstreamId(PROVIDER_ID_TO_ALIAS[this.provider] || this.provider, baseModel);
     const presetMatch = resolvedModel.match(/\(([^()]+)\)\s*$/);
     const upstreamModel = presetMatch ? resolvedModel.slice(0, presetMatch.index).trim() : resolvedModel;
 
@@ -392,6 +393,49 @@ export class AntigravityExecutor extends BaseExecutor {
     }
 
     return null;
+  }
+
+  parseError(response, bodyText) {
+    if ((response.status === 429 || response.status === 409) && bodyText) {
+      try {
+        const json = JSON.parse(bodyText);
+        const err = json?.error;
+        let resetsAtMs = null;
+        const now = Date.now();
+        if (Array.isArray(err?.details)) {
+          for (const d of err.details) {
+            if (d.metadata?.quotaResetTimeStamp) {
+              const ts = new Date(d.metadata.quotaResetTimeStamp).getTime();
+              if (ts > now) {
+                resetsAtMs = ts;
+                break;
+              }
+            }
+            if (d.retryDelay) {
+              const sec = parseFloat(d.retryDelay);
+              if (Number.isFinite(sec) && sec > 0) {
+                resetsAtMs = now + sec * 1000;
+                break;
+              }
+            }
+          }
+        }
+        if (!resetsAtMs && typeof err?.message === "string") {
+          const m = err.message.match(/Resets in\s+(\d+h)?\s*(\d+m)?\s*(\d+s)?/i);
+          if (m) {
+            let totalMs = 0;
+            if (m[1]) totalMs += parseInt(m[1], 10) * 3600 * 1000;
+            if (m[2]) totalMs += parseInt(m[2], 10) * 60 * 1000;
+            if (m[3]) totalMs += parseInt(m[3], 10) * 1000;
+            if (totalMs > 0) resetsAtMs = now + totalMs;
+          }
+        }
+        if (resetsAtMs) {
+          return { status: response.status, message: err?.message || bodyText, resetsAtMs };
+        }
+      } catch { /* fall through to base */ }
+    }
+    return super.parseError(response, bodyText);
   }
 
   // Parse retry time from Antigravity error message body

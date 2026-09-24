@@ -25,6 +25,19 @@ export async function OPTIONS() {
  * Now handled by translator pattern (openai-responses format auto-detected)
  */
 export async function POST(request) {
-  await ensureInitialized();
-  return await handleChat(request);
+  try {
+    await ensureInitialized();
+    return await handleChat(request);
+  } catch (error) {
+    console.error("[responses] Unhandled error:", error);
+    return Response.json(
+      {
+        error: {
+          message: error?.message || "Internal server error",
+          type: "server_error",
+        },
+      },
+      { status: 500 }
+    );
+  }
 }

@@ -30,7 +30,21 @@ export async function OPTIONS() {
  * POST /v1/messages - Claude format (auto convert via handleChat)
  */
 export async function POST(request) {
-  await ensureInitialized();
-  return await handleChat(request);
+  try {
+    await ensureInitialized();
+    return await handleChat(request);
+  } catch (error) {
+    console.error("[messages] Unhandled error:", error);
+    return Response.json(
+      {
+        type: "error",
+        error: {
+          type: "api_error",
+          message: error?.message || "Internal server error",
+        },
+      },
+      { status: 500 }
+    );
+  }
 }
 

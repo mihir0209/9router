@@ -444,7 +444,8 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 
   const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
   const extreme = await isExtremeWriteMode().catch(() => false);
-  if (extreme) {
+  const isMultiHourLock = cooldownMs >= 60 * 60 * 1000;
+  if (extreme && !isMultiHourLock) {
     // Registry, not the conn object: getProviderConnections() returns fresh
     // objects per read, so an in-memory mutation would be discarded. The
     // registry lives per process/isolate (Workers: per colo) — losing it on

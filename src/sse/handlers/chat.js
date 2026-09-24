@@ -383,18 +383,27 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     let quotaResetMs = null;
     let resetsAtMs = result.resetsAtMs;
     if (provider === "antigravity" && (result.status === 409 || result.status === 429)) {
-      quotaResetMs = await handleAntigravityQuotaError(
-        credentials.connectionId, result.status, model,
-        refreshedCredentials.accessToken, credentials.providerSpecificData
-      );
-      if (quotaResetMs) resetsAtMs = quotaResetMs;
+      if (resetsAtMs && resetsAtMs > Date.now()) {
+        quotaResetMs = resetsAtMs;
+        const { getAntigravityQuotaCache } = await import("../services/antigravityQuota.js");
+        const cache = getAntigravityQuotaCache();
+        const existing = cache.get(credentials.connectionId) || {};
+        existing[model] = {
+          remainingPercentage: 0,
+          resetAt: new Date(resetsAtMs).toISOString(),
+        };
+        cache.set(credentials.connectionId, existing);
+      } else {
+        quotaResetMs = await handleAntigravityQuotaError(
+          credentials.connectionId, result.status, model,
+          refreshedCredentials.accessToken, credentials.providerSpecificData
+        );
+        if (quotaResetMs) resetsAtMs = quotaResetMs;
+      }
     }
 
-    // Exhausted Antigravity model is blocked only in RAM cache until upstream resetAt.
-    // Do not persist a modelLock_* for this path.
-    const shouldFallback = provider === "antigravity" && quotaResetMs
-      ? true
-      : (await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, resetsAtMs)).shouldFallback;
+    // Apply model-scoped cooldown and trigger account fallback
+    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, resetsAtMs);
 
     if (shouldFallback) {
       log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
