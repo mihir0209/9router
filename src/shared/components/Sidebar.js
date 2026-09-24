@@ -14,7 +14,7 @@ import { ConfirmModal } from "./Modal";
 import NineRemotePromoModal from "./NineRemotePromoModal";
 
 // const VISIBLE_MEDIA_KINDS = ["embedding", "image", "imageToText", "tts", "stt", "webSearch", "webFetch", "video", "music"];
-const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt"];
+const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt", "systemone"];
 // Combined entry: webSearch + webFetch share one page at /dashboard/media-providers/web
 const COMBINED_WEB_ITEM = { id: "web", label: "Web Fetch & Search", icon: "travel_explore", href: "/dashboard/media-providers/web" };
 
@@ -73,7 +73,7 @@ function useRailTooltip(label, enabled) {
   return { ref, tooltipHandlers: { onMouseEnter: show, onMouseLeave: hide, onFocus: show, onBlur: hide }, tooltip: node };
 }
 
-function SidebarLink({ href, label, icon, collapsed, active, onClick, compact = false, iconClass = "text-[18px]" }) {
+function SidebarLink({ href, label, icon, collapsed, active, onClick, compact = false, iconClass = "text-[18px]", badge }) {
   const { ref, tooltipHandlers, tooltip } = useRailTooltip(label, collapsed);
   return (
     <>
@@ -101,6 +101,11 @@ function SidebarLink({ href, label, icon, collapsed, active, onClick, compact = 
           {icon}
         </span>
         {!collapsed && <span className="text-[13px] font-medium">{label}</span>}
+        {!collapsed && badge && (
+          <span className="ml-auto text-[10px] font-semibold px-1.5 py-0.5 rounded-[3px] bg-green-500/15 text-green-400">
+            {badge}
+          </span>
+        )}
       </Link>
       {tooltip}
     </>
@@ -160,6 +165,7 @@ function CollapseButton({ collapsed, onToggleCollapse }) {
 
 function MediaProvidersToggle({ collapsed, mediaOpen, onToggle, active }) {
   const { ref, tooltipHandlers, tooltip } = useRailTooltip("Media Providers", collapsed);
+  const hasNew = MEDIA_PROVIDER_KINDS.some((k) => VISIBLE_MEDIA_KINDS.includes(k.id) && k.isNew);
   return (
     <>
       <button
@@ -177,6 +183,9 @@ function MediaProvidersToggle({ collapsed, mediaOpen, onToggle, active }) {
       >
         <span className="material-symbols-outlined text-[18px]">perm_media</span>
         {!collapsed && <span className="text-[13px] font-medium flex-1 text-left">Media Providers</span>}
+        {!collapsed && hasNew && (
+          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-[3px] bg-green-500/15 text-green-400">NEW</span>
+        )}
         {!collapsed && <span className="material-symbols-outlined text-[14px] transition-transform" style={{ transform: mediaOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
           expand_more
         </span>}
@@ -345,6 +354,7 @@ export default function Sidebar({ onClose, collapsed = false, onToggleCollapse }
                     onClick={onClose}
                     compact
                     iconClass="text-[16px]"
+                    badge={kind.isNew ? "NEW" : undefined}
                   />
                 ))}
                 <SidebarLink
@@ -400,6 +410,11 @@ export default function Sidebar({ onClose, collapsed = false, onToggleCollapse }
                 computer
               </span>
               {!collapsed && <span className="text-[13px] font-medium">9Remote</span>}
+              {!collapsed && (
+                <span className="ml-auto text-[10px] font-semibold px-1.5 py-0.5 rounded-[3px] bg-green-500/15 text-green-400">
+                  NEW
+                </span>
+              )}
             </button>
 
             {/* 9English — kept from upstream v0.5.81 */}

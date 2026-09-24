@@ -17,8 +17,29 @@ import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
-import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
 import { mapWithConcurrency } from "@/lib/async/mapWithConcurrency.js";
+
+// Qoder shares one live resolver across intl (qoder) and CN (qoder-cn); the
+// credentials carry the provider id so qoderModels picks the right region's
+// catalog endpoint.
+async function resolveQoderLiveModels(conn, provider, signal) {
+  const result = await resolveQoderModels({
+    provider,
+    accessToken: conn.accessToken,
+    // PAT (pt-...) connections keep the token in apiKey; without it the live
+    // catalog silently fails and /v1/models falls back to the static list.
+    apiKey: conn.apiKey,
+    refreshToken: conn.refreshToken,
+    email: conn.email,
+    displayName: conn.displayName,
+    providerSpecificData: conn.providerSpecificData || {}
+  }, { signal });
+  // Visible + hidden (enable:false) catalog keys — chat routes all of them.
+  const models = routableQoderModels(result);
+  if (!models.length) return null;
+  return { models: models.map((m) => ({ id: m.id, name: m.name })) };
+}
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -32,22 +53,8 @@ const LIVE_MODEL_RESOLVERS = {
     }, { log: console, signal });
     return result?.models?.length ? { models: result.models } : null;
   },
-  qoder: async (conn, signal) => {
-    const result = await resolveQoderModels({
-      accessToken: conn.accessToken,
-      // PAT (pt-...) connections keep the token in apiKey; without it the live
-      // catalog silently fails and /v1/models falls back to the static list.
-      apiKey: conn.apiKey,
-      refreshToken: conn.refreshToken,
-      email: conn.email,
-      displayName: conn.displayName,
-      providerSpecificData: conn.providerSpecificData || {}
-    }, { signal });
-    // Visible + hidden (enable:false) catalog keys — chat routes all of them.
-    const models = routableQoderModels(result);
-    if (!models.length) return null;
-    return { models: models.map((m) => ({ id: m.id, name: m.name })) };
-  },
+  qoder: async (conn, signal) => resolveQoderLiveModels(conn, "qoder", signal),
+  "qoder-cn": async (conn, signal) => resolveQoderLiveModels(conn, "qoder-cn", signal),
   kimchi: async (conn, signal) => {
     const result = await resolveKimchiModels({
       accessToken: conn.accessToken,
@@ -374,6 +381,9 @@ export async function buildModelsList(kindFilter, options = {}) {
 
   const models = [];
 
+  // Lookup map so aggregateComboCapabilities can recursively resolve nested combos
+  const comboByName = Object.fromEntries(combos.map((c) => [c.name, c.models]));
+
   // Combos first (filtered by kind). Web combos expose `kind` so AI knows search vs fetch.
   for (const combo of combos) {
     if (!comboMatchesKinds(combo, kindFilter)) continue;
@@ -384,6 +394,9 @@ export async function buildModelsList(kindFilter, options = {}) {
     };
     if (combo.kind === "webSearch" || combo.kind === "webFetch") {
       entry.kind = combo.kind;
+    } else {
+      const comboCaps = aggregateComboCapabilities(combo.models, comboByName);
+      if (comboCaps) entry.capabilities = comboCaps;
     }
     models.push(entry);
   }
@@ -405,6 +418,7 @@ export async function buildModelsList(kindFilter, options = {}) {
           id: `${alias}/${model.id}`,
           object: "model",
           owned_by: alias,
+          capabilities: getCapabilitiesForModel(alias, model.id),
         });
       }
     }
@@ -532,13 +546,13 @@ export async function buildModelsList(kindFilter, options = {}) {
         const fullModelId = `${outputAlias}/${modelId}`;
         const aliasKey = fullModelToAlias[fullModelId];
 
-        // Live-catalog resolvers mostly only return { id, name } — no per-model
-        // capability data. Fall back to the same pattern-matched capabilities
-        // the dashboard uses so dynamically-discovered LLM models still surface
-        // vision/reasoning/search/tools.
-        const caps = liveCapabilitiesById.get(modelId)
-          || capabilitiesFromServiceKind(customKind || liveKind)
-          || (kind === LLM_KIND ? getCapabilitiesForModel(providerId, modelId) : null);
+        // Live-catalog resolvers (kiro/qoder/github/clinepass) mostly only return
+        // { id, name } — no per-model capability data. Fall back to the same
+        // pattern-matched capabilities the dashboard uses (useModelCaps.js) so
+        // dynamically-discovered LLM models still surface vision/reasoning/search/tools.
+        const liveCaps = liveCapabilitiesById.get(modelId);
+        const serviceCaps = capabilitiesFromServiceKind(customKind || liveKind);
+        const caps = liveCaps || serviceCaps || (kind === LLM_KIND ? getCapabilitiesForModel(providerId, modelId) : null);
 
         // Always emit the original model entry
         const originalModel = {

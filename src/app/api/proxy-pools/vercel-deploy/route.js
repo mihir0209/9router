@@ -20,22 +20,18 @@ export default async function handler(req) {
 
   const targetUrl = target.replace(/\\/$/, "") + relayPath;
 
-  const headers = new Headers(req.headers);
-  headers.delete("x-relay-target");
-  headers.delete("x-relay-path");
-  headers.delete("host");
+  const rawHeaders = {};
+  for (const [k, v] of req.headers.entries()) rawHeaders[k] = v;
+  delete rawHeaders["x-relay-target"];
+  delete rawHeaders["x-relay-path"];
+  delete rawHeaders["host"];
 
-  const hasBody = req.method !== "GET" && req.method !== "HEAD";
-  const fetchOpts = {
+  const response = await fetch(targetUrl, {
     method: req.method,
-    headers,
-  };
-  if (hasBody) {
-    fetchOpts.body = req.body;
-    fetchOpts.duplex = "half";
-  }
-
-  const response = await fetch(targetUrl, fetchOpts);
+    headers: rawHeaders,
+    body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
+    duplex: "half",
+  });
 
   return new Response(response.body, {
     status: response.status,
