@@ -77,7 +77,11 @@ export async function PUT(request, { params }) {
       updateData.byokCredsEncVersion = null;
     }
     const updated = await updateApiKey(id, updateData);
-    void appendAuditEvent({ actor: "admin-token", action: "api_key.updated", resourceType: "api_key", resourceId: id, ownerRef: owner.value, requestId: request.headers.get("x-request-id"), sourceIp: trustedClientIp(request), before: serializeAdminKey(existing), after: serializeAdminKey(updated) }).catch(() => {});
+    try {
+      await appendAuditEvent({ actor: "admin-token", action: "api_key.updated", resourceType: "api_key", resourceId: id, ownerRef: owner.value, requestId: request.headers.get("x-request-id"), sourceIp: trustedClientIp(request), before: serializeAdminKey(existing), after: serializeAdminKey(updated) });
+    } catch (error) {
+      console.error("AUDIT_WRITE_FAILED", error?.message || error);
+    }
     return NextResponse.json(serializeAdminKey(updated));
   } catch (error) {
     if (error?.code === "DUPLICATE_API_KEY") return NextResponse.json({ error: "API key already in use" }, { status: 409 });
@@ -94,6 +98,12 @@ export async function DELETE(request, { params }) {
   const existing = await findOwnedKey(id, owner.value);
   if (!existing) return notFound();
     const deleted = await deleteApiKey(id);
-    if (deleted) void appendAuditEvent({ actor: "admin-token", action: "api_key.deleted", resourceType: "api_key", resourceId: id, ownerRef: owner.value, requestId: request.headers.get("x-request-id"), sourceIp: trustedClientIp(request), before: serializeAdminKey(existing) }).catch(() => {});
+    if (deleted) {
+      try {
+        await appendAuditEvent({ actor: "admin-token", action: "api_key.deleted", resourceType: "api_key", resourceId: id, ownerRef: owner.value, requestId: request.headers.get("x-request-id"), sourceIp: trustedClientIp(request), before: serializeAdminKey(existing) });
+      } catch (error) {
+        console.error("AUDIT_WRITE_FAILED", error?.message || error);
+      }
+    }
     return deleted ? NextResponse.json({ message: "Key deleted successfully" }) : notFound();
 }

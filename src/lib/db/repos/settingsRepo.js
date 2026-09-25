@@ -124,21 +124,46 @@ const DEFAULT_SETTINGS = {
 };
 
 const SETTINGS_CACHE_TTL_MS = 5 * 60 * 1000;
+const CONTROL_DOMAIN = "settings";
 
 if (!global._settingsRepoCache) {
-  global._settingsRepoCache = { data: null, ts: 0 };
+  global._settingsRepoCache = { data: null, ts: 0, version: null };
 }
 const settingsRepoCache = global._settingsRepoCache;
 
 export function resetSettingsCache() {
   settingsRepoCache.data = null;
   settingsRepoCache.ts = 0;
+  settingsRepoCache.version = null;
+}
+
+/**
+ * Drop the cached settings when another isolate has written since we last
+ * looked. Without this a kill switch or provider block is invisible to other
+ * Workers isolates for the full cache TTL.
+ */
+async function invalidateIfStale() {
+  if (!settingsRepoCache.data) return;
+  const { getControlVersion } = await import("@/lib/coordinator/controlVersion.js");
+  const version = await getControlVersion(CONTROL_DOMAIN);
+  if (version == null) return;
+  if (settingsRepoCache.version == null) {
+    settingsRepoCache.version = version;
+    return;
+  }
+  if (version !== settingsRepoCache.version) resetSettingsCache();
 }
 
 async function readRaw() {
   const now = Date.now();
-  if (settingsRepoCache.data && (now - settingsRepoCache.ts < SETTINGS_CACHE_TTL_MS)) {
-    return { ...settingsRepoCache.data };
+  const fresh = settingsRepoCache.data && (now - settingsRepoCache.ts < SETTINGS_CACHE_TTL_MS);
+  if (fresh) {
+    // Throttled to one Durable Object call per interval, so this is a memoized
+    // read on the hot path and only occasionally a subrequest.
+    await invalidateIfStale();
+    if (settingsRepoCache.data && (Date.now() - settingsRepoCache.ts < SETTINGS_CACHE_TTL_MS)) {
+      return { ...settingsRepoCache.data };
+    }
   }
   const db = await getAdapter();
   if (typeof db.resync === "function") {
@@ -148,6 +173,8 @@ async function readRaw() {
   const data = row ? parseJson(row.data, {}) : {};
   settingsRepoCache.data = data;
   settingsRepoCache.ts = now;
+  const { getControlVersion } = await import("@/lib/coordinator/controlVersion.js");
+  settingsRepoCache.version = await getControlVersion(CONTROL_DOMAIN);
   return { ...data };
 }
 
@@ -199,6 +226,8 @@ export async function updateSettings(updates) {
     );
   });
   resetSettingsCache();
+  const { bumpControlVersion } = await import("@/lib/coordinator/controlVersion.js");
+  await bumpControlVersion(CONTROL_DOMAIN);
   return mergeWithDefaults(next);
 }
 

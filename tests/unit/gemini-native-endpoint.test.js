@@ -7,6 +7,15 @@ const mocks = vi.hoisted(() => ({
   getProviderCredentials: vi.fn(),
   markAccountUnavailable: vi.fn(),
   clearAccountError: vi.fn(),
+  extractApiKey: vi.fn((request) => {
+    const auth = request?.headers?.get("Authorization");
+    if (auth?.startsWith("Bearer ")) return auth.slice(7);
+    const key = request?.headers?.get("x-goog-api-key");
+    if (key) return key;
+    return request?.url ? new URL(request.url).searchParams.get("key") : null;
+  }),
+  getProviderConnections: vi.fn().mockResolvedValue([{ provider: "gemini", isActive: true }]),
+  getApiKeyByKey: vi.fn(async (key) => (key ? { id: "gemini-test-key", key, isActive: true } : null)),
 }));
 
 vi.mock("@/sse/handlers/chat.js", () => ({
@@ -18,10 +27,13 @@ vi.mock("@/sse/services/auth.js", () => ({
   isValidApiKey: mocks.isValidApiKey,
   markAccountUnavailable: mocks.markAccountUnavailable,
   clearAccountError: mocks.clearAccountError,
+  extractApiKey: mocks.extractApiKey,
 }));
 
 vi.mock("@/lib/localDb", () => ({
   getSettings: mocks.getSettings,
+  getProviderConnections: mocks.getProviderConnections,
+  getApiKeyByKey: mocks.getApiKeyByKey,
 }));
 
 const { GET } = await import("../../src/app/api/v1beta/models/route.js");

@@ -25,7 +25,13 @@ async function rotate(request, { params }) {
   const existing = await getApiKeyById(id);
   if (!existing || existing.ownerRef !== owner.value) return NextResponse.json({ error: "Key not found" }, { status: 404 });
   const key = await regenerateApiKey(id);
-  if (key) void appendAuditEvent({ actor: "admin-token", action: "api_key.rotated", resourceType: "api_key", resourceId: id, ownerRef: owner.value, requestId: request.headers.get("x-request-id"), sourceIp: trustedClientIp(request), metadata: { regenerateVersion: key.regenerateVersion } }).catch(() => {});
+  if (key) {
+    try {
+      await appendAuditEvent({ actor: "admin-token", action: "api_key.rotated", resourceType: "api_key", resourceId: id, ownerRef: owner.value, requestId: request.headers.get("x-request-id"), sourceIp: trustedClientIp(request), metadata: { regenerateVersion: key.regenerateVersion } });
+    } catch (error) {
+      console.error("AUDIT_WRITE_FAILED", error?.message || error);
+    }
+  }
   return key ? NextResponse.json(serializeAdminKey(key, { includeSecret: true })) : NextResponse.json({ error: "Key not found" }, { status: 404 });
 }
 

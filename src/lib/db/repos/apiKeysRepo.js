@@ -55,9 +55,10 @@ function rowToKey(row) {
 }
 
 const API_KEYS_CACHE_TTL_MS = 5 * 60 * 1000;
+const CONTROL_DOMAIN = "apiKeys";
 
 if (!global._apiKeysRepoCache) {
-  global._apiKeysRepoCache = { byKey: new Map(), byId: new Map(), list: null, ts: 0 };
+  global._apiKeysRepoCache = { byKey: new Map(), byId: new Map(), list: null, ts: 0, version: null };
 }
 const apiKeyCache = global._apiKeysRepoCache;
 
@@ -66,6 +67,39 @@ export function resetApiKeysCache() {
   apiKeyCache.byId.clear();
   apiKeyCache.list = null;
   apiKeyCache.ts = 0;
+  apiKeyCache.version = null;
+}
+
+/**
+ * Drop cached keys when another isolate created, updated, disabled or rotated
+ * one. Without this a revoked key keeps authenticating on every other Workers
+ * isolate for the full cache TTL.
+ */
+async function invalidateIfStale() {
+  if (!apiKeyCache.byKey.size && !apiKeyCache.byId.size) return;
+  const { getControlVersion } = await import("@/lib/coordinator/controlVersion.js");
+  const version = await getControlVersion(CONTROL_DOMAIN);
+  if (version == null) return;
+  if (apiKeyCache.version == null) {
+    apiKeyCache.version = version;
+    return;
+  }
+  if (version !== apiKeyCache.version) resetApiKeysCache();
+}
+
+async function noteControlVersion() {
+  const { getControlVersion } = await import("@/lib/coordinator/controlVersion.js");
+  apiKeyCache.version = await getControlVersion(CONTROL_DOMAIN);
+}
+
+/**
+ * Publish a key change so other isolates drop their cached copy. Awaited: an
+ * admin rotation that is not announced leaves the old key usable elsewhere.
+ */
+async function publishControlVersion() {
+  resetApiKeysCache();
+  const { bumpControlVersion } = await import("@/lib/coordinator/controlVersion.js");
+  await bumpControlVersion(CONTROL_DOMAIN);
 }
 
 export async function getApiKeys(ownerRef) {
@@ -78,6 +112,7 @@ export async function getApiKeys(ownerRef) {
 
 export async function getApiKeyById(id) {
   if (!id) return null;
+  await invalidateIfStale();
   const now = Date.now();
   if (apiKeyCache.byId.has(id) && (now - apiKeyCache.ts < API_KEYS_CACHE_TTL_MS)) {
     const k = apiKeyCache.byId.get(id);
@@ -97,12 +132,14 @@ export async function getApiKeyById(id) {
   if (parsed) {
     apiKeyCache.byId.set(id, parsed);
     apiKeyCache.byKey.set(parsed.key, parsed);
+    await noteControlVersion();
   }
   return parsed ? { ...parsed } : null;
 }
 
 export async function getApiKeyByKey(key) {
   if (!key) return null;
+  await invalidateIfStale();
   const now = Date.now();
   if (apiKeyCache.byKey.has(key) && (now - apiKeyCache.ts < API_KEYS_CACHE_TTL_MS)) {
     const k = apiKeyCache.byKey.get(key);
@@ -122,6 +159,7 @@ export async function getApiKeyByKey(key) {
   if (parsed) {
     apiKeyCache.byKey.set(key, parsed);
     apiKeyCache.byId.set(parsed.id, parsed);
+    await noteControlVersion();
   }
   return parsed ? { ...parsed } : null;
 }
@@ -182,7 +220,7 @@ export async function createApiKey(name, machineId, options = {}) {
     `INSERT INTO apiKeys(${API_KEY_FIELDS.join(", ")}) VALUES(${API_KEY_FIELDS.map(() => "?").join(", ")})`,
     API_KEY_FIELDS.map(f => f === "isActive" ? (apiKey[f] ? 1 : 0) : apiKey[f])
   );
-  resetApiKeysCache();
+  await publishControlVersion();
   return apiKey;
 }
 
@@ -208,21 +246,28 @@ export async function updateApiKey(id, data) {
       data = { ...data };
       delete data.key;
     }
-    const merged = { ...existing, ...data, updatedAt: new Date().toISOString() };
-    if (data.metadata !== undefined) merged.metadata = typeof data.metadata === "string" ? data.metadata : JSON.stringify(data.metadata || {});
-    const updateFields = API_KEY_FIELDS.filter(f => f !== "id");
+
+    // Write only the columns the caller actually supplied. Rewriting the whole
+    // row from a pre-read snapshot would resurrect values that changed in the
+    // meantime — most dangerously, an `updateApiKey({description})` landing
+    // after a rotation would write the pre-rotation key straight back.
+    const now = new Date().toISOString();
+    const assigned = API_KEY_FIELDS.filter((field) => field !== "id" && field !== "updatedAt" && data[field] !== undefined);
+    const columns = [...assigned, "updatedAt"];
+
     db.run(
-      `UPDATE apiKeys SET ${updateFields.map(f => `${f} = ?`).join(", ")} WHERE id = ?`,
-      [...updateFields.map(f => {
-        if (f === "isActive") return merged[f] ? 1 : 0;
-        if (f === "metadata") return typeof merged[f] === "string" ? merged[f] : JSON.stringify(merged[f] || {});
-        return merged[f];
+      `UPDATE apiKeys SET ${columns.map((f) => `${f} = ?`).join(", ")} WHERE id = ?`,
+      [...columns.map((f) => {
+        if (f === "updatedAt") return now;
+        if (f === "isActive") return data[f] ? 1 : 0;
+        if (f === "metadata") return typeof data[f] === "string" ? data[f] : JSON.stringify(data[f] || {});
+        return data[f];
       }), id]
     );
 
-    result = merged;
+    result = rowToKey(db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]));
   });
-  resetApiKeysCache();
+  await publishControlVersion();
   return result;
 }
 
@@ -242,7 +287,7 @@ export async function regenerateApiKey(id) {
     result = rowToKey(db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]));
   });
 
-  resetApiKeysCache();
+  await publishControlVersion();
   return result;
 }
 
@@ -250,7 +295,7 @@ export async function deleteApiKey(id) {
   const db = await getAdapter();
   const res = db.run(`DELETE FROM apiKeys WHERE id = ?`, [id]);
   const deleted = (res?.changes ?? 0) > 0;
-  if (deleted) resetApiKeysCache();
+  if (deleted) await publishControlVersion();
   return deleted;
 }
 

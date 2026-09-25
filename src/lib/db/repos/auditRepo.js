@@ -48,7 +48,7 @@ export async function appendAuditEvent(event) {
     after: truncate(event.after),
     metadata: truncate(event.metadata || {}),
   };
-  db.run(
+  await db.run(
     `INSERT INTO auditLog(id, timestamp, actor, action, resourceType, resourceId, ownerRef, requestId, sourceIp, outcome, before, after, metadata) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [row.id, row.timestamp, row.actor, row.action, row.resourceType, row.resourceId, row.ownerRef, row.requestId, row.sourceIp, row.outcome, row.before == null ? null : stringifyJson(row.before), row.after == null ? null : stringifyJson(row.after), stringifyJson(row.metadata)]
   );
@@ -69,5 +69,6 @@ export async function listAuditEvents({ ownerRef, action, limit = 100 } = {}) {
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const bounded = Math.max(1, Math.min(Number(limit) || 100, 500));
-  return db.all(`SELECT * FROM auditLog ${where} ORDER BY timestamp DESC LIMIT ${bounded}`, params).map(rowToAudit);
+  const rows = await db.all(`SELECT * FROM auditLog ${where} ORDER BY timestamp DESC LIMIT ${bounded}`, params);
+  return rows.map(rowToAudit);
 }

@@ -125,7 +125,7 @@ ${schemaJson}
 \`\`\`
 Respond ONLY with the JSON object, no other text or markdown codeblocks (do not wrap in \`\`\`json).`);
     } else if (responseFormat.type === "json_object") {
-      systemParts.push("You must respond with valid JSON. Respond ONLY with a raw JSON object, no other text or markdown codeblocks.");
+      systemParts.push("You must respond with valid JSON. Respond ONLY with a JSON object, no other text or markdown codeblocks.");
     }
   }
 
@@ -253,6 +253,13 @@ function getContentBlocksFromMessage(msg, toolNameMap = new Map()) {
       }
     }
   } else if (msg.role === ROLE.ASSISTANT) {
+    if (msg.reasoning_content || msg.reasoning) {
+      blocks.push({
+        type: CLAUDE_BLOCK.THINKING,
+        thinking: msg.reasoning_content || msg.reasoning,
+        signature: msg.reasoning_signature || undefined,
+      });
+    }
     if (Array.isArray(msg.content)) {
       for (const part of msg.content) {
         if (part.type === OPENAI_BLOCK.TEXT && part.text) {

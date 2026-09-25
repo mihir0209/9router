@@ -23,11 +23,29 @@ describe("gateway coordinator memory fallback", () => {
 
   it("shares provider locks and clears expired locks", () => {
     __test__.memoryCall("setLock", { provider: "openai", connectionId: "account-1", model: "gpt-5", untilMs: 4_000, status: 429, reason: "quota" });
-    expect(__test__.memoryCall("getActiveLocks", { provider: "openai", connectionIds: ["account-1"], model: "gpt-5", now: 3_000 })).toHaveLength(1);
-    expect(__test__.memoryCall("getActiveLocks", { provider: "openai", connectionIds: ["account-1"], model: "gpt-5", now: 5_000 })).toHaveLength(0);
+    expect(__test__.memoryCall("getActiveLocks", { provider: "openai", connectionIds: ["account-1"], model: "gpt-5", now: 3_000 }).locks).toHaveLength(1);
+    expect(__test__.memoryCall("getActiveLocks", { provider: "openai", connectionIds: ["account-1"], model: "gpt-5", now: 5_000 }).locks).toHaveLength(0);
     __test__.memoryCall("setLock", { provider: "openai", connectionId: "account-1", model: "gpt-5", untilMs: 6_000 });
     __test__.memoryCall("clearLock", { provider: "openai", connectionId: "account-1", model: "gpt-5" });
-    expect(__test__.memoryCall("getActiveLocks", { provider: "openai", connectionIds: ["account-1"], model: "gpt-5", now: 5_500 })).toHaveLength(0);
+    expect(__test__.memoryCall("getActiveLocks", { provider: "openai", connectionIds: ["account-1"], model: "gpt-5", now: 5_500 }).locks).toHaveLength(0);
+  });
+
+  it("does not clear a lock that is newer than the caller's observation", () => {
+    const observed = __test__.memoryCall("getActiveLocks", { provider: "openai", connectionIds: ["account-1"], model: "gpt-5", now: 1_000 });
+    expect(observed.locks).toHaveLength(0);
+
+    // A failure lands after this request had already selected the account.
+    __test__.memoryCall("setLock", { provider: "openai", connectionId: "account-1", model: "gpt-5", untilMs: 9_000, status: 429 });
+
+    const stale = __test__.memoryCall("clearLock", { provider: "openai", connectionId: "account-1", model: "gpt-5", expectedGeneration: observed.generation });
+    expect(stale).toMatchObject({ cleared: false, reason: "newer_lock" });
+    expect(__test__.memoryCall("getActiveLocks", { provider: "openai", connectionIds: ["account-1"], model: "gpt-5", now: 2_000 }).locks).toHaveLength(1);
+
+    // A caller that did observe the lock may clear it.
+    const fresh = __test__.memoryCall("getActiveLocks", { provider: "openai", connectionIds: ["account-1"], model: "gpt-5", now: 2_000 });
+    expect(__test__.memoryCall("clearLock", { provider: "openai", connectionId: "account-1", model: "gpt-5", expectedGeneration: fresh.generation }))
+      .toEqual({ cleared: true });
+    expect(__test__.memoryCall("getActiveLocks", { provider: "openai", connectionIds: ["account-1"], model: "gpt-5", now: 2_000 }).locks).toHaveLength(0);
   });
 
   it("records outcomes and ranks observed providers adaptively", async () => {

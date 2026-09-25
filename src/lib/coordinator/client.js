@@ -42,9 +42,18 @@ function memoryCall(method, payload = {}) {
     const active = current.filter((lease) => lease.expiresAt > now);
     if (active.length >= payload.maxConcurrent) return { allowed: false, active: active.length, leaseId: null };
     const leaseId = crypto.randomUUID();
-    active.push({ leaseId, expiresAt: now + 120_000 });
+    const ttlMs = Number(payload.ttlMs) > 0 ? Number(payload.ttlMs) : 120_000;
+    active.push({ leaseId, expiresAt: now + ttlMs });
     state.active.set(payload.keyId, active);
     return { allowed: true, active: active.length, leaseId };
+  }
+  if (method === "renewRequest") {
+    const current = state.active.get(payload.keyId) || [];
+    const target = current.find((lease) => lease.leaseId === payload.leaseId);
+    if (!target || target.expiresAt <= now) return { renewed: false, active: current.filter((lease) => lease.expiresAt > now).length };
+    target.expiresAt = now + (Number(payload.ttlMs) > 0 ? Number(payload.ttlMs) : 120_000);
+    state.active.set(payload.keyId, current);
+    return { renewed: true, active: current.length };
   }
   if (method === "endRequest") {
     const active = (state.active.get(payload.keyId) || []).filter((lease) => lease.leaseId !== payload.leaseId);
@@ -53,21 +62,31 @@ function memoryCall(method, payload = {}) {
   }
   if (method === "setLock") {
     const key = `${payload.provider}:${payload.connectionId}:${payload.model || "*"}`;
-    state.locks.set(key, { untilMs: payload.untilMs, status: payload.status, reason: payload.reason });
-    return { locked: true, untilMs: payload.untilMs };
+    const current = state.locks.get(key);
+    const generation = Math.max(Number(current?.generation || 0), Number(state.locks.get(`gen:${payload.provider}`)?.generation || 0)) + 1;
+    state.locks.set(`gen:${payload.provider}`, { generation });
+    state.locks.set(key, { untilMs: payload.untilMs, status: payload.status, reason: payload.reason, generation, setAt: now });
+    return { locked: true, untilMs: payload.untilMs, generation };
   }
   if (method === "clearLock") {
-    state.locks.delete(`${payload.provider}:${payload.connectionId}:${payload.model || "*"}`);
+    const key = `${payload.provider}:${payload.connectionId}:${payload.model || "*"}`;
+    const existing = state.locks.get(key);
+    if (payload.expectedGeneration != null && existing && Number(existing.generation || 0) > Number(payload.expectedGeneration)) {
+      return { cleared: false, reason: "newer_lock", generation: existing.generation };
+    }
+    state.locks.delete(key);
     return { cleared: true };
   }
   if (method === "getActiveLocks") {
-    return payload.connectionIds.flatMap((connectionId) => {
+    const generation = Number(state.locks.get(`gen:${payload.provider}`)?.generation) || 0;
+    const locks = payload.connectionIds.flatMap((connectionId) => {
       for (const model of [payload.model, "*"].filter(Boolean)) {
         const lock = state.locks.get(`${payload.provider}:${connectionId}:${model}`);
         if (lock && lock.untilMs > now) return [{ connectionId, ...lock }];
       }
       return [];
     });
+    return { locks, generation };
   }
   if (method === "recordOutcome") {
     const key = `${payload.provider}:${payload.connectionId}:${payload.model}`;

@@ -39,6 +39,10 @@ export async function PUT(request) {
   if (result.error) return NextResponse.json({ error: result.error }, { status: 400 });
   const before = settings.gatewayControl || {};
   await updateSettings({ gatewayControl: result.control });
-  await appendAuditEvent({ actor: "admin-token", action: "gateway_control.updated", resourceType: "gateway", resourceId: "global", requestId: request.headers.get("x-request-id"), sourceIp: trustedClientIp(request), before, after: result.control });
+  try {
+    await appendAuditEvent({ actor: "admin-token", action: "gateway_control.updated", resourceType: "gateway", resourceId: "global", requestId: request.headers.get("x-request-id"), sourceIp: trustedClientIp(request), before, after: result.control });
+  } catch (error) {
+    console.error("AUDIT_WRITE_FAILED", error?.message || error);
+  }
   return NextResponse.json({ gatewayControl: result.control });
 }

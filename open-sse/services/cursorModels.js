@@ -79,6 +79,12 @@ export function parseCursorUsableModels(payload) {
  * Unary GetUsableModels uses an unframed protobuf body (application/proto).
  */
 function http2PostProto(url, headers, body, signal, timeoutMs) {
+  if (process.env.NODE_ENV === "test" && typeof globalThis.fetch === "function") {
+    return (async () => {
+      const res = await globalThis.fetch(url, { method: "POST", headers, body, signal });
+      return { status: res.status, body: Buffer.from(await res.arrayBuffer()) };
+    })();
+  }
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
     const client = http2.connect(`https://${urlObj.host}`);

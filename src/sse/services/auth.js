@@ -199,7 +199,11 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const connLocked = (c) => isModelLockActive(c, model) || isExtremeModelLockActive(c.id, model);
 
     // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
-    const coordinatorLocks = await coordinatorCall("getActiveLocks", { provider: providerId, connectionIds: connections.map((entry) => entry.id), model }, `provider:${providerId}`);
+    const lockState = await coordinatorCall("getActiveLocks", { provider: providerId, connectionIds: connections.map((entry) => entry.id), model }, `provider:${providerId}`);
+    const coordinatorLocks = lockState?.locks || [];
+    // Generation observed at selection time. A success may only clear locks
+    // that existed then, so a failure landing mid-request is not wiped.
+    const observedLockGeneration = lockState?.generation ?? null;
     const coordinatorLockMap = new Map(coordinatorLocks.map((entry) => [entry.connectionId, entry]));
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
@@ -400,6 +404,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       lastError: connection.lastError,
       // Pass full connection for clearAccountError to read modelLock_* keys
       _connection: connection,
+      observedLockGeneration,
       onProviderOutcome: async (outcome) => {
         const payload = {
           provider: providerId,
@@ -533,7 +538,14 @@ export async function clearAccountError(connectionId, currentConnection, model =
   });
 
   const provider = currentConnection?.provider || conn?.provider;
-  if (provider) await coordinatorCall("clearLock", { provider: resolveProviderId(provider), connectionId, model: model || null }, `provider:${resolveProviderId(provider)}`).catch(() => {});
+  if (provider) {
+    await coordinatorCall("clearLock", {
+      provider: resolveProviderId(provider),
+      connectionId,
+      model: model || null,
+      expectedGeneration: currentConnection?.observedLockGeneration ?? null,
+    }, `provider:${resolveProviderId(provider)}`).catch(() => {});
+  }
   if (keysToClear.length === 0 && conn.testStatus !== "unavailable" && !conn.lastError) return;
 
   // Check if any active locks remain after clearing

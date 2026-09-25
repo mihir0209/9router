@@ -175,8 +175,9 @@ export function reorderByCapabilities(models, required, resolveMembers = null) {
   };
 
   // Stable sort by tier (Array.prototype.sort is stable in modern engines).
-  return models
-    .map((m, i) => ({ m, i, t: tierOf(m) }))
+  const ranked = models.map((m, i) => ({ m, i, t: tierOf(m) }));
+  if (ranked.length <= 1 || ranked.every((r) => r.t === ranked[0].t)) return models;
+  return ranked
     .sort((a, b) => a.t - b.t || a.i - b.i)
     .map((x) => x.m);
 }
@@ -289,7 +290,14 @@ export function detectRequiredCapabilities(body) {
   const contents = body.contents || body.request?.contents;                      // gemini / antigravity
   for (const c of trailingUserItems(contents)) scanContent(c.parts);
 
-  // search: temporarily disabled in auto-switch (feature not wired yet).
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) {
+      if (tool?.type === "web_search" || tool?.type === "search" || tool?.function?.name === "web_search") {
+        required.add("search");
+        break;
+      }
+    }
+  }
 
   return required;
 }

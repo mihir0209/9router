@@ -36,6 +36,20 @@ export class GatewayCoordinator extends DurableObject {
     return { allowed: true, active: active.length, leaseId };
   }
 
+  async renewRequest({ keyId, leaseId, ttlMs = 120_000, now = Date.now() }) {
+    const key = `active:${keyId}`;
+    const current = await this.ctx.storage.get(key);
+    const leases = current?.leases || [];
+    const lease = leases.find((entry) => entry.leaseId === leaseId);
+    const live = leases.filter((entry) => entry.expiresAt > now).length;
+    // An already-expired lease is presumed abandoned: its slot may since have
+    // been handed to another request, so resurrecting it would double-count.
+    if (!lease || lease.expiresAt <= now) return { renewed: false, active: live };
+    lease.expiresAt = now + ttlMs;
+    await this.ctx.storage.put(key, { leases });
+    return { renewed: true, active: live, expiresAt: lease.expiresAt };
+  }
+
   async endRequest({ keyId, leaseId }) {
     const key = `active:${keyId}`;
     const current = await this.ctx.storage.get(key);
@@ -45,26 +59,37 @@ export class GatewayCoordinator extends DurableObject {
     return { active: active.length };
   }
 
-  async setLock({ provider, connectionId, model, untilMs, status, reason }) {
-    const keys = [model ? `lock:${provider}:${connectionId}:${model}` : `lock:${provider}:${connectionId}:*`];
-    await Promise.all(keys.map((key) => this.ctx.storage.put(key, { untilMs, status, reason })));
-    return { locked: true, untilMs };
+  async setLock({ provider, connectionId, model, untilMs, status, reason, now = Date.now() }) {
+    const key = `lockgen:${provider}`;
+    const generation = (Number(await this.ctx.storage.get(key)) || 0) + 1;
+    await this.ctx.storage.put(key, generation);
+    const lockKey = model ? `lock:${provider}:${connectionId}:${model}` : `lock:${provider}:${connectionId}:*`;
+    const payload = { untilMs, status, reason, generation, setAt: now };
+    await this.ctx.storage.put(lockKey, payload);
+    return { locked: true, untilMs, generation };
   }
 
-  async clearLock({ provider, connectionId, model }) {
-    const key = model ? `lock:${provider}:${connectionId}:${model}` : `lock:${provider}:${connectionId}:*`;
-    await this.ctx.storage.delete(key);
+  async clearLock({ provider, connectionId, model, expectedGeneration }) {
+    const lockKey = model ? `lock:${provider}:${connectionId}:${model}` : `lock:${provider}:${connectionId}:*`;
+    const existing = await this.ctx.storage.get(lockKey);
+    // A success may only clear a lock it actually observed. A failure that
+    // landed after this request started is newer evidence and must survive.
+    if (expectedGeneration != null && existing && Number(existing.generation || 0) > Number(expectedGeneration)) {
+      return { cleared: false, reason: "newer_lock", generation: existing.generation };
+    }
+    await this.ctx.storage.delete(lockKey);
     return { cleared: true };
   }
 
   async getActiveLocks({ provider, connectionIds, model, now = Date.now() }) {
-    const entries = await Promise.all(connectionIds.map(async (connectionId) => {
+    const generation = Number(await this.ctx.storage.get(`lockgen:${provider}`)) || 0;
+    const locks = await Promise.all(connectionIds.map(async (connectionId) => {
       const keys = [model, "*"].filter(Boolean);
-      const locks = await Promise.all(keys.map((lockModel) => this.ctx.storage.get(`lock:${provider}:${connectionId}:${lockModel}`)));
-      const active = locks.find((lock) => lock && lock.untilMs > now);
-      return active ? { connectionId, untilMs: active.untilMs, status: active.status, reason: active.reason } : null;
+      const found = await Promise.all(keys.map((lockModel) => this.ctx.storage.get(`lock:${provider}:${connectionId}:${lockModel}`)));
+      const active = found.find((lock) => lock && lock.untilMs > now);
+      return active ? { connectionId, untilMs: active.untilMs, status: active.status, reason: active.reason, generation: active.generation, setAt: active.setAt } : null;
     }));
-    return entries.filter(Boolean);
+    return { locks: locks.filter(Boolean), generation };
   }
 
   async recordOutcome({ provider, connectionId, model, success, latencyMs, status, costUsd = 0, now = Date.now() }) {
@@ -136,6 +161,97 @@ export class GatewayCoordinator extends DurableObject {
   async getBudgetReservations({ keyId, now = Date.now() }) {
     const current = await this.ctx.storage.get(`budget:${keyId}`);
     return (current?.reservations || []).filter((entry) => entry.expiresAt > now);
+  }
+
+  async bumpVersion({ domain }) {
+    const key = `version:${domain}`;
+    const current = Number(await this.ctx.storage.get(key)) || 0;
+    const next = current + 1;
+    await this.ctx.storage.put(key, next);
+    return { version: next };
+  }
+
+  async getVersion({ domain }) {
+    return { version: Number(await this.ctx.storage.get(`version:${domain}`)) || 0 };
+  }
+
+  async recordMetrics({ outcome }) {
+    const now = Number(outcome?.now) || Date.now();
+    if (!outcome?.provider) return { recorded: false };
+    const key = `metrics:outcome:${outcome.provider}:${outcome.connectionId}:${outcome.model}`;
+    const previous = await this.ctx.storage.get(key);
+    const current = previous || {
+      provider: outcome.provider,
+      connectionId: outcome.connectionId,
+      model: outcome.model,
+      successes: 0,
+      failures: 0,
+      consecutiveFailures: 0,
+      lastStatus: 0,
+      lastLatencyMs: 0,
+      updatedAt: now,
+    };
+    current.successes += outcome.success ? 1 : 0;
+    current.failures += outcome.success ? 0 : 1;
+    current.consecutiveFailures = outcome.success ? 0 : current.consecutiveFailures + 1;
+    current.lastStatus = Number(outcome.status) || 0;
+    if (Number.isFinite(outcome.latencyMs)) current.lastLatencyMs = Math.max(Number(outcome.latencyMs), 0);
+    current.updatedAt = now;
+    await this.ctx.storage.put(key, current);
+
+    const totalsKey = "metrics:totals";
+    const totals = await this.ctx.storage.get(totalsKey);
+    const next = totals || { startedAt: now, requests: 0, successes: 0, failures: 0, latencyCount: 0, latencySumMs: 0, latencyMaxMs: 0 };
+    next.requests += 1;
+    if (outcome.success) next.successes += 1;
+    else next.failures += 1;
+    if (Number.isFinite(outcome.latencyMs)) {
+      const latency = Math.max(Number(outcome.latencyMs), 0);
+      next.latencyCount += 1;
+      next.latencySumMs += latency;
+      next.latencyMaxMs = Math.max(next.latencyMaxMs, latency);
+    }
+    await this.ctx.storage.put(totalsKey, next);
+    return { recorded: true };
+  }
+
+  async getMetrics() {
+    const all = await this.ctx.storage.list({ prefix: "metrics:" });
+    const providers = [];
+    let totals = null;
+    for (const [key, value] of all.entries()) {
+      if (key === "metrics:totals") totals = value;
+      else if (key.startsWith("metrics:outcome:")) providers.push(value);
+    }
+    const latency = {
+      count: totals?.latencyCount || 0,
+      sumMs: totals?.latencySumMs || 0,
+      maxMs: totals?.latencyMaxMs || 0,
+      averageMs: totals?.latencyCount ? totals.latencySumMs / totals.latencyCount : 0,
+    };
+    const alerts = providers
+      .filter((entry) => entry.consecutiveFailures >= 3 || (entry.successes + entry.failures >= 5 && entry.failures / (entry.successes + entry.failures) >= 0.5))
+      .map((entry) => ({
+        fingerprint: `${entry.provider}:${entry.connectionId}:${entry.model}`,
+        severity: entry.consecutiveFailures >= 5 ? "critical" : "warning",
+        type: "provider_degraded",
+        provider: entry.provider,
+        model: entry.model,
+        connectionId: entry.connectionId,
+        consecutiveFailures: entry.consecutiveFailures,
+        observedAt: entry.updatedAt,
+      }));
+    return {
+      startedAt: totals?.startedAt || Date.now(),
+      counters: [
+        { name: "provider_requests_total", labels: {}, value: totals?.requests || 0 },
+        { name: "provider_success_total", labels: {}, value: totals?.successes || 0 },
+        { name: "provider_failure_total", labels: {}, value: totals?.failures || 0 },
+      ],
+      providers,
+      latency,
+      alerts,
+    };
   }
 
   async snapshot() {

@@ -2,11 +2,10 @@ import { handleChat } from "@/sse/handlers/chat.js";
 import {
   clearAccountError,
   getProviderCredentials,
-  credentialsErrorResponse,
-  byokUpstreamErrorResponse,
   isValidApiKey,
   markAccountUnavailable,
 } from "@/sse/services/auth.js";
+import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 import { validateAndEnforceApiKey } from "@/sse/services/validateApiKey.js";
 import { getSettings } from "@/lib/localDb";
 import { PROVIDER_MODELS } from "@/shared/constants/models";

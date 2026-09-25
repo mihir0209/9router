@@ -51,7 +51,11 @@ export async function POST(request) {
     const machineId = requestedMachineId || await getConsistentMachineId();
     let apiKey = await createApiKey(name, machineId, { ...options, ownerRef, ...(key ? { key } : {}) });
     if (isActive === false) apiKey = { ...apiKey, ...(await updateApiKey(apiKey.id, { isActive: false })) };
-    void appendAuditEvent({ actor: "admin-token", action: "api_key.created", resourceType: "api_key", resourceId: apiKey.id, ownerRef, requestId: request.headers.get("x-request-id"), sourceIp: trustedClientIp(request), after: serializeAdminKey(apiKey) }).catch(() => {});
+    try {
+      await appendAuditEvent({ actor: "admin-token", action: "api_key.created", resourceType: "api_key", resourceId: apiKey.id, ownerRef, requestId: request.headers.get("x-request-id"), sourceIp: trustedClientIp(request), after: serializeAdminKey(apiKey) });
+    } catch (error) {
+      console.error("AUDIT_WRITE_FAILED", error?.message || error);
+    }
     return NextResponse.json(serializeAdminKey(apiKey, { includeSecret: true }), { status: 201 });
   } catch (error) {
     console.error("ADMIN_KEY_CREATE_FAILED", error?.stack || error?.message || error);

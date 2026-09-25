@@ -9,12 +9,49 @@ if (!global._gatewayMetrics) {
 }
 
 const state = global._gatewayMetrics;
+const METRICS_SCOPE = "metrics";
 
 function bump(name, amount = 1, labels = {}) {
   const key = `${name}|${JSON.stringify(labels, Object.keys(labels).sort())}`;
   const current = state.counters.get(key) || { name, labels, value: 0 };
   current.value += amount;
   state.counters.set(key, current);
+}
+
+function alertFor(outcome) {
+  const total = outcome.successes + outcome.failures;
+  if (outcome.consecutiveFailures < 3 && !(total >= 5 && outcome.failures / total >= 0.5)) return null;
+  return {
+    fingerprint: `${outcome.provider}:${outcome.connectionId}:${outcome.model}`,
+    severity: outcome.consecutiveFailures >= 5 ? "critical" : "warning",
+    type: "provider_degraded",
+    provider: outcome.provider,
+    model: outcome.model,
+    connectionId: outcome.connectionId,
+    consecutiveFailures: outcome.consecutiveFailures,
+    observedAt: outcome.updatedAt,
+  };
+}
+
+function trackAlert(alert, fingerprint) {
+  state.alerts = state.alerts.filter((entry) => entry.fingerprint !== fingerprint);
+  if (alert) state.alerts.push(alert);
+}
+
+/**
+ * Observability must never break traffic, so the Durable Object write is
+ * best-effort: on Workers the DO is the source of truth (every isolate
+ * aggregates into it), locally the in-process state is already authoritative.
+ */
+async function persistOutcome(outcome) {
+  if (process.env.NINEROUTER_RUNTIME !== "cloudflare") return false;
+  try {
+    const { coordinatorCall } = await import("@/lib/coordinator/client.js");
+    await coordinatorCall("recordMetrics", { outcome }, METRICS_SCOPE);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function recordMetric(name, amount = 1, labels = {}) {
@@ -38,20 +75,16 @@ export function recordRequestOutcome({ provider, connectionId, model, success, s
   current.lastLatencyMs = Number.isFinite(latencyMs) ? Math.max(Number(latencyMs), 0) : current.lastLatencyMs;
   current.updatedAt = Date.now();
   state.providerOutcomes.set(key, current);
-  const sample = { ...current };
-  state.alerts = state.alerts.filter((alert) => alert.fingerprint !== key);
-  if (current.consecutiveFailures >= 3 || (current.successes + current.failures >= 5 && current.failures / (current.successes + current.failures) >= 0.5)) {
-    state.alerts.push({
-      fingerprint: key,
-      severity: current.consecutiveFailures >= 5 ? "critical" : "warning",
-      type: "provider_degraded",
-      provider,
-      model,
-      connectionId,
-      consecutiveFailures: current.consecutiveFailures,
-      observedAt: current.updatedAt,
-    });
-  }
+  trackAlert(alertFor(current), key);
+  void persistOutcome({
+    provider,
+    connectionId,
+    model,
+    success: success === true,
+    status: Number(status) || 0,
+    latencyMs: Number.isFinite(latencyMs) ? Math.max(Number(latencyMs), 0) : null,
+    now: current.updatedAt,
+  });
 }
 
 export function snapshotMetrics() {
@@ -65,6 +98,35 @@ export function snapshotMetrics() {
   };
 }
 
+/**
+ * Cluster-wide snapshot. On Workers the Durable Object aggregates every
+ * isolate, so the local view alone would under-report; the DO view wins when
+ * reachable and the local view is the fallback.
+ */
+export async function getMetricsSnapshot() {
+  const local = snapshotMetrics();
+  if (process.env.NINEROUTER_RUNTIME !== "cloudflare") return local;
+  try {
+    const { coordinatorCall } = await import("@/lib/coordinator/client.js");
+    const durable = await coordinatorCall("getMetrics", {}, METRICS_SCOPE);
+    if (!durable) return local;
+    return {
+      startedAt: durable.startedAt || local.startedAt,
+      now: Date.now(),
+      counters: durable.counters?.length ? durable.counters : local.counters,
+      providers: durable.providers?.length ? durable.providers : local.providers,
+      latency: durable.latency?.count ? durable.latency : local.latency,
+      alerts: durable.alerts || [],
+    };
+  } catch {
+    return local;
+  }
+}
+
+export async function getAlerts() {
+  return (await getMetricsSnapshot()).alerts;
+}
+
 export function resetMetrics() {
   state.startedAt = Date.now();
   state.counters.clear();
@@ -74,7 +136,7 @@ export function resetMetrics() {
 }
 
 export function prometheusMetrics(snapshot = snapshotMetrics()) {
-  const escape = (value) => String(value ?? "").replace(/([\\"\\n])/g, "\\$1");
+  const escape = (value) => String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
   const lines = [];
   for (const counter of snapshot.counters) {
     const labels = Object.entries(counter.labels || {}).map(([key, value]) => `${key}="${escape(value)}"`).join(",");

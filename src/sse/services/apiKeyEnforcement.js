@@ -24,6 +24,27 @@ function parseList(str) {
   return str.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+// The coordinator expires a lease after LEASE_TTL_MS so a crashed isolate
+// cannot hold a slot forever. A legitimately long stream outlives that, so the
+// lease is renewed on a timer; releasing stops the timer and ends the lease.
+const LEASE_TTL_MS = 120_000;
+const LEASE_RENEW_MS = Math.floor(LEASE_TTL_MS / 3);
+
+function createLeaseRelease({ keyId, leaseId, scope }) {
+  let done = false;
+  const renew = setInterval(() => {
+    void coordinatorCall("renewRequest", { keyId, leaseId, ttlMs: LEASE_TTL_MS }, scope, { failClosed: true }).catch(() => {});
+  }, LEASE_RENEW_MS);
+  renew.unref?.();
+
+  return async () => {
+    if (done) return;
+    done = true;
+    clearInterval(renew);
+    await coordinatorCall("endRequest", { keyId, leaseId }, scope, { failClosed: true });
+  };
+}
+
 async function resolveRequestedModels(model, body) {
   const raw = String(model || body?.provider || "").trim();
   if (!raw) return { models: [], providers: [] };
@@ -88,16 +109,19 @@ export async function enforceApiKeyRestrictions(apiKey, request, body) {
     if (!result.allowed) return { allowed: false, error: `Rate limit exceeded. Max ${keyRecord.rateLimitRequests} requests per ${keyRecord.rateLimitWindowSeconds}s`, status: 429, retryAfter: Math.max(1, Math.ceil((result.resetAt - now) / 1000)) };
   }
 
-  let lease = null;
+  let release = null;
   if (keyRecord.maxConcurrentRequests > 0) {
-    const result = await coordinatorCall("beginRequest", { keyId: keyRecord.id, maxConcurrent: keyRecord.maxConcurrentRequests }, `tenant:${keyRecord.ownerRef || keyRecord.id}`, { failClosed: true });
+    const scope = `tenant:${keyRecord.ownerRef || keyRecord.id}`;
+    const result = await coordinatorCall("beginRequest", { keyId: keyRecord.id, maxConcurrent: keyRecord.maxConcurrentRequests }, scope, { failClosed: true });
     if (!result.allowed) return { allowed: false, error: "Concurrent request limit reached", status: 429, retryAfter: 2 };
-    lease = result.leaseId;
+    release = createLeaseRelease({ keyId: keyRecord.id, leaseId: result.leaseId, scope });
   }
+
+  const endLease = () => (release ? release() : Promise.resolve());
 
   const budget = await checkBudget(apiKey);
   if (budget.exceeded) {
-    if (lease) await coordinatorCall("endRequest", { keyId: keyRecord.id, leaseId: lease }, `tenant:${keyRecord.ownerRef || keyRecord.id}`, { failClosed: true });
+    await endLease();
     return { allowed: false, error: "Budget exceeded for workspace key. Add credits to continue.", status: 402, budget };
   }
 
@@ -105,12 +129,18 @@ export async function enforceApiKeyRestrictions(apiKey, request, body) {
   sinceDaily.setUTCHours(0, 0, 0, 0);
   if (keyRecord.tokenLimitDaily > 0) {
     const total = await getApiKeyTokenUsage(keyRecord.id, apiKey, sinceDaily);
-    if (total >= keyRecord.tokenLimitDaily) return { allowed: false, error: `Daily token limit reached (${keyRecord.tokenLimitDaily})`, status: 429, release: lease };
+    if (total >= keyRecord.tokenLimitDaily) {
+      await endLease();
+      return { allowed: false, error: `Daily token limit reached (${keyRecord.tokenLimitDaily})`, status: 429 };
+    }
   }
   if (keyRecord.tokenLimitMonthly > 0) {
     const total = await getApiKeyTokenUsage(keyRecord.id, apiKey, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
-    if (total >= keyRecord.tokenLimitMonthly) return { allowed: false, error: `Monthly token limit reached (${keyRecord.tokenLimitMonthly})`, status: 429, release: lease };
+    if (total >= keyRecord.tokenLimitMonthly) {
+      await endLease();
+      return { allowed: false, error: `Monthly token limit reached (${keyRecord.tokenLimitMonthly})`, status: 429 };
+    }
   }
 
-  return { allowed: true, lease, release: lease ? async () => coordinatorCall("endRequest", { keyId: keyRecord.id, leaseId: lease }, `tenant:${keyRecord.ownerRef || keyRecord.id}`, { failClosed: true }) : null };
+  return { allowed: true, lease: release ? true : null, release };
 }
