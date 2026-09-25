@@ -1,7 +1,5 @@
 import {
   getProviderCredentials,
-  credentialsErrorResponse,
-  byokUpstreamErrorResponse,
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
@@ -16,6 +14,8 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { handleComboChat, getComboModelsFromData } from "open-sse/services/combo.js";
+import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
+import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 
 /**
  * Handle web search request for the SSE/Next.js server.
@@ -53,15 +53,18 @@ export async function handleSearch(request) {
   if (!keyCheck.allowed) {
     return keyCheck.response;
   }
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyCheck.keyRecord, keyCheck.release)
+    : (void keyCheck.release?.(), response);
 
   if (!providerInput || typeof providerInput !== "string") {
     log.warn("SEARCH", "Missing provider/model");
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: provider (or model)");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: provider (or model)"));
   }
 
   if (!query || typeof query !== "string" || !query.trim()) {
     log.warn("SEARCH", "Missing query");
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: query");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: query"));
   }
 
   // Combo expansion: providerInput may be a combo name → run fallback/round-robin across providers
@@ -87,13 +90,16 @@ export async function handleSearch(request) {
 }
 
 async function handleSingleProviderSearch(body, providerInput, request, apiKey, settings, keyContext) {
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyContext.keyRecord, keyContext.release)
+    : (void keyContext.release?.(), response);
   const query = body.query;
   const providerId = resolveProviderId(providerInput);
   const resolvedProvider = AI_PROVIDERS[providerId];
 
   if (!resolvedProvider) {
     log.warn("SEARCH", "Unknown provider", { provider: providerInput });
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, `Unknown provider: ${providerInput}`);
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, `Unknown provider: ${providerInput}`));
   }
 
   const providerConfig = resolvedProvider.searchConfig;
@@ -101,7 +107,7 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
 
   if (!supportsSearch) {
     log.warn("SEARCH", "Provider does not support web search", { provider: providerId });
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, `Provider ${providerId} does not support web search`);
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, `Provider ${providerId} does not support web search`));
   }
 
   if (providerInput !== providerId) {
@@ -135,8 +141,8 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
       credentials: null,
       log
     });
-    if (result.success) return result.response;
-    return result.response;
+    if (result.success) return finish(result.response);
+    return finish(result.response);
   }
 
   // Credential + fallback loop
@@ -172,22 +178,22 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
       }
     }
 
-    const credentialsError = credentialsErrorResponse(credentials);
-    if (credentialsError) return credentialsError;
+    const credentialsError = typeof credentialsErrorResponse === "function" ? credentialsErrorResponse(credentials) : null;
+    if (credentialsError) return finish(credentialsError);
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("SEARCH", `[${providerId}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return unavailableResponse(status, `[${providerId}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return finish(unavailableResponse(status, `[${providerId}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman));
       }
       if (excludeConnectionIds.size === 0) {
         log.error("AUTH", `No credentials for provider: ${providerId}`);
-        return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${providerId}`);
+        return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${providerId}`));
       }
       log.warn("SEARCH", "No more accounts available", { provider: providerId });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      return finish(errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable"));
     }
 
     log.info("AUTH", `\x1b[32mUsing ${providerId} account: ${credentials.connectionName}\x1b[0m`);
@@ -213,10 +219,10 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
       }
     });
 
-    if (result.success) return result.response;
+    if (result.success) return finish(result.response);
 
     const byokError = byokUpstreamErrorResponse(credentials, result.status);
-    if (byokError) return byokError;
+    if (byokError) return finish(byokError);
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, credentialProviderId, searchLockKey);
 
     if (shouldFallback) {
@@ -227,6 +233,6 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
       continue;
     }
 
-    return result.response;
+    return finish(result.response);
   }
 }

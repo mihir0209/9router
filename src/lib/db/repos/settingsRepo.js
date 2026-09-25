@@ -92,6 +92,13 @@ const DEFAULT_SETTINGS = {
   pxpipeMinChars: 25000,
   pxpipeTimeoutMs: 15000,
   autoBlockedIPs: [],
+  gatewayControl: {
+    disabled: false,
+    reason: "",
+    drain: false,
+    blockedProviders: [],
+    blockedModels: [],
+  },
   proxyscrapeProxyPool: {
     enabled: false,
     protocol: "socks5",

@@ -1,7 +1,5 @@
 import {
   getProviderCredentials,
-  credentialsErrorResponse,
-  byokUpstreamErrorResponse,
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
@@ -15,6 +13,8 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import * as log from "../utils/logger.js";
 import { stripRequestUser } from "@/lib/requestPrivacy.js";
+import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
+import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 
 // Video generation is xAI-only today; requests without a provider prefix
 // (bare model id, or multipart bodies we deliberately don't parse) land here.
@@ -46,6 +46,12 @@ const CREATE_ROTATION_STATUSES = new Set([
 
 async function requireValidApiKey(request) {
   return validateAndEnforceApiKey(request, {}, "VIDEO");
+}
+
+function finishKeyResponse(response, keyCheck) {
+  return response?.body
+    ? guardApiKeyResponse(response, keyCheck.keyRecord, keyCheck.release)
+    : (void keyCheck.release?.(), response);
 }
 
 /**
@@ -107,7 +113,7 @@ export async function handleVideoCreate(request, action) {
   if (!keyCheck.allowed) return keyCheck.response;
 
   const bodyInfo = await readForwardableBody(request);
-  if (bodyInfo.error) return bodyInfo.error;
+  if (bodyInfo.error) return finishKeyResponse(bodyInfo.error, keyCheck);
   const settings = await getSettings();
   if (bodyInfo.parsed) {
     const sanitized = stripRequestUser(bodyInfo.parsed, settings.stripRequestUser === true);
@@ -118,7 +124,7 @@ export async function handleVideoCreate(request, action) {
   }
 
   const resolved = await resolveVideoProvider(bodyInfo.parsed);
-  if (resolved.error) return resolved.error;
+  if (resolved.error) return finishKeyResponse(resolved.error, keyCheck);
   const { provider, model } = resolved;
 
   // Strip the provider prefix (e.g. "xai/grok-imagine-video") before forwarding;
@@ -137,19 +143,19 @@ export async function handleVideoCreate(request, action) {
 
   while (true) {
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { preferredConnectionId, ...keyCheck });
-    const credentialsError = credentialsErrorResponse(credentials);
-    if (credentialsError) return credentialsError;
+    const credentialsError = typeof credentialsErrorResponse === "function" ? credentialsErrorResponse(credentials) : null;
+    if (credentialsError) return finishKeyResponse(credentialsError, keyCheck);
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        return unavailableResponse(status, `[${provider}/${model || "video"}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return finishKeyResponse(unavailableResponse(status, `[${provider}/${model || "video"}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman), keyCheck);
       }
       if (excludeConnectionIds.size === 0) {
-        return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
+        return finishKeyResponse(errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`), keyCheck);
       }
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      return finishKeyResponse(errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable"), keyCheck);
     }
 
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
@@ -176,11 +182,11 @@ export async function handleVideoCreate(request, action) {
     if (result.success) {
       await clearAccountError(credentials.connectionId, credentials, model);
       log.info("VIDEO", `${provider.toUpperCase()} | ${action} accepted (connection ${credentials.connectionId})`);
-      return withConnectionHeader(result.response, credentials.connectionId);
+      return finishKeyResponse(withConnectionHeader(result.response, credentials.connectionId), keyCheck);
     }
 
     const byokError = byokUpstreamErrorResponse(credentials, result.status);
-    if (byokError) return byokError;
+    if (byokError) return finishKeyResponse(byokError, keyCheck);
     // Record the failure (dashboard shows lastError/errorCode → user sees re-auth is needed)
     const { shouldFallback } = await markAccountUnavailable(
       credentials.connectionId, result.status, sanitizeSecrets(result.error, refreshedCredentials), provider, model
@@ -193,7 +199,7 @@ export async function handleVideoCreate(request, action) {
       continue;
     }
 
-    return result.response;
+    return finishKeyResponse(result.response, keyCheck);
   }
 }
 
@@ -206,16 +212,16 @@ export async function handleVideoGet(request, requestId) {
   const keyCheck = await requireValidApiKey(request);
   if (!keyCheck.allowed) return keyCheck.response;
 
-  if (!requestId) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing video request id");
+  if (!requestId) return finishKeyResponse(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing video request id"), keyCheck);
 
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
   const provider = await resolveGetProvider(request, preferredConnectionId);
 
   const credentials = await getProviderCredentials(provider, null, null, { preferredConnectionId, ...keyCheck });
   const credentialsError = credentialsErrorResponse(credentials);
-  if (credentialsError) return credentialsError;
+  if (credentialsError) return finishKeyResponse(credentialsError, keyCheck);
   if (!credentials || credentials.allRateLimited) {
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
+    return finishKeyResponse(errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`), keyCheck);
   }
 
   const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
@@ -238,13 +244,13 @@ export async function handleVideoGet(request, requestId) {
 
   if (result.success) {
     await clearAccountError(credentials.connectionId, credentials, null);
-    return withConnectionHeader(result.response, credentials.connectionId);
+    return finishKeyResponse(withConnectionHeader(result.response, credentials.connectionId), keyCheck);
   }
 
   const byokError = byokUpstreamErrorResponse(credentials, result.status);
-  if (byokError) return byokError;
+  if (byokError) return finishKeyResponse(byokError, keyCheck);
   await markAccountUnavailable(
     credentials.connectionId, result.status, sanitizeSecrets(result.error, refreshedCredentials), provider, null
   );
-  return result.response;
+  return finishKeyResponse(result.response, keyCheck);
 }

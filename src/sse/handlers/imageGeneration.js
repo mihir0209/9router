@@ -1,7 +1,5 @@
 import {
   getProviderCredentials,
-  credentialsErrorResponse,
-  byokUpstreamErrorResponse,
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
@@ -17,6 +15,8 @@ import { updateProviderCredentials, checkAndRefreshToken } from "../services/tok
 import { handleComboChat } from "open-sse/services/combo.js";
 import * as log from "../utils/logger.js";
 import { stripRequestUser } from "@/lib/requestPrivacy.js";
+import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
+import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 
 // Providers that don't require credentials (noAuth)
 const NO_AUTH_PROVIDERS = new Set(["sdwebui", "comfyui"]);
@@ -46,9 +46,12 @@ export async function handleImageGeneration(request) {
     return keyCheck.response;
   }
   body = stripRequestUser(body, settings.stripRequestUser === true);
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyCheck.keyRecord, keyCheck.release)
+    : (void keyCheck.release?.(), response);
 
-  if (!modelStr) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
-  if (!body.prompt) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: prompt");
+  if (!modelStr) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model"));
+  if (!body.prompt) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: prompt"));
 
   // Combo expansion: model may be a combo name → run fallback/round-robin across models
   const comboModels = await getComboModels(modelStr);
@@ -72,8 +75,11 @@ export async function handleImageGeneration(request) {
 }
 
 async function handleSingleModelImage(body, modelStr, { wantsStream, binaryOutput, preferredConnectionId, keyContext } = {}) {
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyContext.keyRecord, keyContext.release)
+    : (void keyContext.release?.(), response);
   const modelInfo = await getModelInfo(modelStr);
-  if (!modelInfo.provider) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
+  if (!modelInfo.provider) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format"));
 
   const { provider, model } = modelInfo;
 
@@ -85,8 +91,8 @@ async function handleSingleModelImage(body, modelStr, { wantsStream, binaryOutpu
       credentials: null,
       binaryOutput,
     });
-    if (result.success) return result.response;
-    return errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "Image generation failed");
+    if (result.success) return finish(result.response);
+    return finish(errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "Image generation failed"));
   }
 
   // Credentialed providers — fallback loop
@@ -96,19 +102,19 @@ async function handleSingleModelImage(body, modelStr, { wantsStream, binaryOutpu
 
   while (true) {
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { preferredConnectionId, ...keyContext });
-    const credentialsError = credentialsErrorResponse(credentials);
-    if (credentialsError) return credentialsError;
+    const credentialsError = typeof credentialsErrorResponse === "function" ? credentialsErrorResponse(credentials) : null;
+    if (credentialsError) return finish(credentialsError);
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return finish(unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman));
       }
       if (excludeConnectionIds.size === 0) {
-        return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
+        return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`));
       }
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      return finish(errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable"));
     }
 
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
@@ -132,10 +138,10 @@ async function handleSingleModelImage(body, modelStr, { wantsStream, binaryOutpu
       }
     });
 
-    if (result.success) return result.response;
+    if (result.success) return finish(result.response);
 
     const byokError = byokUpstreamErrorResponse(credentials, result.status);
-    if (byokError) return byokError;
+    if (byokError) return finish(byokError);
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
 
     if (shouldFallback) {
@@ -145,6 +151,6 @@ async function handleSingleModelImage(body, modelStr, { wantsStream, binaryOutpu
       continue;
     }
 
-    return result.response;
+    return finish(result.response);
   }
 }

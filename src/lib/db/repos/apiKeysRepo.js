@@ -12,6 +12,8 @@ const API_KEY_FIELDS = [
   "ownerRef", "budgetUsd", "budgetResetHours", "budgetWindowStartedAt",
   "billingMode", "byokProvider", "byokCredentialsCiphertext",
   "byokCredsEncVersion", "regenerateVersion",
+  "maxConcurrentRequests", "allowedProviders", "blockedProviders",
+  "allowedEndpoints", "blockedEndpoints", "metadata", "updatedAt",
 ];
 
 function rowToKey(row) {
@@ -42,6 +44,13 @@ function rowToKey(row) {
     byokCredentialsCiphertext: row.byokCredentialsCiphertext ?? null,
     byokCredsEncVersion: row.byokCredsEncVersion ?? null,
     regenerateVersion: row.regenerateVersion ?? 0,
+    maxConcurrentRequests: row.maxConcurrentRequests || 0,
+    allowedProviders: row.allowedProviders || "",
+    blockedProviders: row.blockedProviders || "",
+    allowedEndpoints: row.allowedEndpoints || "",
+    blockedEndpoints: row.blockedEndpoints || "",
+    metadata: (() => { try { return JSON.parse(row.metadata || "{}"); } catch { return {}; } })(),
+    updatedAt: row.updatedAt || row.createdAt,
   };
 }
 
@@ -161,6 +170,13 @@ export async function createApiKey(name, machineId, options = {}) {
     byokCredentialsCiphertext: options.byokCredentialsCiphertext ?? null,
     byokCredsEncVersion: options.byokCredsEncVersion ?? null,
     regenerateVersion: options.regenerateVersion ?? 0,
+    maxConcurrentRequests: options.maxConcurrentRequests || 0,
+    allowedProviders: options.allowedProviders || "",
+    blockedProviders: options.blockedProviders || "",
+    allowedEndpoints: options.allowedEndpoints || "",
+    blockedEndpoints: options.blockedEndpoints || "",
+    metadata: typeof options.metadata === "string" ? options.metadata : JSON.stringify(options.metadata || {}),
+    updatedAt: new Date().toISOString(),
   };
   db.run(
     `INSERT INTO apiKeys(${API_KEY_FIELDS.join(", ")}) VALUES(${API_KEY_FIELDS.map(() => "?").join(", ")})`,
@@ -187,19 +203,23 @@ export async function updateApiKey(id, data) {
         throw err;
       }
       data = { ...data, key: nextKey };
+      db.run(`UPDATE usageHistory SET apiKey = ? WHERE apiKey = ? AND apiKeyId IS NULL`, [nextKey, existing.key]);
     } else if (data.key !== undefined) {
       data = { ...data };
       delete data.key;
     }
-    const merged = { ...existing, ...data };
+    const merged = { ...existing, ...data, updatedAt: new Date().toISOString() };
+    if (data.metadata !== undefined) merged.metadata = typeof data.metadata === "string" ? data.metadata : JSON.stringify(data.metadata || {});
     const updateFields = API_KEY_FIELDS.filter(f => f !== "id");
     db.run(
       `UPDATE apiKeys SET ${updateFields.map(f => `${f} = ?`).join(", ")} WHERE id = ?`,
-      [...updateFields.map(f => f === "isActive" ? (merged[f] ? 1 : 0) : merged[f]), id]
+      [...updateFields.map(f => {
+        if (f === "isActive") return merged[f] ? 1 : 0;
+        if (f === "metadata") return typeof merged[f] === "string" ? merged[f] : JSON.stringify(merged[f] || {});
+        return merged[f];
+      }), id]
     );
-    if (merged.key !== existing.key) {
-      db.run(`UPDATE usageHistory SET apiKey = ? WHERE apiKey = ?`, [merged.key, existing.key]);
-    }
+
     result = merged;
   });
   resetApiKeysCache();
@@ -216,10 +236,9 @@ export async function regenerateApiKey(id) {
 
     const generated = generateApiKeyWithMachine(row.machineId);
     db.run(
-      `UPDATE apiKeys SET key = ?, regenerateVersion = COALESCE(regenerateVersion, 0) + 1 WHERE id = ?`,
-      [generated.key, id]
+      `UPDATE apiKeys SET key = ?, regenerateVersion = COALESCE(regenerateVersion, 0) + 1, updatedAt = ? WHERE id = ?`,
+      [generated.key, new Date().toISOString(), id]
     );
-    db.run(`UPDATE usageHistory SET apiKey = ? WHERE apiKey = ?`, [generated.key, row.key]);
     result = rowToKey(db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]));
   });
 

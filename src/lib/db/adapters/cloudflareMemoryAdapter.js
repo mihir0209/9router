@@ -14,6 +14,7 @@ const PRIMARY_KEYS = {
   usageHistory: ["id"],
   usageDaily: ["dateKey"],
   requestDetails: ["id"],
+  auditLog: ["id"],
 };
 
 const AUTOINCREMENT = new Set(["usageHistory"]);
@@ -137,6 +138,14 @@ function parseSelect(sql) {
 
 function projectRows(rows, columns) {
   if (columns === "*") return rows.map(clone);
+
+  const coalesceSum = columns.match(/^COALESCE\(\s*SUM\(([^)]+)\)\s*,\s*0\s*\)\s*(?:AS\s+)?(\w+)$/i);
+  if (coalesceSum) {
+    const expression = coalesceSum[1].split("+").map((part) => part.trim());
+    return [{ [coalesceSum[2]]: rows.reduce((total, row) => total + expression.reduce((sum, field) => sum + (Number(row[field]) || 0), 0), 0) }];
+  }
+  const sum = columns.match(/^SUM\(([^)]+)\)\s*(?:AS\s+)?(\w+)$/i);
+  if (sum) return [{ [sum[2]]: rows.reduce((total, row) => total + (Number(row[sum[1].trim()]) || 0), 0) }];
 
   const count = columns.match(/^COUNT\(\*\)\s+(?:AS\s+)?(\w+)$/i);
   if (count) return [{ [count[1]]: rows.length }];

@@ -1,7 +1,5 @@
 import {
   getProviderCredentials,
-  credentialsErrorResponse,
-  byokUpstreamErrorResponse,
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
@@ -17,6 +15,8 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { saveRequestUsage } from "@/lib/usageDb.js";
 import { stripRequestUser } from "@/lib/requestPrivacy.js";
+import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
+import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 
 function exactEmbeddingUsage(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.estimated === true) return null;
@@ -62,21 +62,24 @@ export async function handleEmbeddings(request) {
     return keyCheck.response;
   }
   body = stripRequestUser(body, settings.stripRequestUser === true);
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyCheck.keyRecord, keyCheck.release)
+    : (void keyCheck.release?.(), response);
 
   if (!modelStr) {
     log.warn("EMBEDDINGS", "Missing model");
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model"));
   }
 
   if (!body.input) {
     log.warn("EMBEDDINGS", "Missing input");
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: input");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: input"));
   }
 
   const modelInfo = await getModelInfo(modelStr);
   if (!modelInfo.provider) {
     log.warn("EMBEDDINGS", "Invalid model format", { model: modelStr });
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format"));
   }
 
   const { provider, model } = modelInfo;
@@ -94,8 +97,8 @@ export async function handleEmbeddings(request) {
 
   while (true) {
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, keyCheck);
-    const credentialsError = credentialsErrorResponse(credentials);
-    if (credentialsError) return credentialsError;
+    const credentialsError = typeof credentialsErrorResponse === "function" ? credentialsErrorResponse(credentials) : null;
+    if (credentialsError) return finish(credentialsError);
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -103,14 +106,14 @@ export async function handleEmbeddings(request) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("EMBEDDINGS", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return finish(unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman));
       }
       if (excludeConnectionIds.size === 0) {
         log.error("AUTH", `No credentials for provider: ${provider}`);
-        return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
+        return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`));
       }
       log.warn("EMBEDDINGS", "No more accounts available", { provider });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      return finish(errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable"));
     }
 
     log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
@@ -142,16 +145,17 @@ export async function handleEmbeddings(request) {
           model,
           connectionId: credentials.connectionId,
           apiKey,
+          apiKeyId: keyCheck.keyRecord?.id,
           endpoint: url.pathname,
           tokens: usage,
           status: "success",
         }).catch(() => {});
       }
-      return result.response;
+      return finish(result.response);
     }
 
     const byokError = byokUpstreamErrorResponse(credentials, result.status);
-    if (byokError) return byokError;
+    if (byokError) return finish(byokError);
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
 
     if (shouldFallback) {
@@ -162,6 +166,6 @@ export async function handleEmbeddings(request) {
       continue;
     }
 
-    return result.response;
+    return finish(result.response);
   }
 }

@@ -39,7 +39,7 @@ const PUBLIC_API_PATHS = [
 // Keep root-level rewrites here too: middleware runs before Next.js rewrites.
 const PUBLIC_PREFIXES = ["/v1", "/v1beta", "/api/v1", "/api/v1beta", "/codex", "/responses"];
 
-const ADMIN_API_PREFIXES = ["/api/keys", "/api/key-actions", "/api/usage/api-keys"];
+const ADMIN_API_PREFIXES = ["/api/admin", "/api/observability", "/api/keys", "/api/key-actions", "/api/usage/api-keys"];
 
 // Always require JWT token regardless of requireLogin setting
 const ALWAYS_PROTECTED = [

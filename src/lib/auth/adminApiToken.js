@@ -1,12 +1,14 @@
-import crypto from "node:crypto";
 import { verifyDashboardPassword } from "@/lib/auth/dashboardSession";
 
 const DEFAULT_PASSWORD = "123456";
 
 function constantTimeEqual(left, right) {
-  const leftDigest = crypto.createHash("sha256").update(left).digest();
-  const rightDigest = crypto.createHash("sha256").update(right).digest();
-  return crypto.timingSafeEqual(leftDigest, rightDigest);
+  const length = Math.max(left.length, right.length);
+  let diff = left.length ^ right.length;
+  for (let index = 0; index < length; index++) {
+    diff |= (left.charCodeAt(index % Math.max(left.length, 1)) || 0) ^ (right.charCodeAt(index % Math.max(right.length, 1)) || 0);
+  }
+  return diff === 0;
 }
 
 export async function hasValidAdminApiToken(request) {

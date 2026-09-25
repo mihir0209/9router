@@ -2,8 +2,6 @@ import "open-sse/index.js";
 
 import {
   getProviderCredentials,
-  credentialsErrorResponse,
-  byokUpstreamErrorResponse,
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
@@ -30,6 +28,7 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { classifyProxyFailure, quarantineProxyPool } from "@/lib/proxy/quarantine";
 import { stripRequestUser } from "@/lib/requestPrivacy.js";
 import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
+import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 
 /**
@@ -106,18 +105,21 @@ export async function handleChat(request, clientRawRequest = null) {
     return keyCheck.response;
   }
   body = stripRequestUser(body, settings.stripRequestUser === true);
-  const keyContext = { apiKey: keyCheck.apiKey, keyRecord: keyCheck.keyRecord };
+  const keyContext = { apiKey: keyCheck.apiKey, keyRecord: keyCheck.keyRecord, release: keyCheck.release };
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyCheck.keyRecord, keyCheck.release)
+    : (void keyCheck.release?.(), response);
   if (clientRawRequest) clientRawRequest = { ...clientRawRequest, body };
 
   if (!modelStr) {
     log.warn("CHAT", "Missing model");
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model"));
   }
 
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
   const userAgent = request?.headers?.get("user-agent") || "";
   const bypassResponse = handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
-  if (bypassResponse) return bypassResponse.response || bypassResponse;
+  if (bypassResponse) return finish(bypassResponse.response || bypassResponse);
 
   const requiredCapabilities = detectRequiredCapabilities(body);
 
@@ -195,12 +197,15 @@ export async function handleChat(request, clientRawRequest = null) {
  * Handle single model chat request
  */
 async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, keyContext = {}) {
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyContext.keyRecord, keyContext.release)
+    : (void keyContext.release?.(), response);
   const modelInfo = await getModelInfo(modelStr);
   if (process.env.NINEROUTER_RUNTIME === "cloudflare" && modelInfo.provider === "opencode") {
-    return errorResponse(
+    return finish(errorResponse(
       HTTP_STATUS.FORBIDDEN,
       "OpenCode Free is not available from Cloudflare Workers. Add a configured provider/API key instead."
-    );
+    ));
   }
 
   // If provider is null, this might be a combo name - check and handle
@@ -254,7 +259,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format"));
   }
 
   const { provider, model } = modelInfo;
@@ -271,8 +276,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
   while (true) {
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, keyContext);
-    const credentialsError = credentialsErrorResponse(credentials);
-    if (credentialsError) return credentialsError;
+    const credentialsError = typeof credentialsErrorResponse === "function" ? credentialsErrorResponse(credentials) : null;
+    if (credentialsError) return finish(credentialsError);
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -280,14 +285,14 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return finish(unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman));
       }
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
-        return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
+        return finish(errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`));
       }
       log.warn("CHAT", "No more accounts available", { provider });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      return finish(errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable"));
     }
 
     // Account selection shown in the unified "▶" line (acc:...)
@@ -329,6 +334,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       connectionId: credentials.connectionId,
       userAgent,
       apiKey: keyContext.apiKey,
+      apiKeyId: keyContext.keyRecord?.id,
       ccFilterNaming: !!chatSettings.ccFilterNaming,
       filterClaudeIdentityHeaders: !!chatSettings.filterClaudeIdentityHeaders,
       rtkEnabled: !!chatSettings.rtkEnabled,
@@ -363,9 +369,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     });
 
-    if (result.success) return guardApiKeyResponse(result.response, keyContext.keyRecord);
+    if (result.success) return finish(result.response);
     const byokError = byokUpstreamErrorResponse(credentials, result.status);
-    if (byokError) return byokError;
+    if (byokError) return finish(byokError);
 
     const proxyPoolId = credentials.providerSpecificData?.connectionProxyPoolId;
     const proxyFailureKind = classifyProxyFailure(result.status, result.error);
@@ -413,6 +419,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       continue;
     }
 
-    return result.response;
+    return finish(result.response);
   }
 }

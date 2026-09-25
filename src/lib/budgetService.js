@@ -1,6 +1,7 @@
 import { getAdapter } from "@/lib/db/driver.js";
 import { getApiKeyByKey } from "@/lib/db/repos/apiKeysRepo.js";
 import { saveRequestUsage } from "@/lib/db/repos/usageRepo.js";
+import { coordinatorCall } from "@/lib/coordinator/client.js";
 
 const locks = new Map();
 const reservations = new Map();
@@ -41,19 +42,34 @@ async function readBudgetState(keyRecord, now) {
 
   const { startsAt, resetsAt } = getWindow(keyRecord, now);
   const db = await getAdapter();
-  const row = db.get(
+  const byKey = db.get(
     `SELECT COALESCE(SUM(cost), 0) AS used
        FROM usageHistory
       WHERE apiKey = ? AND timestamp >= ? AND cost > 0`,
     [keyRecord.key, startsAt.toISOString()]
   );
-  const used = Number(row?.used) || 0;
-  for (const [key, entry] of reservations) {
-    if (entry.expiresAt <= now.getTime()) reservations.delete(key);
+  let used = Number(byKey?.used) || 0;
+  if (keyRecord.regenerateVersion > 0) {
+    const historical = db.get(
+      `SELECT COALESCE(SUM(cost), 0) AS used
+         FROM usageHistory
+        WHERE apiKeyId = ? AND apiKey != ? AND timestamp >= ? AND cost > 0`,
+      [keyRecord.id, keyRecord.key, startsAt.toISOString()]
+    );
+    used += Number(historical?.used) || 0;
   }
-  const reserved = [...reservations.values()]
-    .filter((entry) => entry.apiKey === keyRecord.key)
-    .reduce((total, entry) => total + entry.amount, 0);
+  let reserved = 0;
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
+    const durable = await coordinatorCall("getBudgetReservations", { keyId: keyRecord.id, now: now.getTime() }, `tenant:${keyRecord.ownerRef || keyRecord.id}`, { failClosed: true });
+    reserved = (durable || []).reduce((total, entry) => total + Number(entry.amount || 0), 0);
+  } else {
+    for (const [key, entry] of reservations) {
+      if (entry.expiresAt <= now.getTime()) reservations.delete(key);
+    }
+    reserved = [...reservations.values()]
+      .filter((entry) => entry.apiKey === keyRecord.key)
+      .reduce((total, entry) => total + entry.amount, 0);
+  }
   const remaining = Math.max(limit - used - reserved, 0);
 
   return {
@@ -100,27 +116,42 @@ export async function debitBudget(apiKey, { requestId, reserveUsd, commitUsd }, 
 
     const reservationKey = `${apiKey}:${requestId}`;
     if (hasReserve) {
-      const existing = reservations.get(reservationKey);
-      if (existing) return { ...state, reserved: true };
       if (amount > state.remaining) return { ...state, reserved: false };
-      reservations.set(reservationKey, { apiKey, amount, expiresAt: now.getTime() + 60 * 60 * 1000 });
+      if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
+        const result = await coordinatorCall("reserveBudget", { keyId: keyRecord.id, requestId, amount, availableBudget: state.remaining + state.reserved, expiresAt: now.getTime() + 60 * 60 * 1000, now: now.getTime() }, `tenant:${keyRecord.ownerRef || keyRecord.id}`, { failClosed: true });
+        if (!result?.reserved) return { ...state, reserved: false };
+      } else {
+        const existing = reservations.get(reservationKey);
+        if (existing) return { ...state, reserved: true };
+        reservations.set(reservationKey, { apiKey, amount, expiresAt: now.getTime() + 60 * 60 * 1000 });
+      }
       return { ...await readBudgetState(keyRecord, now), reserved: true };
     }
 
     const db = await getAdapter();
     const model = `budget-commit:${requestId}`;
     const existingCommit = db.get(
-      `SELECT cost FROM usageHistory WHERE apiKey = ? AND provider = 'budget' AND model = ? LIMIT 1`,
-      [apiKey, model]
+      `SELECT cost FROM usageHistory WHERE apiKeyId = ? AND provider = 'budget' AND model = ? LIMIT 1`,
+      [keyRecord.id, model]
     );
     if (existingCommit) {
       reservations.delete(reservationKey);
+      if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
+        await coordinatorCall("releaseBudget", { keyId: keyRecord.id, requestId, now: now.getTime() }, `tenant:${keyRecord.ownerRef || keyRecord.id}`);
+      }
       return { ...await readBudgetState(keyRecord, now), committed: true };
     }
 
-    const reservation = reservations.get(reservationKey);
-    reservations.delete(reservationKey);
-    const stateWithoutReservation = await readBudgetState(keyRecord, now);
+    let reservation = reservations.get(reservationKey);
+    if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
+      const durableReservations = await coordinatorCall("getBudgetReservations", { keyId: keyRecord.id, now: now.getTime() }, `tenant:${keyRecord.ownerRef || keyRecord.id}`, { failClosed: true });
+      reservation = durableReservations.find((entry) => entry.requestId === requestId) || null;
+    } else {
+      reservations.delete(reservationKey);
+    }
+    const stateWithoutReservation = process.env.NINEROUTER_RUNTIME === "cloudflare"
+      ? { ...state, remaining: state.remaining + Number(reservation?.amount || 0) }
+      : await readBudgetState(keyRecord, now);
     if (!reservation && amount > stateWithoutReservation.remaining) {
       return { ...stateWithoutReservation, committed: false };
     }
@@ -130,6 +161,7 @@ export async function debitBudget(apiKey, { requestId, reserveUsd, commitUsd }, 
       provider: "budget",
       model,
       apiKey,
+      apiKeyId: keyRecord.id,
       endpoint: "/api/key-actions/debit",
       status: "success",
       tokens: {},

@@ -1,8 +1,6 @@
 import {
   extractApiKey, isValidApiKey,
   getProviderCredentials, markAccountUnavailable,
-  credentialsErrorResponse,
-  byokUpstreamErrorResponse,
 } from "../services/auth.js";
 import { validateAndEnforceApiKey } from "../services/validateApiKey.js";
 import { getSettings } from "@/lib/localDb";
@@ -13,6 +11,8 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 import { handleComboChat } from "open-sse/services/combo.js";
 import * as log from "../utils/logger.js";
+import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
+import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 
 // Derived from providers.js: any TTS provider not noAuth requires stored credentials
 const CREDENTIALED_PROVIDERS = new Set(
@@ -41,9 +41,12 @@ export async function handleTts(request) {
   if (!keyCheck.allowed) {
     return keyCheck.response;
   }
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyCheck.keyRecord, keyCheck.release)
+    : (void keyCheck.release?.(), response);
 
-  if (!modelStr) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
-  if (!body.input) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: input");
+  if (!modelStr) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model"));
+  if (!body.input) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: input"));
 
   // Combo expansion: model may be a combo name → run fallback/round-robin across models
   const comboModels = await getComboModels(modelStr);
@@ -67,8 +70,11 @@ export async function handleTts(request) {
 }
 
 async function handleSingleModelTts(body, modelStr, responseFormat, language, style, keyContext) {
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyContext.keyRecord, keyContext.release)
+    : (void keyContext.release?.(), response);
   const modelInfo = await getModelInfo(modelStr);
-  if (!modelInfo.provider) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
+  if (!modelInfo.provider) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format"));
 
   const { provider, model } = modelInfo;
   log.info("ROUTING", `Provider: ${provider}, Voice: ${model}`);
@@ -76,8 +82,8 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language, st
   // noAuth providers — no credential needed
   if (!CREDENTIALED_PROVIDERS.has(provider) && !provider.startsWith("custom-media-") && keyContext?.keyRecord?.billingMode !== "byok") {
     const result = await handleTtsCore({ provider, model, input: body.input, responseFormat, language, style });
-    if (result.success) return result.response;
-    return errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "TTS failed");
+    if (result.success) return finish(result.response);
+    return finish(errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "TTS failed"));
   }
 
   // Credentialed providers — fallback loop (same pattern as embeddings)
@@ -87,27 +93,27 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language, st
 
   while (true) {
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, keyContext);
-    const credentialsError = credentialsErrorResponse(credentials);
-    if (credentialsError) return credentialsError;
+    const credentialsError = typeof credentialsErrorResponse === "function" ? credentialsErrorResponse(credentials) : null;
+    if (credentialsError) return finish(credentialsError);
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
         const msg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        return unavailableResponse(status, `[${provider}/${model}] ${msg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return finish(unavailableResponse(status, `[${provider}/${model}] ${msg}`, credentials.retryAfter, credentials.retryAfterHuman));
       }
-      if (excludeConnectionIds.size === 0) return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      if (excludeConnectionIds.size === 0) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`));
+      return finish(errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable"));
     }
 
     log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
 
     const result = await handleTtsCore({ provider, model, input: body.input, credentials, responseFormat, language, style });
 
-    if (result.success) return result.response;
+    if (result.success) return finish(result.response);
 
     const byokError = byokUpstreamErrorResponse(credentials, result.status);
-    if (byokError) return byokError;
+    if (byokError) return finish(byokError);
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
     if (shouldFallback) {
       excludeConnectionIds.add(credentials.connectionId);
@@ -115,6 +121,6 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language, st
       lastStatus = result.status;
       continue;
     }
-    return result.response || errorResponse(result.status, result.error);
+    return finish(result.response || errorResponse(result.status, result.error));
   }
 }

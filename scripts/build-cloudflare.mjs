@@ -144,6 +144,20 @@ async function hasValidDashboardCookie(request, env) {
   }
 }
 
+async function hasValidAdminToken(request, env) {
+  const configured = env.ADMIN_API_TOKEN;
+  if (!configured || env.INITIAL_PASSWORD === "123456") return false;
+  const auth = request.headers.get("authorization") || "";
+  if (!auth.startsWith("Bearer ")) return false;
+  const supplied = auth.slice(7);
+  if (!supplied || supplied.length !== configured.length) return false;
+  const a = new TextEncoder().encode(supplied);
+  const b = new TextEncoder().encode(configured);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
 async function guardCloudflareAdminRequest(request, env) {
   const url = new URL(request.url);
   const { pathname } = url;
@@ -153,6 +167,10 @@ async function guardCloudflareAdminRequest(request, env) {
   if (isPublicLlmApi(pathname)) {
     if (hasApiKeyHeader(request, url)) return null;
     return Response.json({ error: "API key required" }, { status: 401 });
+  }
+
+  if (pathname.startsWith("/api/admin") || pathname.startsWith("/api/observability")) {
+    if (await hasValidAdminToken(request, env)) return null;
   }
 
   if (pathname.startsWith("/api/") || pathname.startsWith("/dashboard")) {
@@ -186,10 +204,16 @@ async function __9ROUTER_SCHEDULED__(event, env, ctx) {
 }
 `;
 
-  let withGuard = source.replace("export default {", `${guard}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
+  const coordinatorPath = join(root, "src", "cloudflare", "gateway-coordinator.js");
+  const coordinatorSource = readFileSync(coordinatorPath, "utf8")
+    .replace(/^import[^\n]+\n/, "")
+    .trim();
+  const coordinatorRuntime = `import { DurableObject } from "cloudflare:workers";\n${coordinatorSource}\n`;
+
+  let withGuard = coordinatorRuntime + source.replace("export default {", `${guard}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
     .replace(
       "return runWithCloudflareRequestContext(request, env, ctx, async () => {",
-      "if (env) { for (const [k, v] of Object.entries(env)) { if (typeof v === 'string' && !process.env[k]) process.env[k] = v; } }\n        const guardResponse = await guardCloudflareAdminRequest(request, env);\n        if (guardResponse) return guardResponse;\n        return runWithCloudflareRequestContext(request, env, ctx, async () => {"
+      "if (env) { for (const [k, v] of Object.entries(env)) { if (typeof v === 'string' && !process.env[k]) process.env[k] = v; } }\n        const guardResponse = await guardCloudflareAdminRequest(request, env);\n        if (guardResponse) return guardResponse;\n        let __9ROUTER_DOWNSTREAM_REQUEST = request;\n        const __9ROUTER_CF_IP = request.headers.get('cf-connecting-ip');\n        if (__9ROUTER_CF_IP) { const __9ROUTER_HEADERS = new Headers(request.headers); __9ROUTER_HEADERS.set('x-9r-real-ip', __9ROUTER_CF_IP); __9ROUTER_DOWNSTREAM_REQUEST = new Request(request.clone(), { headers: __9ROUTER_HEADERS }); }\n        else { const __9ROUTER_HEADERS = new Headers(request.headers); __9ROUTER_HEADERS.delete('x-9r-real-ip'); __9ROUTER_DOWNSTREAM_REQUEST = new Request(request, { headers: __9ROUTER_HEADERS }); }\n        return runWithCloudflareRequestContext(__9ROUTER_DOWNSTREAM_REQUEST, env, ctx, async () => {"
     );
   writeFileSync(workerPath, withGuard);
 }

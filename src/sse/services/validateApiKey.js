@@ -1,10 +1,13 @@
-import { getSettings, getApiKeyByKey, updateApiKey } from "@/lib/localDb";
+import { getSettings, getApiKeyByKey, updateApiKey, updateSettings } from "@/lib/localDb";
 import { extractApiKey, isValidApiKey } from "./auth.js";
 import { enforceApiKeyRestrictions } from "./apiKeyEnforcement.js";
 import { errorResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { budgetHeaders } from "@/lib/budgetService.js";
+import { isTrustedInternalRequest } from "@/lib/auth/internalRequest.js";
+import { trustedClientIp } from "@/lib/auth/clientIp.js";
+import { recordMetric } from "@/lib/observability/metrics.js";
 
 // In-memory track of rate limit violations per IP for auto-blocking
 const ipViolationCounts = new Map();
@@ -34,15 +37,37 @@ function trackIpViolation(ip) {
  * @returns {{ allowed: boolean, response?: Response, apiKey?: string }}
  */
 export async function validateAndEnforceApiKey(request, body, handlerName = "AUTH") {
-  if (request.headers?.get("x-9r-dashboard-internal") === "1") {
-    return { allowed: true, apiKey: null, keyRecord: null };
-  }
-
+  const internal = await isTrustedInternalRequest(request);
   const settings = await getSettings();
-  const apiKey = extractApiKey(request);
-  const clientIp = request.headers?.get("x-9r-real-ip") || "";
+  const gatewayControl = settings.gatewayControl || {};
+  const requestModel = body?.model || body?.provider || "";
+  const requestProvider = String(requestModel).split("/")[0];
+  if (!internal && gatewayControl.disabled) {
+    recordMetric("gateway_kill_switch_total", 1, { reason: gatewayControl.reason || "disabled" });
+    return { allowed: false, response: errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, gatewayControl.reason || "Gateway is disabled") };
+  }
+  if (!internal && gatewayControl.drain) {
+    return { allowed: false, response: errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, "Gateway is draining and not accepting new requests", ) };
+  }
+  if (!internal && (gatewayControl.blockedModels || []).includes(requestModel)) {
+    return { allowed: false, response: errorResponse(HTTP_STATUS.FORBIDDEN, "Model is disabled by gateway control") };
+  }
+  if (!internal && requestProvider && (gatewayControl.blockedProviders || []).includes(requestProvider)) {
+    return { allowed: false, response: errorResponse(HTTP_STATUS.FORBIDDEN, "Provider is disabled by gateway control") };
+  }
+  if (internal) return { allowed: true, apiKey: null, keyRecord: null, release: null };
 
-  let keyRecord = apiKey ? await getApiKeyByKey(apiKey) : null;
+  const apiKey = extractApiKey(request);
+  const clientIp = trustedClientIp(request);
+
+  let keyRecord = null;
+  if (apiKey) {
+    try {
+      keyRecord = await getApiKeyByKey(apiKey);
+    } catch {
+      keyRecord = null;
+    }
+  }
 
   if (!settings.requireApiKey) {
     if (!keyRecord) return { allowed: true, apiKey, keyRecord: null };
@@ -63,7 +88,9 @@ export async function validateAndEnforceApiKey(request, body, handlerName = "AUT
   }
 
   // Enforce per-key restrictions (rate limits, IP blocks, model restrictions, token limits)
-  const restrictionCheck = await enforceApiKeyRestrictions(apiKey, request, body);
+  const restrictionCheck = apiKey && (settings.requireApiKey || keyRecord)
+    ? await enforceApiKeyRestrictions(apiKey, request, body)
+    : { allowed: true };
   if (!restrictionCheck.allowed) {
     log.warn(handlerName, `API key restriction denied: ${restrictionCheck.error}`);
 
@@ -122,7 +149,9 @@ export async function validateAndEnforceApiKey(request, body, handlerName = "AUT
       }
     }
 
-    return { allowed: false, response: res };
+    recordMetric("api_key_denied_total", 1, { status: String(restrictionCheck.status || 403), reason: restrictionCheck.error || "restriction" });
+    await restrictionCheck.release?.();
+    return { allowed: false, response: res, release: null };
   }
 
   // Check if IP is auto-blocked
@@ -132,6 +161,7 @@ export async function validateAndEnforceApiKey(request, body, handlerName = "AUT
       const autoBlockedIPs = currentSettings.autoBlockedIPs || [];
       if (autoBlockedIPs.includes(clientIp)) {
         log.warn(handlerName, `IP ${clientIp} is auto-blocked`);
+        await restrictionCheck.release?.();
         return {
           allowed: false,
           response: errorResponse(HTTP_STATUS.FORBIDDEN, "Your IP has been temporarily blocked due to excessive rate limit violations. Please try again later.")
@@ -142,5 +172,6 @@ export async function validateAndEnforceApiKey(request, body, handlerName = "AUT
     }
   }
 
-  return { allowed: true, apiKey, keyRecord };
+  recordMetric("api_key_allowed_total", 1, { model: requestModel || "unknown" });
+  return { allowed: true, apiKey, keyRecord, release: restrictionCheck.release || null };
 }

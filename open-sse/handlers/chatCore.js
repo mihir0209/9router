@@ -60,7 +60,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, filterClaudeIdentityHeaders, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, apiKeyId, ccFilterNaming, filterClaudeIdentityHeaders, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -372,7 +372,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log?.debug?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | no_proxy=${proxyOptions.connectionNoProxy}`);
   }
 
-  // Execute request
+  const providerRequestStartedAt = Date.now();
   let providerResponse, providerUrl, providerHeaders, finalBody;
   // Most executors return their registry format. Cursor AgentService is an
   // exception: it is decoded by the executor into OpenAI-compatible output.
@@ -409,6 +409,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
     reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
   } catch (error) {
+    await credentials.onProviderOutcome?.({ success: false, status: error.name === "AbortError" ? 499 : 502, latencyMs: Date.now() - providerRequestStartedAt });
     trackPendingRequest(model, provider, connectionId, false, true);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${error.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
@@ -480,6 +481,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
   }
 
+  await credentials.onProviderOutcome?.({ success: providerResponse.ok, status: providerResponse.status, latencyMs: Date.now() - providerRequestStartedAt });
+
   // Provider returned error
   if (!providerResponse.ok) {
     trackPendingRequest(model, provider, connectionId, false, true);
@@ -505,7 +508,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(statusCode, errMsg, resetsAtMs);
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, apiKeyId, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 

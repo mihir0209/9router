@@ -250,10 +250,10 @@ export async function flushAnalyticsBuffer() {
         const promptTokens = tokens.prompt_tokens || tokens.input_tokens || 0;
         const completionTokens = tokens.completion_tokens || tokens.output_tokens || 0;
         db.run(
-          `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, apiKeyId, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             entry.timestamp, entry.provider || null, entry.model || null,
-            entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
+            entry.connectionId || null, entry.apiKey || null, entry.apiKeyId || null, entry.endpoint || null,
             promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
             stringifyJson(tokens), stringifyJson({}),
           ]
@@ -562,7 +562,7 @@ export async function saveRequestUsage(entry) {
     if (lowWrite) {
       // In-memory stand-in for the SQL dedup below: same fingerprint fields,
       // so a retried/double-flushed identical save still counts once.
-      const fp = [entry.timestamp, entry.provider || "", entry.model || "", entry.connectionId || "", entry.apiKey || "", promptTokens, completionTokens].join("|");
+      const fp = [entry.timestamp, entry.provider || "", entry.model || "", entry.connectionId || "", entry.apiKeyId || "", entry.apiKey || "", promptTokens, completionTokens].join("|");
       const now = Date.now();
       const last = usageDedup.get(fp);
       if (last !== undefined && now - last < DEDUP_WINDOW_MS) return;
@@ -602,13 +602,14 @@ export async function saveRequestUsage(entry) {
              AND COALESCE(provider, '') = COALESCE(?, '')
              AND COALESCE(model, '') = COALESCE(?, '')
              AND COALESCE(connectionId, '') = COALESCE(?, '')
-             AND COALESCE(apiKey, '') = COALESCE(?, '')
-             AND promptTokens = ?
+              AND COALESCE(apiKey, '') = COALESCE(?, '')
+              AND COALESCE(apiKeyId, '') = COALESCE(?, '')
+              AND promptTokens = ?
              AND completionTokens = ?
            ORDER BY id DESC LIMIT 1`,
           [
             entry.timestamp, entry.provider || null, entry.model || null,
-            entry.connectionId || null, entry.apiKey || null,
+            entry.connectionId || null, entry.apiKey || null, entry.apiKeyId || null,
             promptTokens, completionTokens,
           ]
         );
@@ -621,10 +622,10 @@ export async function saveRequestUsage(entry) {
         }
 
         db.run(
-          `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, apiKeyId, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             entry.timestamp, entry.provider || null, entry.model || null,
-            entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
+            entry.connectionId || null, entry.apiKey || null, entry.apiKeyId || null, entry.endpoint || null,
             promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
             stringifyJson(tokens), stringifyJson({}),
           ]
@@ -656,6 +657,28 @@ export async function saveRequestUsage(entry) {
   }
 }
 
+export async function getApiKeyTokenUsage(apiKeyId, apiKey, since) {
+  const db = await getAdapter();
+  const from = since instanceof Date ? since.toISOString() : String(since || new Date(0).toISOString());
+  const byKey = db.get(
+    `SELECT COALESCE(SUM(promptTokens + completionTokens), 0) AS total
+       FROM usageHistory
+      WHERE timestamp >= ? AND apiKey = ?`,
+    [from, String(apiKey || "")]
+  );
+  let total = Number(byKey?.total) || 0;
+  if (apiKeyId) {
+    const historical = db.get(
+      `SELECT COALESCE(SUM(promptTokens + completionTokens), 0) AS total
+         FROM usageHistory
+        WHERE timestamp >= ? AND apiKeyId = ? AND apiKey != ?`,
+      [from, String(apiKeyId), String(apiKey || "")]
+    );
+    total += Number(historical?.total) || 0;
+  }
+  return total;
+}
+
 export async function getUsageHistory(filter = {}) {
   const db = await getAdapter();
   const conds = [];
@@ -667,11 +690,11 @@ export async function getUsageHistory(filter = {}) {
   if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
 
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-  const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens FROM usageHistory ${where} ORDER BY id ASC`, params);
+  const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, apiKeyId, endpoint, cost, status, tokens FROM usageHistory ${where} ORDER BY id ASC`, params);
 
   const list = rows.map((r) => ({
     timestamp: r.timestamp, provider: r.provider, model: r.model,
-    connectionId: r.connectionId, apiKeyMasked: maskApiKey(r.apiKey), endpoint: r.endpoint,
+    connectionId: r.connectionId, apiKeyId: r.apiKeyId || null, apiKeyMasked: maskApiKey(r.apiKey), endpoint: r.endpoint,
     cost: r.cost, status: r.status, tokens: parseJson(r.tokens, {}),
   }));
 

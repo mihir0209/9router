@@ -1,8 +1,6 @@
 import {
   extractApiKey, isValidApiKey,
   getProviderCredentials, markAccountUnavailable,
-  credentialsErrorResponse,
-  byokUpstreamErrorResponse,
 } from "../services/auth.js";
 import { validateAndEnforceApiKey } from "../services/validateApiKey.js";
 import { getSettings } from "@/lib/localDb";
@@ -12,6 +10,8 @@ import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 import * as log from "../utils/logger.js";
+import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
+import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 
 // Providers requiring credentials for STT
 const CREDENTIALED_PROVIDERS = new Set(
@@ -36,12 +36,15 @@ export async function handleStt(request) {
   if (!keyCheck.allowed) {
     return keyCheck.response;
   }
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyCheck.keyRecord, keyCheck.release)
+    : (void keyCheck.release?.(), response);
 
-  if (!modelStr) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
-  if (!formData.get("file")) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: file");
+  if (!modelStr) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model"));
+  if (!formData.get("file")) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: file"));
 
   const modelInfo = await getModelInfo(modelStr);
-  if (!modelInfo.provider) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
+  if (!modelInfo.provider) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format"));
 
   const { provider, model } = modelInfo;
   const isCustom = provider.startsWith("custom-media-");
@@ -50,8 +53,8 @@ export async function handleStt(request) {
   // noAuth providers
   if (!CREDENTIALED_PROVIDERS.has(provider) && !isCustom && keyCheck.keyRecord?.billingMode !== "byok") {
     const result = await handleSttCore({ provider, model, formData, sttConfig: AI_PROVIDERS[provider]?.sttConfig });
-    if (result.success) return result.response;
-    return errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "STT failed");
+    if (result.success) return finish(result.response);
+    return finish(errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "STT failed"));
   }
 
   // Credentialed — fallback loop
@@ -61,17 +64,17 @@ export async function handleStt(request) {
 
   while (true) {
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, keyCheck);
-    const credentialsError = credentialsErrorResponse(credentials);
-    if (credentialsError) return credentialsError;
+    const credentialsError = typeof credentialsErrorResponse === "function" ? credentialsErrorResponse(credentials) : null;
+    if (credentialsError) return finish(credentialsError);
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
         const msg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        return unavailableResponse(status, `[${provider}/${model}] ${msg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return finish(unavailableResponse(status, `[${provider}/${model}] ${msg}`, credentials.retryAfter, credentials.retryAfterHuman));
       }
-      if (excludeConnectionIds.size === 0) return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      if (excludeConnectionIds.size === 0) return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`));
+      return finish(errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable"));
     }
 
     log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
@@ -88,10 +91,10 @@ export async function handleStt(request) {
     } : null;
     const result = await handleSttCore({ provider, model, formData, credentials, sttConfig: customConfig || AI_PROVIDERS[provider]?.sttConfig });
 
-    if (result.success) return result.response;
+    if (result.success) return finish(result.response);
 
     const byokError = byokUpstreamErrorResponse(credentials, result.status);
-    if (byokError) return byokError;
+    if (byokError) return finish(byokError);
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
     if (shouldFallback) {
       excludeConnectionIds.add(credentials.connectionId);
@@ -99,6 +102,6 @@ export async function handleStt(request) {
       lastStatus = result.status;
       continue;
     }
-    return result.response || errorResponse(result.status, result.error);
+    return finish(result.response || errorResponse(result.status, result.error));
   }
 }

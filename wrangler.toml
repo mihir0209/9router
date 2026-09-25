@@ -21,6 +21,28 @@ NINEROUTER_RUNTIME = "cloudflare"
 [triggers]
 crons = ["*/10 * * * *"]
 
+[[durable_objects.bindings]]
+name = "GATEWAY_COORDINATOR"
+class_name = "GatewayCoordinator"
+
+[exports.GatewayCoordinator]
+type = "durable-object"
+storage = "sqlite"
+
+[observability]
+enabled = true
+head_sampling_rate = 0.25
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 0.25
+persist = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1
+persist = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "mihir-router-db"

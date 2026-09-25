@@ -7,6 +7,8 @@ import { resolveProviderId, FREE_PROVIDERS, isOpenAICompatibleProvider, isAnthro
 import { getProxyPoolQuarantine, isProxyQuarantined } from "@/lib/proxy/quarantine";
 import { getAntigravityQuotaCache } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
+import { coordinatorCall, getAdaptiveScores, recordProviderOutcome, scoreProviderEntries } from "@/lib/coordinator/client.js";
+import { recordRequestOutcome } from "@/lib/observability/metrics.js";
 
 // Mutex to prevent race conditions during account selection
 let selectionMutex = Promise.resolve();
@@ -197,9 +199,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const connLocked = (c) => isModelLockActive(c, model) || isExtremeModelLockActive(c.id, model);
 
     // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
+    const coordinatorLocks = await coordinatorCall("getActiveLocks", { provider: providerId, connectionIds: connections.map((entry) => entry.id), model }, `provider:${providerId}`);
+    const coordinatorLockMap = new Map(coordinatorLocks.map((entry) => [entry.connectionId, entry]));
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
       if (connLocked(c)) return false;
+      if (coordinatorLockMap.has(c.id)) return false;
       // Antigravity: skip if live quota exhausted for this model
       if (isAntigravity && model && antigravityQuotaCache) {
         const quota = antigravityQuotaCache.get(c.id)?.[model];
@@ -231,6 +236,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           const resetAt = antigravityQuotaCache.get(c.id)?.[model]?.resetAt;
           if (resetAt && new Date(resetAt).getTime() > Date.now()) expiries.push(resetAt);
         });
+      }
+      for (const lock of coordinatorLocks) {
+        if (lock.untilMs > Date.now()) expiries.push(lock.untilMs);
       }
       const earliest = expiries.sort()[0] || null;
       if (earliest) {
@@ -267,6 +275,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     }
     if (connection) {
       // skip strategy
+    } else if (strategy === "adaptive") {
+      const scores = await getAdaptiveScores(providerId, model, availableConnections.map((entry) => entry.id));
+      const priorities = new Map(availableConnections.map((entry, index) => [entry.id, entry.priority || index + 1]));
+      const ranked = scoreProviderEntries(scores, priorities);
+      const rank = new Map(ranked.map((entry, index) => [entry.connectionId, index]));
+      connection = [...availableConnections].sort((left, right) => (rank.get(left.id) ?? 999) - (rank.get(right.id) ?? 999))[0];
     } else if (strategy === "round-robin") {
       const stickyLimit = providerOverride.stickyRoundRobinLimit || settings.stickyRoundRobinLimit || 3;
 
@@ -385,7 +399,20 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       testStatus: connection.testStatus,
       lastError: connection.lastError,
       // Pass full connection for clearAccountError to read modelLock_* keys
-      _connection: connection
+      _connection: connection,
+      onProviderOutcome: async (outcome) => {
+        const payload = {
+          provider: providerId,
+          connectionId: connection.id,
+          model,
+          success: outcome?.success === true,
+          status: Number(outcome?.status) || 0,
+          latencyMs: Number(outcome?.latencyMs) || 0,
+          costUsd: Number(outcome?.costUsd) || 0,
+        };
+        await recordProviderOutcome(payload).catch(() => {});
+        recordRequestOutcome(payload);
+      }
     };
   } finally {
     if (resolveMutex) resolveMutex();
@@ -438,6 +465,9 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     ));
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
+  if (provider && model) {
+    await coordinatorCall("setLock", { provider: resolveProviderId(provider), connectionId, model, untilMs: Date.now() + cooldownMs, status, reason: typeof errorText === "string" ? errorText.slice(0, 200) : "Provider error" }, `provider:${resolveProviderId(provider)}`).catch(() => {});
+  }
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 200) : "Provider error";
   const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
@@ -502,6 +532,8 @@ export async function clearAccountError(connectionId, currentConnection, model =
     return expiry && new Date(expiry).getTime() <= now;   // expired
   });
 
+  const provider = currentConnection?.provider || conn?.provider;
+  if (provider) await coordinatorCall("clearLock", { provider: resolveProviderId(provider), connectionId, model: model || null }, `provider:${resolveProviderId(provider)}`).catch(() => {});
   if (keysToClear.length === 0 && conn.testStatus !== "unavailable" && !conn.lastError) return;
 
   // Check if any active locks remain after clearing

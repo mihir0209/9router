@@ -96,6 +96,10 @@ export async function exportDb() {
       billingMode: r.billingMode || "credits", byokProvider: r.byokProvider ?? null,
       byokCredentialsCiphertext: r.byokCredentialsCiphertext ?? null,
       byokCredsEncVersion: r.byokCredsEncVersion ?? null, regenerateVersion: r.regenerateVersion ?? 0,
+      maxConcurrentRequests: r.maxConcurrentRequests || 0,
+      allowedProviders: r.allowedProviders || "", blockedProviders: r.blockedProviders || "",
+      allowedEndpoints: r.allowedEndpoints || "", blockedEndpoints: r.blockedEndpoints || "",
+      metadata: r.metadata || "{}", updatedAt: r.updatedAt || r.createdAt,
     })),
     combos: db.all(`SELECT * FROM combos`).map((r) => ({ id: r.id, name: r.name, kind: r.kind, models: parseJson(r.models, []), createdAt: r.createdAt, updatedAt: r.updatedAt })),
     modelAliases: {},
@@ -156,13 +160,15 @@ export async function importDb(payload) {
     }
     for (const k of payload.apiKeys || []) {
       db.run(
-        `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly, allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description, ownerRef, budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode, byokProvider, byokCredentialsCiphertext, byokCredsEncVersion, regenerateVersion) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly, allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description, ownerRef, budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode, byokProvider, byokCredentialsCiphertext, byokCredsEncVersion, regenerateVersion, maxConcurrentRequests, allowedProviders, blockedProviders, allowedEndpoints, blockedEndpoints, metadata, updatedAt) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [k.id, k.key, k.name || null, k.machineId || null, k.isActive === false ? 0 : 1, k.createdAt || new Date().toISOString(),
           k.rateLimitRequests || 0, k.rateLimitWindowSeconds || 60, k.tokenLimitDaily || 0, k.tokenLimitMonthly || 0,
          k.allowedModels || "", k.blockedModels || "", k.allowedIPs || "", k.blockedIPs || "", k.expiresAt || "", k.description || "",
          k.ownerRef ?? null, k.budgetUsd ?? null, k.budgetResetHours ?? null, k.budgetWindowStartedAt ?? null,
          k.billingMode || "credits", k.byokProvider ?? null, k.byokCredentialsCiphertext ?? null,
-         k.byokCredsEncVersion ?? null, k.regenerateVersion ?? 0]
+          k.byokCredsEncVersion ?? null, k.regenerateVersion ?? 0,
+          k.maxConcurrentRequests || 0, k.allowedProviders || "", k.blockedProviders || "",
+          k.allowedEndpoints || "", k.blockedEndpoints || "", typeof k.metadata === "string" ? k.metadata : JSON.stringify(k.metadata || {}), k.updatedAt || k.createdAt || new Date().toISOString()]
       );
     }
     for (const c of payload.combos || []) {

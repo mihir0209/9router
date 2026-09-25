@@ -11,6 +11,8 @@ const CREATE_FIELDS = [
   "tokenLimitDaily", "tokenLimitMonthly", "allowedModels", "blockedModels",
   "allowedIPs", "blockedIPs", "expiresAt", "description",
   "budgetUsd", "budgetResetHours", "budgetWindowStartedAt", "billingMode",
+  "maxConcurrentRequests", "allowedProviders", "blockedProviders",
+  "allowedEndpoints", "blockedEndpoints", "metadata",
 ];
 
 function normalizeList(value) {
@@ -18,7 +20,7 @@ function normalizeList(value) {
 }
 
 function validatePolicy(data) {
-  const nonNegative = ["rateLimitRequests", "tokenLimitDaily", "tokenLimitMonthly", "budgetUsd"];
+  const nonNegative = ["rateLimitRequests", "maxConcurrentRequests", "tokenLimitDaily", "tokenLimitMonthly", "budgetUsd"];
   const positive = ["rateLimitWindowSeconds", "budgetResetHours"];
   for (const field of nonNegative) {
     if (data[field] != null && (!Number.isFinite(Number(data[field])) || Number(data[field]) < 0)) {
@@ -64,6 +66,9 @@ export async function POST(request) {
     options.blockedModels = normalizeList(options.blockedModels);
     options.allowedIPs = normalizeList(options.allowedIPs);
     options.blockedIPs = normalizeList(options.blockedIPs);
+    for (const field of ["allowedProviders", "blockedProviders", "allowedEndpoints", "blockedEndpoints"]) {
+      options[field] = normalizeList(options[field]);
+    }
 
     if (!name) {
       return NextResponse.json({ error: "Name is required" }, { status: 400 });

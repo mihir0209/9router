@@ -3,7 +3,7 @@
 // pre-change safety backup in migrate.js: when the stored version is lower,
 // one lightweight DB backup is taken before applying schema changes. Forgetting
 // to bump only skips that backup — it does NOT break the additive auto-sync.
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const PRAGMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -102,6 +102,13 @@ export const TABLES = {
       byokCredentialsCiphertext: "TEXT",
       byokCredsEncVersion: "INTEGER",
       regenerateVersion: "INTEGER DEFAULT 0",
+      maxConcurrentRequests: "INTEGER DEFAULT 0",
+      allowedProviders: "TEXT DEFAULT ''",
+      blockedProviders: "TEXT DEFAULT ''",
+      allowedEndpoints: "TEXT DEFAULT ''",
+      blockedEndpoints: "TEXT DEFAULT ''",
+      metadata: "TEXT DEFAULT '{}'",
+      updatedAt: "TEXT",
     },
     indexes: [
       "CREATE INDEX IF NOT EXISTS idx_ak_key ON apiKeys(key)",
@@ -136,6 +143,7 @@ export const TABLES = {
       model: "TEXT",
       connectionId: "TEXT",
       apiKey: "TEXT",
+      apiKeyId: "TEXT",
       endpoint: "TEXT",
       promptTokens: "INTEGER DEFAULT 0",
       completionTokens: "INTEGER DEFAULT 0",
@@ -150,6 +158,7 @@ export const TABLES = {
       "CREATE INDEX IF NOT EXISTS idx_uh_model ON usageHistory(model)",
       "CREATE INDEX IF NOT EXISTS idx_uh_conn ON usageHistory(connectionId)",
       "CREATE INDEX IF NOT EXISTS idx_uh_apikey ON usageHistory(apiKey)",
+      "CREATE INDEX IF NOT EXISTS idx_uh_apikey_id ON usageHistory(apiKeyId)",
     ],
   },
   usageDaily: {
@@ -157,6 +166,28 @@ export const TABLES = {
       dateKey: "TEXT PRIMARY KEY",
       data: "TEXT NOT NULL",
     },
+  },
+  auditLog: {
+    columns: {
+      id: "TEXT PRIMARY KEY",
+      timestamp: "TEXT NOT NULL",
+      actor: "TEXT NOT NULL",
+      action: "TEXT NOT NULL",
+      resourceType: "TEXT NOT NULL",
+      resourceId: "TEXT",
+      ownerRef: "TEXT",
+      requestId: "TEXT",
+      sourceIp: "TEXT",
+      outcome: "TEXT NOT NULL",
+      before: "TEXT",
+      after: "TEXT",
+      metadata: "TEXT NOT NULL",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_audit_ts ON auditLog(timestamp DESC)",
+      "CREATE INDEX IF NOT EXISTS idx_audit_owner ON auditLog(ownerRef, timestamp DESC)",
+      "CREATE INDEX IF NOT EXISTS idx_audit_action ON auditLog(action, timestamp DESC)",
+    ],
   },
   requestDetails: {
     columns: {

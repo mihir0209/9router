@@ -9,7 +9,7 @@ function normalizeList(value) {
 }
 
 function validatePolicy(data) {
-  const nonNegative = ["rateLimitRequests", "tokenLimitDaily", "tokenLimitMonthly", "budgetUsd"];
+  const nonNegative = ["rateLimitRequests", "maxConcurrentRequests", "tokenLimitDaily", "tokenLimitMonthly", "budgetUsd"];
   const positive = ["rateLimitWindowSeconds", "budgetResetHours"];
   for (const field of nonNegative) {
     if (data[field] != null && (!Number.isFinite(Number(data[field])) || Number(data[field]) < 0)) {
@@ -72,6 +72,8 @@ export async function PUT(request, { params }) {
       "allowedIPs", "blockedIPs",
       "expiresAt", "description",
       "budgetUsd", "budgetResetHours", "budgetWindowStartedAt", "billingMode",
+      "maxConcurrentRequests", "allowedProviders", "blockedProviders",
+      "allowedEndpoints", "blockedEndpoints", "metadata",
     ];
     for (const field of allowedFields) {
       if (body[field] !== undefined) {
@@ -91,7 +93,7 @@ export async function PUT(request, { params }) {
       }
       updateData.key = customKey;
     }
-    for (const field of ["allowedModels", "blockedModels", "allowedIPs", "blockedIPs"]) {
+    for (const field of ["allowedModels", "blockedModels", "allowedIPs", "blockedIPs", "allowedProviders", "blockedProviders", "allowedEndpoints", "blockedEndpoints"]) {
       if (updateData[field] !== undefined) updateData[field] = normalizeList(updateData[field]);
     }
     if (updateData.billingMode && !["credits", "byok"].includes(updateData.billingMode)) {

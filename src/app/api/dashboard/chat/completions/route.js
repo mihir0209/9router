@@ -1,5 +1,6 @@
 import { handleChat } from "@/sse/handlers/chat.js";
 import { initTranslators } from "open-sse/translator/index.js";
+import { createInternalRequestHeaders } from "@/lib/auth/internalRequest.js";
 
 let initialized = false;
 
@@ -14,7 +15,7 @@ export async function POST(request) {
   await ensureInitialized();
 
   const headers = new Headers(request.headers);
-  headers.set("x-9r-dashboard-internal", "1");
+  for (const [name, value] of Object.entries(await createInternalRequestHeaders(new URL(request.url).pathname))) headers.set(name, value);
 
   const internalRequest = new Request(request.url, {
     method: request.method,

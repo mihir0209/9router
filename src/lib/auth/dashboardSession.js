@@ -1,8 +1,4 @@
 import { SignJWT, jwtVerify } from "jose";
-import fs from "node:fs";
-import path from "node:path";
-import crypto from "node:crypto";
-import { DATA_DIR } from "@/lib/dataDir";
 import { getSettings } from "@/lib/localDb";
 
 const DEFAULT_PASSWORD = "123456";
@@ -13,12 +9,19 @@ function loadJwtSecret() {
   if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
     throw new Error("JWT_SECRET is required when running on Cloudflare Workers");
   }
-  const file = path.join(DATA_DIR, "jwt-secret");
+  const fs = process.getBuiltinModule?.("node:fs");
+  const path = process.getBuiltinModule?.("node:path");
+  const os = process.getBuiltinModule?.("node:os");
+  const dataDir = process.env.DATA_DIR || (os ? os.homedir() + "/.9router" : null);
+  if (!fs || !path || !dataDir) return null;
+  const file = path.join(dataDir, "jwt-secret");
   try {
     return fs.readFileSync(file, "utf8").trim();
   } catch {}
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const generated = crypto.randomBytes(32).toString("hex");
+  fs.mkdirSync(dataDir, { recursive: true });
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  const generated = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   fs.writeFileSync(file, generated, { mode: 0o600 });
   return generated;
 }

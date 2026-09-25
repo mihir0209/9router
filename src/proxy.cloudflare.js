@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { jwtVerify } from "jose";
+import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
 
 const PUBLIC_CLOUDFLARE_PATHS = [
   "/api/health",
@@ -69,6 +70,9 @@ export default async function proxy(request) {
   }
 
   if (pathname.startsWith("/api/") || pathname.startsWith("/dashboard")) {
+    if (pathname.startsWith("/api/admin") || pathname.startsWith("/api/observability")) {
+      if (await hasValidAdminApiToken(request)) return NextResponse.next();
+    }
     if (await hasValidDashboardCookie(request)) return NextResponse.next();
     if (pathname.startsWith("/dashboard")) {
       return NextResponse.redirect(new URL("/login", request.url));
