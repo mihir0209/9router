@@ -141,6 +141,11 @@ export function resetSettingsCache() {
  * Drop the cached settings when another isolate has written since we last
  * looked. Without this a kill switch or provider block is invisible to other
  * Workers isolates for the full cache TTL.
+ *
+ * Clearing the repo cache is not enough on its own: the Cloudflare adapter
+ * keeps its own in-memory copy of the row, refreshed from D1 only every few
+ * minutes. A version change therefore has to force that refresh too, or the
+ * next read just repopulates from the same stale copy.
  */
 async function invalidateIfStale() {
   if (!settingsRepoCache.data) return;
@@ -151,13 +156,17 @@ async function invalidateIfStale() {
     settingsRepoCache.version = version;
     return;
   }
-  if (version !== settingsRepoCache.version) resetSettingsCache();
+  if (version === settingsRepoCache.version) return;
+  resetSettingsCache();
+  try {
+    const db = await getAdapter();
+    if (typeof db.resync === "function") await db.resync(true);
+  } catch {}
 }
 
 async function readRaw() {
   const now = Date.now();
-  const fresh = settingsRepoCache.data && (now - settingsRepoCache.ts < SETTINGS_CACHE_TTL_MS);
-  if (fresh) {
+  if (settingsRepoCache.data && (now - settingsRepoCache.ts < SETTINGS_CACHE_TTL_MS)) {
     // Throttled to one Durable Object call per interval, so this is a memoized
     // read on the hot path and only occasionally a subrequest.
     await invalidateIfStale();
@@ -166,13 +175,19 @@ async function readRaw() {
     }
   }
   const db = await getAdapter();
-  if (typeof db.resync === "function") {
-    await db.resync().catch(() => {});
+  // On Workers the adapter serves reads from its own in-memory copy, refreshed
+  // from D1 only every few minutes. Reading a cold cache would capture that
+  // stale copy and then stamp it with the *current* control version, after
+  // which this isolate considers itself fresh and never corrects until the
+  // adapter's own timer fires. Force the refresh so the data we cache always
+  // matches the version we record alongside it.
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare" && typeof db.resync === "function") {
+    await db.resync(true).catch(() => {});
   }
   const row = db.get(`SELECT data FROM settings WHERE id = 1`);
   const data = row ? parseJson(row.data, {}) : {};
   settingsRepoCache.data = data;
-  settingsRepoCache.ts = now;
+  settingsRepoCache.ts = Date.now();
   const { getControlVersion } = await import("@/lib/coordinator/controlVersion.js");
   settingsRepoCache.version = await getControlVersion(CONTROL_DOMAIN);
   return { ...data };
@@ -215,6 +230,14 @@ export async function getSettings() {
 // Atomic read-merge-write inside transaction (prevents losing concurrent updates)
 export async function updateSettings(updates) {
   const db = await getAdapter();
+  // On Workers each isolate holds its own copy of the settings row, refreshed
+  // from D1 only every few minutes. Merging against a stale copy would let an
+  // isolate silently revert another isolate's change (e.g. re-enabling a key
+  // someone just disabled, or undoing a kill switch). Writes are rare, so pay
+  // for a forced refresh and merge against current state.
+  if (typeof db.resync === "function") {
+    await db.resync(true).catch(() => {});
+  }
   let next;
   db.transaction(function () {
     const row = db.get(`SELECT data FROM settings WHERE id = 1`);

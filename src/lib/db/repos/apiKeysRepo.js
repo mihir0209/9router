@@ -73,7 +73,9 @@ export function resetApiKeysCache() {
 /**
  * Drop cached keys when another isolate created, updated, disabled or rotated
  * one. Without this a revoked key keeps authenticating on every other Workers
- * isolate for the full cache TTL.
+ * isolate for the full cache TTL. Clearing the repo cache is not enough: the
+ * Cloudflare adapter holds its own copy of the table, so a version change must
+ * also force that refresh or the next read repopulates from the same stale data.
  */
 async function invalidateIfStale() {
   if (!apiKeyCache.byKey.size && !apiKeyCache.byId.size) return;
@@ -84,7 +86,12 @@ async function invalidateIfStale() {
     apiKeyCache.version = version;
     return;
   }
-  if (version !== apiKeyCache.version) resetApiKeysCache();
+  if (version === apiKeyCache.version) return;
+  resetApiKeysCache();
+  try {
+    const db = await getAdapter();
+    if (typeof db.resync === "function") await db.resync(true);
+  } catch {}
 }
 
 async function noteControlVersion() {
@@ -100,6 +107,21 @@ async function publishControlVersion() {
   resetApiKeysCache();
   const { bumpControlVersion } = await import("@/lib/coordinator/controlVersion.js");
   await bumpControlVersion(CONTROL_DOMAIN);
+}
+
+/**
+ * On Workers each isolate keeps its own copy of the apiKeys table, refreshed
+ * from D1 only every few minutes. Key writes must merge against current state,
+ * otherwise a stale isolate can miss a duplicate-key clash, resurrect a
+ * pre-rotation secret, or re-enable a key that was just disabled. These writes
+ * are rare admin operations, so a forced refresh is cheap enough.
+ */
+async function adapterForWrite() {
+  const db = await getAdapter();
+  if (typeof db.resync === "function") {
+    await db.resync(true).catch(() => {});
+  }
+  return db;
 }
 
 export async function getApiKeys(ownerRef) {
@@ -119,8 +141,12 @@ export async function getApiKeyById(id) {
     return k ? { ...k } : null;
   }
   const db = await getAdapter();
-  if (typeof db.resync === "function") {
-    await db.resync().catch(() => {});
+  // See settingsRepo.readRaw: on Workers the adapter answers from its own
+  // in-memory copy, so a cold read must refresh D1 first. Otherwise this
+  // isolate caches stale data and stamps it with the current control version,
+  // convincing itself it is fresh until the adapter's own timer fires.
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare" && typeof db.resync === "function") {
+    await db.resync(true).catch(() => {});
   }
   const row = db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]);
   const parsed = rowToKey(row);
@@ -146,8 +172,12 @@ export async function getApiKeyByKey(key) {
     return k ? { ...k } : null;
   }
   const db = await getAdapter();
-  if (typeof db.resync === "function") {
-    await db.resync().catch(() => {});
+  // See settingsRepo.readRaw: on Workers the adapter answers from its own
+  // in-memory copy, so a cold read must refresh D1 first. Otherwise this
+  // isolate caches stale data and stamps it with the current control version,
+  // convincing itself it is fresh until the adapter's own timer fires.
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare" && typeof db.resync === "function") {
+    await db.resync(true).catch(() => {});
   }
   const row = db.get(`SELECT * FROM apiKeys WHERE key = ?`, [key]);
   const parsed = rowToKey(row);
@@ -166,7 +196,7 @@ export async function getApiKeyByKey(key) {
 
 export async function createApiKey(name, machineId, options = {}) {
   if (!machineId) throw new Error("machineId is required");
-  const db = await getAdapter();
+  const db = await adapterForWrite();
   let keyValue;
   const customKey = options.key !== undefined && options.key !== null ? String(options.key).trim() : "";
   if (customKey) {
@@ -225,7 +255,7 @@ export async function createApiKey(name, machineId, options = {}) {
 }
 
 export async function updateApiKey(id, data) {
-  const db = await getAdapter();
+  const db = await adapterForWrite();
   let result = null;
   db.transaction(() => {
     const row = db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]);
@@ -272,7 +302,7 @@ export async function updateApiKey(id, data) {
 }
 
 export async function regenerateApiKey(id) {
-  const db = await getAdapter();
+  const db = await adapterForWrite();
   let result = null;
 
   db.transaction(() => {
@@ -292,7 +322,7 @@ export async function regenerateApiKey(id) {
 }
 
 export async function deleteApiKey(id) {
-  const db = await getAdapter();
+  const db = await adapterForWrite();
   const res = db.run(`DELETE FROM apiKeys WHERE id = ?`, [id]);
   const deleted = (res?.changes ?? 0) > 0;
   if (deleted) await publishControlVersion();

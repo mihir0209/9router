@@ -192,3 +192,28 @@ describe("api key cache invalidation across isolates", () => {
     expect((await getApiKeyByKey("sk-rotated"))?.id).toBe(key.id);
   });
 });
+
+describe("settings write does not clobber another isolate's change", () => {
+  it("refreshes from the durable store before merging", async () => {
+    // A stale isolate still holds the pre-kill-switch copy in memory.
+    seedSettings({ gatewayControl: { disabled: false }, somethingElse: "keep-me" });
+    mocks.coordinatorCall.mockResolvedValue({ version: 1 });
+
+    // Another isolate turned the kill switch on and persisted it.
+    store.set("settings", { gatewayControl: { disabled: true, reason: "incident" }, somethingElse: "keep-me" });
+    const durableState = JSON.stringify(store.get("settings"));
+    mocks.get.mockImplementation((sql) => {
+      if (sql.includes("FROM settings")) {
+        // The forced resync repopulates the adapter from the durable store.
+        return { data: durableState };
+      }
+      return undefined;
+    });
+
+    await updateSettings({ requireApiKey: true });
+
+    const stored = JSON.parse(mocks.run.mock.calls.at(-1)[1][0]);
+    expect(stored.gatewayControl.disabled, "must not revert the kill switch").toBe(true);
+    expect(stored.requireApiKey).toBe(true);
+  });
+});
