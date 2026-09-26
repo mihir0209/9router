@@ -74,9 +74,15 @@ export async function getPricingForModel(provider, model) {
   // hand-written entry, and an unresolved model silently cost $0 — a paid model
   // billed nothing. Kept behind the tables so deliberate overrides and reseller
   // rates (TokenRouter) still win.
+  //
+  // Read through the injected catalog source rather than importing
+  // catalogOverride.js: that module touches node:fs, and importing it from here
+  // pulled node:fs into the browser bundle (the repo is served by Next), which
+  // failed the Cloudflare build with UnhandledSchemeError. capabilities.js is
+  // already browser-safe and receives the reader via installCatalogSource().
   if (provider) {
-    const { getCatalogPricing } = await import("open-sse/providers/catalogOverride.js");
-    return getCatalogPricing(provider, model) || null;
+    const { getInjectedCatalogPricing } = await import("open-sse/providers/capabilities.js");
+    return getInjectedCatalogPricing(provider, model);
   }
   return null;
 }

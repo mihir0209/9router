@@ -190,17 +190,27 @@ export async function createCloudflareMemoryAdapter() {
   // (100k writes/day) that amplification is the budget killer.
   const dirtyRows = new Map();
 
-  async function initializeD1() {
-    if (!d1) return;
-    await d1.prepare(
-      `CREATE TABLE IF NOT EXISTS ${D1_TABLE} (` +
-      `table_name TEXT NOT NULL, ` +
-      `row_key TEXT NOT NULL, ` +
-      `data TEXT NOT NULL, ` +
-      `updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, ` +
-      `PRIMARY KEY (table_name, row_key))`
-    ).run();
-    const result = await d1.prepare(`SELECT table_name, data FROM ${D1_TABLE}`).all();
+  // Tables whose row count is bounded by configuration rather than by traffic.
+  // usageHistory and requestDetails grow by one persisted row per request, so
+  // eagerly loading them meant every cold isolate read and JSON.parsed the entire
+  // request history before serving anything — which exhausted the Worker's
+  // resource limits (CF 1102) and made the instance fail most requests. They are
+  // analytics: nothing on the request path needs them resident, and an explicit
+  // resync(force, ["usageHistory"]) can still pull them on demand.
+  const EAGER_TABLES = Object.keys(TABLES).filter(
+    (table) => table !== "usageHistory" && table !== "requestDetails"
+  );
+
+  async function loadTablesFromD1(tableNames) {
+    if (!d1 || !tableNames.length) return;
+    const result = tableNames.length === 1 && tableNames[0] === "*"
+      ? await d1.prepare(`SELECT table_name, data FROM ${D1_TABLE}`).all()
+      : await d1
+          .prepare(
+            `SELECT table_name, data FROM ${D1_TABLE} WHERE table_name IN (${tableNames.map(() => "?").join(", ")})`
+          )
+          .bind(...tableNames)
+          .all();
     for (const row of result.results || []) {
       if (!state.tables[row.table_name]) continue;
       try {
@@ -215,31 +225,47 @@ export async function createCloudflareMemoryAdapter() {
     }
   }
 
+  async function initializeD1() {
+    if (!d1) return;
+    await d1.prepare(
+      `CREATE TABLE IF NOT EXISTS ${D1_TABLE} (` +
+      `table_name TEXT NOT NULL, ` +
+      `row_key TEXT NOT NULL, ` +
+      `data TEXT NOT NULL, ` +
+      `updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, ` +
+      `PRIMARY KEY (table_name, row_key))`
+    ).run();
+    await loadTablesFromD1(EAGER_TABLES);
+  }
+
   let lastD1SyncTs = Date.now();
   const D1_RESYNC_INTERVAL_MS = 5 * 60 * 1000;
 
-  async function resyncFromD1(force = false) {
+  /**
+   * Refresh in-memory tables from D1.
+   *
+   * `tableNames` scopes the read to just those tables. This matters a great
+   * deal: usageHistory and requestDetails are persisted one D1 row per record,
+   * so ninerouter_rows grows without bound as traffic accumulates, and a
+   * full-table SELECT then has to read and JSON.parse every usage record ever
+   * written. On a cold isolate that exhausts the Worker's resource limits
+   * (CF 1102) — which is exactly what an unscoped forced resync on a hot path
+   * caused. Callers that know which table they need must pass it.
+   */
+  async function resyncFromD1(force = false, tableNames = null) {
     if (!d1) return;
     const now = Date.now();
+    const scoped = Array.isArray(tableNames) ? tableNames.filter((name) => TABLES[name]) : null;
     if (!force && now - lastD1SyncTs < D1_RESYNC_INTERVAL_MS) return;
     lastD1SyncTs = now;
+    const wanted = scoped || EAGER_TABLES;
     try {
-      const result = await d1.prepare(`SELECT table_name, data FROM ${D1_TABLE}`).all();
-      const freshTables = {};
-      for (const table of Object.keys(TABLES)) freshTables[table] = [];
-      for (const row of result.results || []) {
-        if (!freshTables[row.table_name]) continue;
-        try {
-          const parsed = JSON.parse(row.data);
-          freshTables[row.table_name].push(parsed);
-          if (AUTOINCREMENT.has(row.table_name) && Number.isFinite(Number(parsed.id))) {
-            state.sequences[row.table_name] = Math.max(state.sequences[row.table_name] || 0, Number(parsed.id));
-          }
-        } catch {}
-      }
-      for (const table of Object.keys(TABLES)) {
+      // Replace rather than append, so a resync cannot double up rows.
+      for (const table of wanted) state.tables[table] = [];
+      await loadTablesFromD1(wanted);
+      for (const table of wanted) {
         if (dirtyTables.has(table) || transactionDepth > 0) continue;
-        state.tables[table] = freshTables[table];
+        state.tables[table] = [...(state.tables[table] || [])];
       }
     } catch (error) {
       console.warn(`[DB] D1 resync failed: ${error.message}`);

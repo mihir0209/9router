@@ -495,6 +495,19 @@ function getCatalogSource() {
   return (catalogSource = globalThis.__9rCatalogSource || null);
 }
 
+/**
+ * Per-model rates synced from models.dev, via the same injected reader the
+ * capability lookups use. It lives here rather than in the pricing repo
+ * because the catalog reader touches node:fs, and this module is bundled into
+ * the browser — importing the reader directly from a repo drags node:fs into
+ * the client graph and fails the Cloudflare build.
+ */
+export function getInjectedCatalogPricing(provider, model) {
+  const source = getCatalogSource();
+  if (typeof source?.getPricing !== "function") return null;
+  return source.getPricing(provider, model) || null;
+}
+
 // Apply the synced catalog + name heuristic on top of a table-resolved result.
 // Strictly additive: a capability already true stays true, and a false one only
 // flips when an outside source positively declares support.

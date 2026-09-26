@@ -160,7 +160,7 @@ async function invalidateIfStale() {
   resetSettingsCache();
   try {
     const db = await getAdapter();
-    if (typeof db.resync === "function") await db.resync(true);
+    if (typeof db.resync === "function") await db.resync(true, ["settings"]);
   } catch {}
 }
 
@@ -182,7 +182,7 @@ async function readRaw() {
   // adapter's own timer fires. Force the refresh so the data we cache always
   // matches the version we record alongside it.
   if (process.env.NINEROUTER_RUNTIME === "cloudflare" && typeof db.resync === "function") {
-    await db.resync(true).catch(() => {});
+    await db.resync(true, ["settings"]).catch(() => {});
   }
   const row = db.get(`SELECT data FROM settings WHERE id = 1`);
   const data = row ? parseJson(row.data, {}) : {};
@@ -236,7 +236,7 @@ export async function updateSettings(updates) {
   // someone just disabled, or undoing a kill switch). Writes are rare, so pay
   // for a forced refresh and merge against current state.
   if (typeof db.resync === "function") {
-    await db.resync(true).catch(() => {});
+    await db.resync(true, ["settings"]).catch(() => {});
   }
   let next;
   db.transaction(function () {

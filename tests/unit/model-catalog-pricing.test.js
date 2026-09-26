@@ -83,9 +83,14 @@ describe("getPricingForModel — catalog fallback", () => {
 
   beforeEach(async () => {
     vi.resetModules();
-    vi.doMock("open-sse/providers/catalogOverride.js", () => ({
-      getCatalogPricing: (provider, model) => catalogPricing[`${provider}:${String(model).toLowerCase()}`] || null,
-    }));
+    // pricingRepo reaches the catalog through the source the server injects into
+    // capabilities.js (catalogOverride touches node:fs and must not be imported
+    // from a repo — that breaks the Cloudflare client build).
+    const getPricing = (provider, model) =>
+      catalogPricing[`${provider}:${String(model).toLowerCase()}`] || null;
+    vi.doMock("open-sse/providers/catalogOverride.js", () => ({ getCatalogPricing: getPricing }));
+    const capabilities = await import("../../open-sse/providers/capabilities.js");
+    capabilities.setCatalogSource({ getModalities: () => null, getLimits: () => null, getPricing });
     vi.doMock("@/lib/db/driver.js", () => ({
       getAdapter: () => ({ all: () => [] }),
     }));

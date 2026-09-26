@@ -10,6 +10,16 @@ const fakeD1 = {
         calls.push({ sql, args });
         return {};
       },
+      // Real D1 statements support .all() after .bind(); the scoped table read
+      // relies on it.
+      all: async () => {
+        calls.push({ sql, args });
+        return { results: [] };
+      },
+      first: async () => {
+        calls.push({ sql, args });
+        return null;
+      },
     }),
     run: async () => {
       calls.push({ sql, args: [] });

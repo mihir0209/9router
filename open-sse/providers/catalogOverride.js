@@ -91,5 +91,9 @@ export function invalidateCatalog() {
 // too, so it cannot import this file directly — the server pushes it in.
 export async function installCatalogSource() {
   const { setCatalogSource } = await import("./capabilities.js");
-  setCatalogSource({ getModalities: getCatalogModalities, getLimits: getCatalogLimits });
+  setCatalogSource({
+    getModalities: getCatalogModalities,
+    getLimits: getCatalogLimits,
+    getPricing: getCatalogPricing,
+  });
 }

@@ -90,7 +90,7 @@ async function invalidateIfStale() {
   resetApiKeysCache();
   try {
     const db = await getAdapter();
-    if (typeof db.resync === "function") await db.resync(true);
+    if (typeof db.resync === "function") await db.resync(true, ["apiKeys"]);
   } catch {}
 }
 
@@ -119,7 +119,7 @@ async function publishControlVersion() {
 async function adapterForWrite() {
   const db = await getAdapter();
   if (typeof db.resync === "function") {
-    await db.resync(true).catch(() => {});
+    await db.resync(true, ["apiKeys"]).catch(() => {});
   }
   return db;
 }
@@ -146,7 +146,7 @@ export async function getApiKeyById(id) {
   // isolate caches stale data and stamps it with the current control version,
   // convincing itself it is fresh until the adapter's own timer fires.
   if (process.env.NINEROUTER_RUNTIME === "cloudflare" && typeof db.resync === "function") {
-    await db.resync(true).catch(() => {});
+    await db.resync(true, ["apiKeys"]).catch(() => {});
   }
   const row = db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]);
   const parsed = rowToKey(row);
@@ -177,7 +177,7 @@ export async function getApiKeyByKey(key) {
   // isolate caches stale data and stamps it with the current control version,
   // convincing itself it is fresh until the adapter's own timer fires.
   if (process.env.NINEROUTER_RUNTIME === "cloudflare" && typeof db.resync === "function") {
-    await db.resync(true).catch(() => {});
+    await db.resync(true, ["apiKeys"]).catch(() => {});
   }
   const row = db.get(`SELECT * FROM apiKeys WHERE key = ?`, [key]);
   const parsed = rowToKey(row);
