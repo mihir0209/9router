@@ -1,6 +1,15 @@
 // Route-level acceptance for the Zed live-model wiring:
 //   GET /api/providers/[connectionId]/models  →  resolveZedModels  →  UI rows
 // RUN WITH AN ISOLATED DB:  DATA_DIR=$(mktemp -d) npx vitest run ...
+// Isolate this file's SQLite state before any import resolves DATA_DIR
+// (src/lib/dataDir.js reads it at module load). These acceptance tests write
+// real connections; without this they share ~/.9router with every other
+// DB-writing test file running concurrently, which races the driver and
+// intermittently fails an assertion unrelated to the code under test.
+vi.hoisted(() => {
+  const base = process.env.TMPDIR || process.env.TEMP || process.env.TMP || "/tmp";
+  process.env.DATA_DIR = `${base}/9router-test-${process.pid}-${Math.random().toString(36).slice(2)}`;
+});
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { GET } from "@/app/api/providers/[id]/models/route.js";
 import { createProviderConnection } from "@/models/index.js";

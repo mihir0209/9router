@@ -3,8 +3,16 @@ import { getAllProviders } from "@/lib/proxy/providers/registry.js";
 
 /**
  * End-to-end smoke test: verify each provider's fetch() returns real proxy data.
- * These make real network calls — skip in CI if needed.
+ *
+ * The live-fetch cases make real network calls, so they are gated behind
+ * RUN_LIVE=1 the same way tests/e2e/real/* is gated behind RUN_REAL=1. A plain
+ * `vitest run` therefore stays deterministic; public proxy lists rate-limit,
+ * 404 and intermittently return empty results, which is not a code regression.
+ *
+ *   RUN_LIVE=1 npx vitest run unit/proxy-providers-live.test.js
  */
+const RUN_LIVE = process.env.RUN_LIVE === "1";
+const live = RUN_LIVE ? it : it.skip;
 
 describe("Proxy providers — live fetch", () => {
   it("loads all providers from registry", async () => {
@@ -12,7 +20,7 @@ describe("Proxy providers — live fetch", () => {
     expect(providers.length).toBeGreaterThanOrEqual(7);
   });
 
-  it.each([
+  live.each([
     "proxyscrape",
     "geonode",
     "thespeedx",

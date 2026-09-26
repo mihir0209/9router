@@ -1,5 +1,14 @@
 // Acceptance suite for the Zed native-app auth fix.
 // RUN WITH AN ISOLATED DB:  DATA_DIR=$(mktemp -d) npx vitest run unit/zed-native-auth.test.js
+// Isolate this file's SQLite state before any import resolves DATA_DIR
+// (src/lib/dataDir.js reads it at module load). These acceptance tests write
+// real connections; without this they share ~/.9router with every other
+// DB-writing test file running concurrently, which races the driver and
+// intermittently fails an assertion unrelated to the code under test.
+vi.hoisted(() => {
+  const base = process.env.TMPDIR || process.env.TEMP || process.env.TMP || "/tmp";
+  process.env.DATA_DIR = `${base}/9router-test-${process.pid}-${Math.random().toString(36).slice(2)}`;
+});
 //
 // Covers criteria:
 //   1. Zed proxy starts

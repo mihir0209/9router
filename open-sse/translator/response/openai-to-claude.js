@@ -11,6 +11,15 @@ import { extractReasoningText } from "../concerns/reasoning.js";
 const CLAUDE_OAUTH_TOOL_PREFIX = "proxy_";
 
 // Sanitize tool call arguments to fix bad params from non-Anthropic models
+const isCompleteJson = (value) => {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 function sanitizeToolArgs(toolName, argsJson) {
   try {
     const args = JSON.parse(argsJson);
@@ -215,7 +224,22 @@ export function openaiToClaudeResponse(chunk, state) {
         if (toolInfo) {
           // Buffer args instead of streaming — sanitize at finish to fix bad params
           if (!state.toolArgBuffers) state.toolArgBuffers = new Map();
-          state.toolArgBuffers.set(idx, (state.toolArgBuffers.get(idx) || "") + tc.function.arguments);
+          if (toolInfo.argsEmitted) continue; // provider closed the object already
+          const buffered = (state.toolArgBuffers.get(idx) || "") + tc.function.arguments;
+          state.toolArgBuffers.set(idx, buffered);
+
+          // Sanitizing needs the whole object, so a partial delta has to keep
+          // buffering. But once the accumulated args parse on their own the call
+          // is complete, so release it now rather than waiting for
+          // finish_reason — which some providers never send.
+          if (isCompleteJson(buffered)) {
+            results.push({
+              type: "content_block_delta",
+              index: toolInfo.blockIndex,
+              delta: { type: "input_json_delta", partial_json: sanitizeToolArgs(toolInfo.name, buffered) }
+            });
+            toolInfo.argsEmitted = true;
+          }
         }
       }
     }
@@ -229,7 +253,7 @@ export function openaiToClaudeResponse(chunk, state) {
     for (const [idx, toolInfo] of state.toolCalls) {
       // Emit buffered + sanitized args as single delta before stop
       const buffered = state.toolArgBuffers?.get(idx);
-      if (buffered) {
+      if (buffered && !toolInfo.argsEmitted) {
         const sanitized = sanitizeToolArgs(toolInfo.name, buffered);
         results.push({
           type: "content_block_delta",

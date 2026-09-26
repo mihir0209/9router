@@ -127,16 +127,24 @@ describe("concurrency lease heartbeat", () => {
   };
 
   let calls;
+  let tokenUsage;
 
   beforeEach(() => {
     vi.useFakeTimers();
     calls = [];
+    tokenUsage = 0;
+    keyRecord.tokenLimitDaily = 0;
     vi.resetModules();
     vi.doMock("@/lib/localDb", () => ({
       getApiKeyByKey: async () => keyRecord,
       getCombos: async () => [],
     }));
-    vi.doMock("@/lib/db/repos/usageRepo.js", () => ({ getApiKeyTokenUsage: async () => 0 }));
+    // One stable mock for the whole block, driven by `tokenUsage`. Re-mocking
+    // this per test races the module registry when the whole suite runs in one
+    // worker, which let a stale (unmocked) usage value slip through.
+    vi.doMock("@/lib/db/repos/usageRepo.js", () => ({
+      getApiKeyTokenUsage: async () => tokenUsage,
+    }));
     vi.doMock("@/lib/coordinator/client.js", () => ({
       coordinatorCall: vi.fn(async (method, payload) => {
         calls.push({ method, payload });
@@ -186,7 +194,7 @@ describe("concurrency lease heartbeat", () => {
 
   it("returns a callable release, not a lease id, on a token-limit denial", async () => {
     keyRecord.tokenLimitDaily = 1;
-    vi.doMock("@/lib/db/repos/usageRepo.js", () => ({ getApiKeyTokenUsage: async () => 999_999 }));
+    tokenUsage = 999_999;
     try {
       const result = await enforce();
 

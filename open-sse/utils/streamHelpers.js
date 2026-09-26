@@ -4,21 +4,23 @@ import { SSE_DONE } from "./sseConstants.js";
 
 const sharedEncoder = new TextEncoder();
 
-// Parse SSE data line
+// Parse a stream line into JSON, or null when the line carries no data.
+// Handles both SSE ("data: {...}") and providers that emit raw NDJSON lines
+// (Ollama and friends) without a "data:" prefix. Callers may not know which
+// dialect a provider speaks, and a line starting with "{" is never valid SSE,
+// so a raw JSON object is always safe to hand back.
 export function parseSSELine(line, format = null) {
   if (!line) return null;
 
-  // NDJSON format (Ollama): raw JSON lines without "data:" prefix
-  if (format === FORMATS.OLLAMA) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("{")) {
-      try {
-        return JSON.parse(trimmed);
-      } catch (error) {
-        return null;
-      }
+  const trimmed = line.trim();
+
+  // Raw NDJSON: a complete JSON object with no SSE field prefix.
+  if (trimmed.charCodeAt(0) === 123 /* "{" */) {
+    try {
+      return JSON.parse(trimmed);
+    } catch (error) {
+      return null;
     }
-    return null;
   }
 
   // Standard SSE format: "data: {...}"
