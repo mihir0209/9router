@@ -119,6 +119,23 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connectionName: "BYOK",
         providerSpecificData: {},
         isByok: true,
+        // BYOK calls used to report no outcome at all, which made this traffic
+        // invisible in metrics. They must stay out of the coordinator's provider
+        // health scoring: the credential is the caller's, so a failure says
+        // nothing about the platform's account and must not degrade it or
+        // trigger account rotation for everyone else.
+        onProviderOutcome: async (outcome) => {
+          const { recordRequestOutcome } = await import("@/lib/observability/metrics.js");
+          recordRequestOutcome({
+            tenant: keyRecord.ownerRef || keyRecord.id,
+            provider: providerId,
+            connectionId: `byok:${keyRecord.id}`,
+            model,
+            success: outcome?.success === true,
+            status: Number(outcome?.status) || 0,
+            latencyMs: Number(outcome?.latencyMs) || 0,
+          });
+        },
       };
     } catch {
       return new ByokCredentialsError();

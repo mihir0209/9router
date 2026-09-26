@@ -2,10 +2,8 @@ import {
   getProviderCredentials,
   markAccountUnavailable,
   clearAccountError,
-  extractApiKey,
-  isValidApiKey,
 } from "../services/auth.js";
-import { getSettings } from "@/lib/localDb";
+import { validateAndEnforceApiKey } from "../services/validateApiKey.js";
 import { getModelInfo } from "../services/model.js";
 import { handleSystemoneCore } from "open-sse/handlers/systemoneCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
@@ -13,6 +11,8 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { saveRequestUsage } from "@/lib/usageDb.js";
+import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
+import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 
 /**
  * Handle System One (Jev) decision requests for the Next.js server.
@@ -34,43 +34,37 @@ export async function handleSystemone(request) {
 
   log.request("POST", `${url.pathname} | ${modelStr}`);
 
-  // Log API key (masked)
-  const apiKey = extractApiKey(request);
-  if (apiKey) {
-    log.debug("AUTH", `API Key: ${log.maskKey(apiKey)}`);
-  } else {
-    log.debug("AUTH", "No API key provided (local mode)");
+  // Auth: this route used to do its own boolean `isValidApiKey` check, which
+  // bypassed the shared enforcement path entirely. That had three consequences:
+  // rate limits, budgets, budgets reservations, model/provider/IP/endpoint
+  // restrictions and the concurrency lease were never applied; usage could not
+  // be attributed to a key; and because no keyRecord reached
+  // getProviderCredentials, a BYOK key silently fell through to a pooled
+  // platform account and the platform paid for the call.
+  const keyCheck = await validateAndEnforceApiKey(request, { model: modelStr }, "SYSTEMONE");
+  if (!keyCheck.allowed) {
+    return keyCheck.response;
   }
-
-  // Enforce API key if enabled in settings
-  const settings = await getSettings();
-  if (settings.requireApiKey) {
-    if (!apiKey) {
-      log.warn("AUTH", "Missing API key (requireApiKey=true)");
-      return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
-    }
-    const valid = await isValidApiKey(apiKey);
-    if (!valid) {
-      log.warn("AUTH", "Invalid API key (requireApiKey=true)");
-      return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
-    }
-  }
+  const apiKey = keyCheck.apiKey;
+  const finish = (response) => response?.body
+    ? guardApiKeyResponse(response, keyCheck.keyRecord, keyCheck.release)
+    : (void keyCheck.release?.(), response);
 
   if (!modelStr) {
     log.warn("SYSTEMONE", "Missing model");
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model"));
   }
   if (body.state === undefined || body.state === null) {
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: state");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: state"));
   }
   if (!body.questions || typeof body.questions !== "object" || Array.isArray(body.questions)) {
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: questions");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: questions"));
   }
 
   const modelInfo = await getModelInfo(modelStr);
   if (!modelInfo.provider) {
     log.warn("SYSTEMONE", "Invalid model format", { model: modelStr });
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
+    return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format"));
   }
 
   const { provider, model } = modelInfo;
@@ -87,7 +81,13 @@ export async function handleSystemone(request) {
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    // keyCheck carries the keyRecord, so a BYOK key is honoured here.
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, keyCheck);
+    // Must run before the !credentials check: getProviderCredentials *returns* a
+    // ByokCredentialsError rather than throwing, and it is truthy, so testing
+    // !credentials first would turn a BYOK auth failure into a misleading 400.
+    const credentialsError = typeof credentialsErrorResponse === "function" ? credentialsErrorResponse(credentials) : null;
+    if (credentialsError) return finish(credentialsError);
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -95,14 +95,14 @@ export async function handleSystemone(request) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("SYSTEMONE", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return finish(unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman));
       }
       if (excludeConnectionIds.size === 0) {
         log.error("AUTH", `No credentials for provider: ${provider}`);
-        return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
+        return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`));
       }
       log.warn("SYSTEMONE", "No more accounts available", { provider });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      return finish(errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable"));
     }
 
     log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
@@ -119,6 +119,11 @@ export async function handleSystemone(request) {
       }
     });
 
+    // A BYOK credential rejected upstream is the caller's own key being
+    // refused, not a platform account to rotate away from.
+    const byokError = byokUpstreamErrorResponse(credentials, result.status);
+    if (byokError) return finish(byokError);
+
     if (result.success) {
       if (result.usage) {
         saveRequestUsage({
@@ -126,6 +131,7 @@ export async function handleSystemone(request) {
           model,
           connectionId: credentials.connectionId,
           apiKey,
+          apiKeyId: keyCheck.keyRecord?.id || null,
           endpoint: url.pathname,
           tokens: {
             ...result.usage,
@@ -134,7 +140,7 @@ export async function handleSystemone(request) {
           status: "success",
         }).catch(() => {});
       }
-      return result.response;
+      return finish(result.response);
     }
 
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
@@ -147,6 +153,6 @@ export async function handleSystemone(request) {
       continue;
     }
 
-    return result.response;
+    return finish(result.response);
   }
 }

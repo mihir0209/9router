@@ -130,6 +130,14 @@ describe("Xquik search provider", () => {
   });
 
   it("reports Xquik credits without claiming an unknown USD cost", async () => {
+    // fetchPublic runs the SSRF guard first, which does a real dns.lookup. Left
+    // unmocked it hit live DNS on every run and intermittently stalled for the
+    // full 5s resolver timeout, failing the suite for no code reason. The public
+    // address is what the guard is checking for, so answer with that.
+    const dns = await import("node:dns");
+    const lookup = vi.spyOn(dns.promises, "lookup").mockResolvedValue([
+      { address: "93.184.216.34", family: 4 },
+    ]);
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(RESPONSE), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -150,5 +158,6 @@ describe("Xquik search provider", () => {
       provider_credits_used: 1,
     });
     expect(payload.pagination).toEqual({ has_more: true, next_cursor: "cursor-2" });
+    lookup.mockRestore();
   });
 });

@@ -5,6 +5,7 @@ import {
   extractApiKey,
 } from "../services/auth.js";
 import { validateAndEnforceApiKey } from "../services/validateApiKey.js";
+import { resolveProviderId } from "@/shared/constants/providers";
 import { getProviderConnectionById, getSettings } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
 import { handleVideoProxyCore, getVideoConfig, sanitizeSecrets } from "open-sse/handlers/videoCore.js";
@@ -24,8 +25,18 @@ const DEFAULT_VIDEO_PROVIDER = "xai";
  * Poll requests carry no model, so the provider comes from the pinned
  * connection (`x-connection-id`, returned on create) or an explicit
  * `?provider=` — falling back to the historical xAI default.
+ *
+ * `keyRecord` is needed because a BYOK key's "connection" is the synthetic id
+ * `byok:<keyId>`, which is not a providerConnections row: looking it up always
+ * missed and the poll silently fell back to xAI, so a BYOK key configured for
+ * another video provider was rejected by the strict provider check on poll even
+ * though its create call had succeeded.
  */
-async function resolveGetProvider(request, connectionId) {
+async function resolveGetProvider(request, connectionId, keyRecord) {
+  if (connectionId?.startsWith("byok:") && keyRecord?.byokProvider) {
+    const byokProvider = resolveProviderId(keyRecord.byokProvider);
+    if (getVideoConfig(byokProvider)) return byokProvider;
+  }
   if (connectionId) {
     const conn = await getProviderConnectionById(connectionId).catch(() => null);
     if (conn?.provider && getVideoConfig(conn.provider)) return conn.provider;
@@ -215,7 +226,7 @@ export async function handleVideoGet(request, requestId) {
   if (!requestId) return finishKeyResponse(errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing video request id"), keyCheck);
 
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
-  const provider = await resolveGetProvider(request, preferredConnectionId);
+  const provider = await resolveGetProvider(request, preferredConnectionId, keyCheck.keyRecord);
 
   const credentials = await getProviderCredentials(provider, null, null, { preferredConnectionId, ...keyCheck });
   const credentialsError = credentialsErrorResponse(credentials);
