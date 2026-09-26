@@ -4,6 +4,7 @@ import {
   REAL_TIMEOUT_MS,
   RUN_REAL,
   invokeChat,
+  replayableResponse,
   prepareTarget,
 } from "./_helpers.js";
 
@@ -23,7 +24,7 @@ function failure(status, message) {
 
 async function chatResponse(target, body) {
   const result = await invokeChat(target, body);
-  return result.response;
+  return replayableResponse(result);
 }
 
 suite("REAL combo fallback", () => {

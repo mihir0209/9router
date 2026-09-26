@@ -124,6 +124,21 @@ export async function invokeChat(target, body) {
   return { ...result, raw: text, json };
 }
 
+/**
+ * invokeChat reads the response body to produce `raw`/`json`, which leaves the
+ * Response it returns with a spent body. Callers that need to hand the response
+ * on (combo fallback passes it straight through) would then hit "Body is
+ * unusable: Body has already been read", so rebuild a fresh one from the
+ * captured text.
+ */
+export function replayableResponse(result) {
+  if (result?.raw == null) return result?.response;
+  return new Response(result.raw, {
+    status: result.response?.status || 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 export function parseSse(raw) {
   const normalized = String(raw || "").replace(/\r\n?/g, "\n");
   const blocks = normalized.split(/\n{2,}/).filter((block) => block.trim());
