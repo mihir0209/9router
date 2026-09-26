@@ -102,7 +102,16 @@ export default function PricingSettingsPage() {
         <div className="space-y-3 text-sm text-text-muted">
           <p>
             <strong>Cost Calculation:</strong> Costs are calculated based on token usage and pricing rates.
-            Each request&apos;s cost is determined by: (input_tokens × input_rate) + (output_tokens × output_rate) + (cached_tokens × cached_rate)
+            Cache reads and cache writes are counted as subsets of the input tokens, so they are billed at
+            their own rates rather than the input rate: (input − cached − cache_creation) × input_rate,
+            plus cached × cached_rate, plus cache_creation × cache_creation_rate, plus output × output_rate.
+            Reasoning tokens are a breakdown within the output tokens, so they are billed at reasoning_rate
+            and deducted from the output billed at output_rate — they are never charged twice.
+          </p>
+          <p>
+            <strong>Pricing Sources:</strong> Rates come from the built-in tables first, then from
+            per-model rates synced daily from models.dev for anything the tables do not list. A model with
+            no rate anywhere is reported as $0.
           </p>
           <p>
             <strong>Pricing Format:</strong> All rates are in <strong>dollars per million tokens</strong> ($/1M tokens).

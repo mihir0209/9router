@@ -6,13 +6,22 @@ const pricingKv = makeKv("pricing");
 const CACHE_TTL_MS = 5000;
 
 let cache = { value: null, expiresAt: 0 };
+let userCache = { value: null, expiresAt: 0 };
 
 function invalidate() {
   cache = { value: null, expiresAt: 0 };
+  userCache = { value: null, expiresAt: 0 };
 }
 
 async function getUserPricing() {
-  return await pricingKv.getAll();
+  // getPricingForModel() runs on every single cost calculation (once per
+  // request), and it was calling pricingKv.getAll() uncached each time. Share
+  // one TTL cache between both entry points.
+  const now = Date.now();
+  if (userCache.value && userCache.expiresAt > now) return userCache.value;
+  const value = await pricingKv.getAll();
+  userCache = { value, expiresAt: now + CACHE_TTL_MS };
+  return value;
 }
 
 export async function getPricing() {
@@ -51,9 +60,25 @@ export async function getPricing() {
 export async function getPricingForModel(provider, model) {
   if (!model) return null;
   const userPricing = await getUserPricing();
-  if (provider && userPricing[provider]?.[model]) return userPricing[provider][model];
-  const { getPricingForModel: resolveConst } = await import("open-sse/providers/pricing.js");
-  return resolveConst(provider, model);
+  const { getPricingForModel: resolveConst, pricingKeyForProvider } = await import("open-sse/providers/pricing.js");
+  // Apply the same id→alias mapping as the static resolver so a user override
+  // stored under the registry alias ("gh") is found by a call site that passes
+  // the resolved provider id ("github").
+  const key = pricingKeyForProvider(provider);
+  if (provider && userPricing[key]?.[model]) return userPricing[key][model];
+
+  const resolved = resolveConst(provider, model);
+  if (resolved) return resolved;
+
+  // Last resort: rates synced from models.dev. ~165 registered models had no
+  // hand-written entry, and an unresolved model silently cost $0 — a paid model
+  // billed nothing. Kept behind the tables so deliberate overrides and reseller
+  // rates (TokenRouter) still win.
+  if (provider) {
+    const { getCatalogPricing } = await import("open-sse/providers/catalogOverride.js");
+    return getCatalogPricing(provider, model) || null;
+  }
+  return null;
 }
 
 // Atomic merge inside transaction (per-provider read-modify-write)

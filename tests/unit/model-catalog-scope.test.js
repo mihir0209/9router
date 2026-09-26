@@ -27,15 +27,18 @@ const entries = [
   { provider: "kimi", model: "kimi-k3", current: { contextWindow: 128000, maxOutput: 32000 } },
 ];
 
-let build, getCatalogModalities, invalidateCatalog, syncModelCatalog, startModelCatalogSync, capabilities;
+let build, getCatalogModalities, invalidateCatalog, syncModelCatalog, startModelCatalogSync, capabilities, CATALOG_VERSION;
 
 beforeAll(async () => {
   ({ build, syncModelCatalog, startModelCatalogSync } = await import("../../src/lib/modelCatalog/sync.js"));
+  // Reference the constant rather than repeating the number: bumping the
+  // catalog schema used to break this file purely from the duplicated literal.
+  ({ CATALOG_VERSION } = await import("../../open-sse/providers/catalogOverride.js"));
   // the builder is exercised directly; a missing export must fail loudly here
   // rather than skip every case below
   expect(typeof build).toBe("function");
   const { models, providers } = build(upstream, entries);
-  fs.writeFileSync(catalogFile, JSON.stringify({ v: 2, models, providers }));
+  fs.writeFileSync(catalogFile, JSON.stringify({ v: CATALOG_VERSION, models, providers }));
   ({ getCatalogModalities, invalidateCatalog } = await import("../../open-sse/providers/catalogOverride.js"));
   capabilities = await import("../../open-sse/providers/capabilities.js");
 });
@@ -153,7 +156,7 @@ describe("catalog schema", () => {
     }
     expect(sent[0]["if-none-match"]).toBeUndefined();
     const written = JSON.parse(fs.readFileSync(catalogFile, "utf8"));
-    expect(written.v).toBe(2);
+    expect(written.v).toBe(CATALOG_VERSION);
     expect(written.models["glm:glm-4.6v"]).toEqual({ vision: true });
   });
 

@@ -47,6 +47,7 @@ export function getSyncState() {
 
 // "zai-org/GLM-4.6V:free" -> "glm-4.6v"
 function baseId(modelId) {
+  if (!modelId) return "";
   const withoutVendor = modelId.includes("/") ? modelId.split("/").pop() : modelId;
   return withoutVendor.toLowerCase().split(":")[0];
 }
@@ -69,6 +70,7 @@ function slim(catalog) {
         c: model?.limit?.context,
         o: model?.limit?.output,
         r: model?.reasoning || undefined,
+        p: model?.cost || undefined,
       };
     }
     out[providerId] = models;
@@ -151,7 +153,37 @@ export function build(catalog, entries) {
     if (Object.keys(delta).length) (providers[provider] || (providers[provider] = {}))[model] = delta;
   }
 
-  return { models, providers };
+  // Cost is a property of the model, not of the gateway's rate card, so it is
+  // filed under every local id the model is reachable through — including the
+  // upstream id, for custom provider nodes. Units are $/1M tokens, which is
+  // exactly what open-sse/providers/pricing.js uses, so no conversion is needed.
+  // This is the fallback tier behind the hand-written tables: it stops a paid
+  // model that the tables have not caught up with from silently costing $0.
+  const pricing = {};
+  for (const [providerId, provider] of Object.entries(catalog)) {
+    const locals = localIds.get(providerId) || [providerId];
+    for (const [modelId, model] of Object.entries(provider?.models || {})) {
+      const cost = model?.cost;
+      if (!cost) continue;
+      const input = Number(cost.input);
+      const output = Number(cost.output);
+      if (!Number.isFinite(input) || !Number.isFinite(output)) continue;
+
+      const rates = { input, output };
+      // models.dev omits cache rates for most models; leave them out rather than
+      // storing 0, so the resolver falls back to the input rate as before.
+      const cacheRead = Number(cost.cache_read);
+      if (Number.isFinite(cacheRead)) rates.cached = cacheRead;
+      const cacheWrite = Number(cost.cache_write);
+      if (Number.isFinite(cacheWrite)) rates.cache_creation = cacheWrite;
+
+      const id = baseId(modelId);
+      for (const local of locals) pricing[`${local}:${id}`] = rates;
+      if (!locals.includes(providerId)) pricing[`${providerId}:${id}`] = rates;
+    }
+  }
+
+  return { models, providers, pricing };
 }
 
 // Snapshot every registered model with the capabilities the hand-written tables
@@ -203,8 +235,8 @@ export async function syncModelCatalog() {
       const catalog = await response.json();
       const etag = response.headers.get("etag") || null;
       const entries = await collectEntries();
-      const { models, providers } = build(catalog, entries);
-      const serialized = JSON.stringify({ v: CATALOG_VERSION, etag, syncedAt: Date.now(), models, providers });
+      const { models, providers, pricing } = build(catalog, entries);
+      const serialized = JSON.stringify({ v: CATALOG_VERSION, etag, syncedAt: Date.now(), models, providers, pricing });
 
       writeAtomic(CATALOG_FILE, serialized);
       writeAtomic(CATALOG_RAW_FILE, JSON.stringify(slim(catalog)));
@@ -218,8 +250,9 @@ export async function syncModelCatalog() {
         bytes: Buffer.byteLength(serialized),
         models: Object.keys(models).length,
         providers: Object.keys(providers).length,
+        priced: Object.keys(pricing).length,
       };
-      console.log(`[modelCatalog] ${result.models} models, ${result.providers} providers, ${(result.bytes / 1024).toFixed(1)}KB`);
+      console.log(`[modelCatalog] ${result.models} models, ${result.providers} providers, ${result.priced} priced, ${(result.bytes / 1024).toFixed(1)}KB`);
     }
 
     state.lastSync = Date.now();

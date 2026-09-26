@@ -374,8 +374,9 @@ export function getPricingForModel(provider, model) {
   if (!model) return null;
 
   // 1. Provider-specific override
-  if (provider && PROVIDER_PRICING[provider]?.[model]) {
-    return PROVIDER_PRICING[provider][model];
+  const key = pricingKeyForProvider(provider);
+  if (provider && PROVIDER_PRICING[key]?.[model]) {
+    return PROVIDER_PRICING[key][model];
   }
 
   // 2. Canonical model pricing (strip vendor prefix if needed: "deepseek/deepseek-chat" → "deepseek-chat")
@@ -399,6 +400,24 @@ export function getPricingForModel(provider, model) {
  */
 export function getDefaultPricing() {
   return PROVIDER_PRICING;
+}
+
+/**
+ * Provider id → PROVIDER_PRICING key.
+ *
+ * Cost call sites pass the *resolved* provider id (model.js runs
+ * resolveProviderAlias first), but this table is keyed by the registry alias.
+ * Without this map `PROVIDER_PRICING.gh` was unreachable and the override
+ * silently ignored, and any future id-keyed entry would be ignored too.
+ */
+export const PROVIDER_PRICING_ALIASES = {
+  github: "gh",
+};
+
+/** Resolve a provider id to its PROVIDER_PRICING table key. */
+export function pricingKeyForProvider(provider) {
+  if (!provider) return provider;
+  return PROVIDER_PRICING_ALIASES[provider] || provider;
 }
 
 /**
@@ -432,19 +451,27 @@ export function calculateCostFromTokens(tokens, pricing) {
   cost += nonCachedInput * (pricing.input / 1000000);
 
   if (cachedTokens > 0) {
-    cost += cachedTokens * ((pricing.cached || pricing.input) / 1000000);
+    cost += cachedTokens * ((pricing.cached ?? pricing.input) / 1000000);
   }
 
   const outputTokens = tokens.completion_tokens || tokens.output_tokens || 0;
-  cost += outputTokens * (pricing.output / 1000000);
+  // reasoning_tokens is a breakdown WITHIN completion_tokens, not an addition to
+  // it (see canonicalizeUsage: reasoning ⊆ completion). Charging both
+  // independently billed every reasoning token twice — once at the output rate
+  // as part of completion, then again at the reasoning rate. That overcharged by
+  // ~49% on reasoning-heavy models such as gpt-5.6. Bill the non-reasoning
+  // remainder at the output rate and the reasoning portion at its own rate, so a
+  // premium reasoning rate is still honoured and an equal rate is unchanged.
+  const reasoningTokens = Math.max(0, Math.min(outputTokens, tokens.reasoning_tokens || 0));
+  const billableOutputTokens = outputTokens - reasoningTokens;
+  cost += billableOutputTokens * (pricing.output / 1000000);
 
-  const reasoningTokens = tokens.reasoning_tokens || 0;
   if (reasoningTokens > 0) {
-    cost += reasoningTokens * ((pricing.reasoning || pricing.output) / 1000000);
+    cost += reasoningTokens * ((pricing.reasoning ?? pricing.output) / 1000000);
   }
 
   if (cacheCreationTokens > 0) {
-    cost += cacheCreationTokens * ((pricing.cache_creation || pricing.input) / 1000000);
+    cost += cacheCreationTokens * ((pricing.cache_creation ?? pricing.input) / 1000000);
   }
 
   return cost;

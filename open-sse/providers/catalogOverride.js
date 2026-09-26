@@ -16,9 +16,10 @@ export const CATALOG_RAW_FILE = path.join(DATA_DIR, "model-catalog-raw.json");
 // Schema of the file this module reads. The writer stamps it; a file carrying an
 // older value predates provider-scoped modality keys, and its flat keys are not
 // looked up here, so the sync rebuilds it instead of asking upstream for a 304.
-export const CATALOG_VERSION = 2;
+// 3 adds per-model pricing rates.
+export const CATALOG_VERSION = 3;
 
-const EMPTY = { models: {}, providers: {} };
+const EMPTY = { models: {}, providers: {}, pricing: {} };
 let cache = EMPTY;
 let cachedMtime = -1;
 
@@ -43,7 +44,11 @@ function load() {
   cachedMtime = mtime;
   try {
     const parsed = JSON.parse(fs.readFileSync(CATALOG_FILE, "utf8"));
-    cache = { models: parsed?.models || {}, providers: parsed?.providers || {} };
+    cache = {
+      models: parsed?.models || {},
+      providers: parsed?.providers || {},
+      pricing: parsed?.pricing || {},
+    };
   } catch {
     cache = EMPTY;
   }
@@ -67,6 +72,14 @@ export function getCatalogLimits(provider, model) {
   const byProvider = provider && load().providers[provider];
   if (!byProvider) return null;
   return byProvider[model] || byProvider[baseId(model)] || null;
+}
+
+// Per-model rates synced from models.dev, in $/1M tokens. Only consulted for
+// models the hand-written pricing tables do not resolve, so deliberate overrides
+// and reseller rates keep priority over the upstream catalog.
+export function getCatalogPricing(provider, model) {
+  if (!provider) return null;
+  return load().pricing[`${provider}:${baseId(model)}`] || null;
 }
 
 // Force a re-read on the next lookup (called right after a sync writes the file).
