@@ -410,6 +410,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           provider: providerId,
           connectionId: connection.id,
           model,
+          // Tenant identity for per-tenant observability. Same scope string the
+          // rate/concurrency coordinator uses, so a tenant means one thing across
+          // enforcement and metrics. Unauthenticated traffic (no key record) is
+          // reported under "anonymous" rather than dropped, so shared traffic is
+          // still visible instead of silently unattributed.
+          tenant: keyRecord?.ownerRef || keyRecord?.id || "anonymous",
           success: outcome?.success === true,
           status: Number(outcome?.status) || 0,
           latencyMs: Number(outcome?.latencyMs) || 0,

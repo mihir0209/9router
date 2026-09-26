@@ -178,9 +178,14 @@ export class GatewayCoordinator extends DurableObject {
   async recordMetrics({ outcome }) {
     const now = Number(outcome?.now) || Date.now();
     if (!outcome?.provider) return { recorded: false };
-    const key = `metrics:outcome:${outcome.provider}:${outcome.connectionId}:${outcome.model}`;
+    // Tenant is part of the row identity: one upstream connection can be healthy
+    // for one tenant and failing for another, and per-connection verdicts cannot
+    // answer "who is affected right now".
+    const tenant = typeof outcome.tenant === "string" && outcome.tenant.trim() ? outcome.tenant.trim() : "anonymous";
+    const key = `metrics:outcome:${tenant}:${outcome.provider}:${outcome.connectionId}:${outcome.model}`;
     const previous = await this.ctx.storage.get(key);
     const current = previous || {
+      tenant,
       provider: outcome.provider,
       connectionId: outcome.connectionId,
       model: outcome.model,
@@ -212,16 +217,32 @@ export class GatewayCoordinator extends DurableObject {
       next.latencyMaxMs = Math.max(next.latencyMaxMs, latency);
     }
     await this.ctx.storage.put(totalsKey, next);
+
+    // Per-tenant rollup, so a tenant-scoped read does not have to sum every
+    // provider row (and so the counters can be labelled per tenant).
+    const tenantTotalsKey = `metrics:tenant:${tenant}`;
+    const tenantTotals = (await this.ctx.storage.get(tenantTotalsKey)) || { tenant, requests: 0, successes: 0, failures: 0 };
+    tenantTotals.requests += 1;
+    if (outcome.success) tenantTotals.successes += 1;
+    else tenantTotals.failures += 1;
+    await this.ctx.storage.put(tenantTotalsKey, tenantTotals);
+
     return { recorded: true };
   }
 
-  async getMetrics() {
+  async getMetrics({ tenant } = {}) {
     const all = await this.ctx.storage.list({ prefix: "metrics:" });
     const providers = [];
+    const tenantTotals = new Map();
     let totals = null;
     for (const [key, value] of all.entries()) {
       if (key === "metrics:totals") totals = value;
-      else if (key.startsWith("metrics:outcome:")) providers.push(value);
+      else if (key.startsWith("metrics:tenant:")) tenantTotals.set(value?.tenant || key.slice("metrics:tenant:".length), value);
+      else if (key.startsWith("metrics:outcome:")) {
+        // A tenant-scoped read must not return rows belonging to other tenants.
+        if (tenant && value?.tenant !== tenant) continue;
+        providers.push(value);
+      }
     }
     const latency = {
       count: totals?.latencyCount || 0,
@@ -232,24 +253,42 @@ export class GatewayCoordinator extends DurableObject {
     const alerts = providers
       .filter((entry) => entry.consecutiveFailures >= 3 || (entry.successes + entry.failures >= 5 && entry.failures / (entry.successes + entry.failures) >= 0.5))
       .map((entry) => ({
-        fingerprint: `${entry.provider}:${entry.connectionId}:${entry.model}`,
+        fingerprint: `${entry.tenant || "anonymous"}:${entry.provider}:${entry.connectionId}:${entry.model}`,
         severity: entry.consecutiveFailures >= 5 ? "critical" : "warning",
         type: "provider_degraded",
+        tenant: entry.tenant || "anonymous",
         provider: entry.provider,
         model: entry.model,
         connectionId: entry.connectionId,
         consecutiveFailures: entry.consecutiveFailures,
         observedAt: entry.updatedAt,
       }));
+    // Counters are labelled per tenant: the unfiltered view aggregates the
+    // cluster, a filtered one reports only that tenant's numbers.
+    const counters = tenant
+      ? (() => {
+          const t = tenantTotals.get(tenant);
+          return [
+            { name: "provider_requests_total", labels: { tenant }, value: t?.requests || 0 },
+            { name: "provider_success_total", labels: { tenant }, value: t?.successes || 0 },
+            { name: "provider_failure_total", labels: { tenant }, value: t?.failures || 0 },
+          ];
+        })()
+      : [
+          { name: "provider_requests_total", labels: {}, value: totals?.requests || 0 },
+          { name: "provider_success_total", labels: {}, value: totals?.successes || 0 },
+          { name: "provider_failure_total", labels: {}, value: totals?.failures || 0 },
+        ];
+
     return {
       startedAt: totals?.startedAt || Date.now(),
-      counters: [
-        { name: "provider_requests_total", labels: {}, value: totals?.requests || 0 },
-        { name: "provider_success_total", labels: {}, value: totals?.successes || 0 },
-        { name: "provider_failure_total", labels: {}, value: totals?.failures || 0 },
-      ],
+      ...(tenant ? { tenant } : {}),
+      counters,
       providers,
-      latency,
+      // Latency is tracked cluster-wide only, so a tenant-scoped read must not
+      // present it as that tenant's; null says "not tracked per tenant" instead
+      // of implying zero.
+      latency: tenant ? { count: null, sumMs: null, maxMs: null, averageMs: null } : latency,
       alerts,
     };
   }

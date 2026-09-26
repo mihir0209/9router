@@ -165,7 +165,9 @@ describe("metrics durability", () => {
   it("renders prometheus output from the merged snapshot", async () => {
     recordRequestOutcome({ provider: "openai", connectionId: "a1", model: "gpt-5", success: true, status: 200, latencyMs: 100 });
     const text = prometheusMetrics(await getMetricsSnapshot());
-    expect(text).toContain('provider_successes_total{provider="openai",model="gpt-5",connection="a1"} 1');
+    // Tenant leads the label set; this outcome carries no API key, so it is
+    // attributed to "anonymous" rather than dropped.
+    expect(text).toContain('provider_successes_total{tenant="anonymous",provider="openai",model="gpt-5",connection="a1"} 1');
     expect(text).toContain("gateway_latency_average_ms 100");
   });
 });
