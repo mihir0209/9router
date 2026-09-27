@@ -108,6 +108,7 @@ export async function getProviderConnections(filter = {}) {
     list = connRepoCache.list;
   } else {
     const db = await getAdapter();
+  await db.ensureTables?.(["providerConnections"]);
     if (typeof db.resync === "function") {
       await db.resync().catch(() => {});
     }
@@ -161,6 +162,7 @@ function reorderInTx(db, providerId) {
 
 export async function createProviderConnection(data) {
   const db = await getAdapter();
+  await db.ensureTables?.(["providerConnections"]);
   const now = new Date().toISOString();
   let result;
 
@@ -290,6 +292,7 @@ export async function createProviderConnection(data) {
 // Critical: OAuth refresh token race — atomic merge inside transaction
 export async function updateProviderConnection(id, data) {
   const db = await getAdapter();
+  await db.ensureTables?.(["providerConnections"]);
   let result;
   db.transaction(() => {
     const row = db.get(`SELECT * FROM providerConnections WHERE id = ?`, [id]);
@@ -307,6 +310,7 @@ export async function updateProviderConnection(id, data) {
 
 export async function deleteProviderConnection(id) {
   const db = await getAdapter();
+  await db.ensureTables?.(["providerConnections"]);
   let ok = false;
   db.transaction(() => {
     const row = db.get(`SELECT provider FROM providerConnections WHERE id = ?`, [id]);
@@ -329,6 +333,7 @@ export async function deleteProviderConnectionsByProvider(providerId) {
 
 export async function reorderProviderConnections(providerId) {
   const db = await getAdapter();
+  await db.ensureTables?.(["providerConnections"]);
   db.transaction(() => reorderInTx(db, providerId));
   resetConnectionsCache();
 }

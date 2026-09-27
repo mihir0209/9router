@@ -167,6 +167,7 @@ export async function saveRequestDetail(detail) {
 
 export async function getRequestDetails(filter = {}) {
   const db = await getAdapter();
+  await db.ensureTables?.(["requestDetails"]);
   const conds = [];
   const params = [];
 
@@ -200,12 +201,14 @@ export async function getRequestDetails(filter = {}) {
 
 export async function getDistinctProviders() {
   const db = await getAdapter();
+  await db.ensureTables?.(["requestDetails"]);
   const rows = db.all(`SELECT DISTINCT provider FROM requestDetails WHERE provider IS NOT NULL ORDER BY provider ASC`);
   return rows.map((r) => r.provider);
 }
 
 export async function getRequestDetailById(id) {
   const db = await getAdapter();
+  await db.ensureTables?.(["requestDetails"]);
   const row = db.get(`SELECT data FROM requestDetails WHERE id = ?`, [id]);
   return row ? parseJson(row.data, null) : null;
 }

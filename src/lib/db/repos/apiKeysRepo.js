@@ -256,6 +256,11 @@ export async function createApiKey(name, machineId, options = {}) {
 
 export async function updateApiKey(id, data) {
   const db = await adapterForWrite();
+  // usageHistory is a lazy table. The transaction body below is synchronous and
+  // cannot await, so load it up front when this call is about to remap keys.
+  if (data?.key !== undefined && data?.key !== null && String(data.key).trim() !== "") {
+    await db.ensureTables?.(["usageHistory"]);
+  }
   let result = null;
   db.transaction(() => {
     const row = db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]);

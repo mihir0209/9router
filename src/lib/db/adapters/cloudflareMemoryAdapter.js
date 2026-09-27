@@ -197,9 +197,40 @@ export async function createCloudflareMemoryAdapter() {
   // resource limits (CF 1102) and made the instance fail most requests. They are
   // analytics: nothing on the request path needs them resident, and an explicit
   // resync(force, ["usageHistory"]) can still pull them on demand.
-  const EAGER_TABLES = Object.keys(TABLES).filter(
-    (table) => table !== "usageHistory" && table !== "requestDetails"
-  );
+  // Cold start used to fetch and JSON.parse the whole database before serving
+  // anything: 1.28MB / 3,631 rows on the live D1, of which kv alone is 919KB and
+  // providerConnections 295KB. On the Workers Free plan the CPU budget is 10ms
+  // per request (Paid is 30s by default) and Cloudflare does not count time
+  // spent waiting on the D1 query — only the JSON.parse. So the parse was
+  // blowing the budget on nearly every cold isolate, which is the
+  // "Worker exceeded CPU time limit" on endpoints that read almost nothing.
+  //
+  // These tables therefore load on first touch instead of at init. kv is
+  // reference data most requests never read; providerConnections is read by
+  // routing, not by the admin/auth surface; the other two are analytics that
+  // belong in the DB, not in a Worker's heap.
+  const LAZY_TABLES = new Set(["kv", "providerConnections", "usageHistory", "requestDetails"]);
+  const EAGER_TABLES = Object.keys(TABLES).filter((table) => !LAZY_TABLES.has(table));
+  const loadedTables = new Set(EAGER_TABLES);
+
+  /** Load a lazy table from D1 once, on first touch. Safe to call concurrently. */
+  async function ensureTables(names) {
+    if (!d1) return;
+    const wanted = (Array.isArray(names) ? names : [names]).filter((n) => LAZY_TABLES.has(n) && !loadedTables.has(n));
+    if (!wanted.length || transactionDepth > 0) return;
+    // Mark before awaiting so a concurrent caller cannot double-load.
+    for (const table of wanted) loadedTables.add(table);
+    try {
+      const fresh = await fetchTablesFromD1(wanted);
+      for (const table of wanted) {
+        if (!state.tables[table]) state.tables[table] = [];
+        for (const row of fresh[table] || []) state.tables[table].push(row);
+      }
+    } catch (error) {
+      for (const table of wanted) loadedTables.delete(table);
+      console.warn(`[DB] lazy load failed for ${wanted.join(",")}: ${error.message}`);
+    }
+  }
 
   /**
    * Read the given tables into a scratch object. Live state is never touched
@@ -269,7 +300,9 @@ export async function createCloudflareMemoryAdapter() {
     const scoped = Array.isArray(tableNames) ? tableNames.filter((name) => TABLES[name]) : null;
     if (!force && now - lastD1SyncTs < D1_RESYNC_INTERVAL_MS) return;
     lastD1SyncTs = now;
-    const wanted = scoped || EAGER_TABLES;
+    // Deduped: loadedTables is seeded with EAGER_TABLES, so a plain concat
+    // would list the same table twice.
+    const wanted = scoped || [...new Set([...loadedTables, ...EAGER_TABLES])];
     // Snapshot each table's row count. Anything awaited below yields to other
     // requests, and one of them may write to a table we are about to replace.
     // A table whose length moved while we were fetching has been written to and
@@ -548,6 +581,7 @@ export async function createCloudflareMemoryAdapter() {
     exec,
     transaction,
     resync: resyncFromD1,
+    ensureTables,
     close: () => {},
     raw: state,
   };

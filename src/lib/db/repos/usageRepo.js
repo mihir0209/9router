@@ -545,6 +545,7 @@ export async function saveRequestUsage(entry) {
     }
 
     const db = await getAdapter();
+  await db.ensureTables?.(["usageHistory", "usageDaily"]);
 
     if (!entry.timestamp) entry.timestamp = new Date().toISOString();
     if (entry.forceZeroCost || entry.connectionId?.startsWith("byok:")) {
@@ -682,6 +683,7 @@ export async function getApiKeyTokenUsage(apiKeyId, apiKey, since) {
 
 export async function getUsageHistory(filter = {}) {
   const db = await getAdapter();
+  await db.ensureTables?.(["usageHistory", "usageDaily"]);
   const conds = [];
   const params = [];
 
@@ -724,6 +726,7 @@ export async function getUsageHistory(filter = {}) {
 
 export async function getApiKeyDailyUsage(apiKey, { from, to } = {}) {
   const db = await getAdapter();
+  await db.ensureTables?.(["usageHistory", "usageDaily"]);
   const conditions = ["apiKey = ?"];
   const params = [apiKey];
 
@@ -817,6 +820,7 @@ function loadDaysInRange(adapter, maxDays) {
 
 export async function getUsageStats(period = "all") {
   const db = await getAdapter();
+  await db.ensureTables?.(["usageHistory", "usageDaily"]);
 
   const [{ getProviderConnections }, { getApiKeys }, { getProviderNodes }] = await Promise.all([
     import("./connectionsRepo.js"),
@@ -1150,6 +1154,7 @@ export async function getUsageStats(period = "all") {
 
 export async function getChartData(period = "7d") {
   const db = await getAdapter();
+  await db.ensureTables?.(["usageHistory", "usageDaily"]);
   const now = Date.now();
 
   if (period === "today") {
@@ -1261,6 +1266,7 @@ export async function appendRequestLog() {}
 export async function getRecentLogs(limit = 200) {
   try {
     const db = await getAdapter();
+  await db.ensureTables?.(["usageHistory", "usageDaily"]);
 
     const connMap = {};
     try {

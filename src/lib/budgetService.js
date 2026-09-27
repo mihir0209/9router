@@ -42,6 +42,7 @@ async function readBudgetState(keyRecord, now) {
 
   const { startsAt, resetsAt } = getWindow(keyRecord, now);
   const db = await getAdapter();
+  await db.ensureTables?.(["usageHistory"]);
   const byKey = db.get(
     `SELECT COALESCE(SUM(cost), 0) AS used
        FROM usageHistory
@@ -129,6 +130,7 @@ export async function debitBudget(apiKey, { requestId, reserveUsd, commitUsd }, 
     }
 
     const db = await getAdapter();
+    await db.ensureTables?.(["usageHistory"]);
     const model = `budget-commit:${requestId}`;
     const existingCommit = db.get(
       `SELECT cost FROM usageHistory WHERE apiKeyId = ? AND provider = 'budget' AND model = ? LIMIT 1`,
