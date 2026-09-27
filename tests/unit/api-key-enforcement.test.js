@@ -289,3 +289,78 @@ describe("API Key Enforcement - invalid key", () => {
     expect(result.allowed).toBe(true);
   });
 });
+
+const COMBO_FIXTURES = [
+  { name: "auto", models: ["fast", "deep"] },
+  { name: "fast", models: ["openai/gpt-4o", "azure/gpt-4o"] },
+  { name: "deep", models: ["anthropic/claude-opus-4"] },
+];
+
+// A combo whose members are themselves combos used to reject every request with
+// 403: resolveRequestedModels() expanded exactly one level, so a combo built only
+// from combos produced an empty resolved set and the allow-list had nothing to
+// match. These pin the fix and, deliberately, the security decision that a combo
+// is authorised by name rather than by its members.
+async function setupCombo(allowedModels, combos = COMBO_FIXTURES) {
+  const { createCombo } = await import("@/lib/db/repos/combosRepo.js");
+  for (const combo of combos) await createCombo({ name: combo.name, models: combo.models });
+  const { createApiKey } = await import("@/lib/db/repos/apiKeysRepo.js");
+  const { getConsistentMachineId } = await import("@/shared/utils/machineId.js");
+  const { enforceApiKeyRestrictions } = await import("@/sse/services/apiKeyEnforcement.js");
+  const machineId = await getConsistentMachineId();
+  const key = await createApiKey("combo-key", machineId, { allowedModels });
+  return enforceApiKeyRestrictions(key.key, makeRequest(), { model: "auto" });
+}
+
+describe("API Key Enforcement - combo model restrictions", () => {
+  it("allows a key that lists a nested combo by name", async () => {
+    // This is the reported bug: allowedModels=auto, request model=auto.
+    const result = await setupCombo("auto");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("still 403s a key that does not list the combo", async () => {
+    const result = await setupCombo("gemini-family");
+    expect(result.allowed).toBe(false);
+    expect(result.status).toBe(403);
+  });
+
+  it("still allows the wildcard", async () => {
+    const result = await setupCombo("*");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("does NOT widen a key restricted to one member of the combo", async () => {
+    // The security decision: `auto` resolves to gpt-4o, gpt-4o and opus. A key
+    // that only allows openai/gpt-4o must not thereby gain the whole combo.
+    const result = await setupCombo("openai/gpt-4o");
+    expect(result.allowed).toBe(false);
+    expect(result.status).toBe(403);
+  });
+
+  it("survives a cyclic combo without hanging", async () => {
+    const cyclic = [
+      { name: "auto", models: ["loop-a"] },
+      { name: "loop-a", models: ["loop-b"] },
+      { name: "loop-b", models: ["loop-a", "openai/gpt-4o"] },
+    ];
+    const result = await setupCombo("auto", cyclic);
+    expect(result.allowed).toBe(true);
+  });
+
+  it("terminates on a self-referencing combo", async () => {
+    const selfRef = [{ name: "auto", models: ["auto", "openai/gpt-4o"] }];
+    const result = await setupCombo("auto", selfRef);
+    expect(result.allowed).toBe(true);
+  });
+
+  it("a cyclic combo still 403s when not listed", async () => {
+    const cyclic = [
+      { name: "auto", models: ["loop-a"] },
+      { name: "loop-a", models: ["loop-b"] },
+      { name: "loop-b", models: ["loop-a", "openai/gpt-4o"] },
+    ];
+    const result = await setupCombo("something-else", cyclic);
+    expect(result.allowed).toBe(false);
+  });
+});
