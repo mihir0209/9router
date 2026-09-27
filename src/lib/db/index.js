@@ -1,5 +1,8 @@
 // Public API barrel — all DB functions
 import { getAdapter } from "./driver.js";
+import { resetCombosCache } from "./repos/combosRepo.js";
+import { resetKvCache } from "./repos/aliasRepo.js";
+import { resetPricingCache } from "./repos/pricingRepo.js";
 import { stringifyJson, parseJson } from "./helpers/jsonCol.js";
 
 // Settings
@@ -191,6 +194,13 @@ export async function importDb(payload) {
       db.run(`INSERT OR REPLACE INTO kv(scope, key, value) VALUES('pricing', ?, ?)`, [provider, stringifyJson(models || {})]);
     }
   });
+
+  // The import writes combos, model aliases, custom models and pricing straight
+  // into the tables, bypassing the repos, so the per-isolate read caches have
+  // to be dropped here or readers keep serving pre-import data.
+  resetCombosCache();
+  resetKvCache();
+  resetPricingCache();
 
   if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
     return { success: true };

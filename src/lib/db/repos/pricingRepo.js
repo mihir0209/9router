@@ -13,6 +13,17 @@ function invalidate() {
   userCache = { value: null, expiresAt: 0 };
 }
 
+/**
+ * Drop the in-process pricing caches WITHOUT touching stored rates.
+ *
+ * `resetPricing()` is the business operation that deletes a provider's
+ * overrides — it is emphatically not a cache clear, and calling it after an
+ * import would erase exactly the data just imported.
+ */
+export function resetPricingCache() {
+  invalidate();
+}
+
 async function getUserPricing() {
   // getPricingForModel() runs on every single cost calculation (once per
   // request), and it was calling pricingKv.getAll() uncached each time. Share

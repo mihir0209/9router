@@ -14,10 +14,24 @@ function rowToCombo(row) {
   };
 }
 
+// Read on every model-resolution path (combo expansion, /v1/models, the
+// capability guard). Short per-isolate TTL cache so a burst of requests does
+// not re-scan the table each time; writes invalidate it.
+const COMBOS_CACHE_TTL_MS = 5000;
+let combosCache = { value: null, expiresAt: 0 };
+
+export function resetCombosCache() {
+  combosCache = { value: null, expiresAt: 0 };
+}
+
 export async function getCombos() {
+  const now = Date.now();
+  if (combosCache.value && combosCache.expiresAt > now) return combosCache.value;
   const db = await getAdapter();
   const rows = db.all(`SELECT * FROM combos ORDER BY createdAt ASC`);
-  return rows.map(rowToCombo);
+  const value = rows.map(rowToCombo);
+  combosCache = { value, expiresAt: now + COMBOS_CACHE_TTL_MS };
+  return value;
 }
 
 export async function getComboById(id) {
@@ -33,6 +47,7 @@ export async function getComboByName(name) {
 }
 
 export async function createCombo(data) {
+  resetCombosCache();
   const db = await getAdapter();
   const now = new Date().toISOString();
   const combo = {
@@ -51,6 +66,7 @@ export async function createCombo(data) {
 }
 
 export async function updateCombo(id, data) {
+  resetCombosCache();
   const db = await getAdapter();
   let result = null;
   db.transaction(() => {
@@ -67,6 +83,7 @@ export async function updateCombo(id, data) {
 }
 
 export async function deleteCombo(id) {
+  resetCombosCache();
   const db = await getAdapter();
   const res = db.run(`DELETE FROM combos WHERE id = ?`, [id]);
   return (res?.changes ?? 0) > 0;
