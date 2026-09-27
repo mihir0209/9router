@@ -452,7 +452,10 @@ describe("App-layer custom transport resolution (stt.js)", () => {
       const fd = mkFormData();
       fd.set("model", "gemini/probe-sttjs-1");
 
-      const pending = handleStt({ formData: async () => fd });
+      // A real Next Request always carries headers; the enforcement gate reads
+      // them. The double previously supplied only formData, which no real
+      // request would do.
+      const pending = handleStt({ formData: async () => fd, headers: new Headers(), url: "http://localhost/v1/audio/transcriptions" });
       await vi.waitFor(() => expect(FakeWS.instances.length).toBe(1));
       const ws = FakeWS.instances[0];
       await vi.waitFor(() => expect(ws.sent.length).toBeGreaterThanOrEqual(1)); // setup first

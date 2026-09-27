@@ -271,7 +271,15 @@ export async function updateApiKey(id, data) {
         throw err;
       }
       data = { ...data, key: nextKey };
-      db.run(`UPDATE usageHistory SET apiKey = ? WHERE apiKey = ? AND apiKeyId IS NULL`, [nextKey, existing.key]);
+      // Remap the denormalised `apiKey` column so a rotated key still displays
+      // under its new value. The `apiKeyId IS NULL` guard that used to be here
+      // is obsolete: saveRequestUsage now stamps apiKeyId, so every attributed
+      // row was excluded and history kept rendering the pre-rotation mask.
+      // Attribution itself is stable via apiKeyId; this only fixes the label.
+      db.run(
+        `UPDATE usageHistory SET apiKey = ? WHERE (apiKey = ? OR (apiKeyId IS NOT NULL AND apiKeyId = ?))`,
+        [nextKey, existing.key, id]
+      );
     } else if (data.key !== undefined) {
       data = { ...data };
       delete data.key;

@@ -56,10 +56,14 @@ describe("AUDIT-002: API key masking", () => {
       resolveSrc("src/lib/db/repos/usageRepo.js"),
       "utf-8"
     );
-    // The 24h path should use apiKeyMasked in the akKey template
-    expect(source).toContain("${apiKeyMasked}|${r.model}|${r.provider");
-    // Should NOT use raw r.apiKey in the key
-    expect(source).not.toContain("${r.apiKey}|${r.model}|${r.provider");
+    // The byApiKey bucket is keyed by the FULL key (upstream 4a57df8b): masked
+    // keys sharing a machine-id prefix used to collapse into one bucket. That is
+    // an internal map key and is never serialised to the client.
+    expect(source).toContain("${r.apiKey}|${r.model}|${r.provider");
+    // The security property that still matters: the entry the client sees must
+    // carry the mask, not the raw key.
+    expect(source).toContain("apiKeyMasked");
+    expect(source).not.toMatch(/byApiKey\[[^\]]*\]\s*=\s*\{[^}]*apiKey:\s*r\.apiKey/);
   });
 });
 

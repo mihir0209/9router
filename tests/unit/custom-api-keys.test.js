@@ -50,7 +50,9 @@ describe("custom API key values", () => {
     expect(await db.validateApiKey("LIC-ROTATED-1")).toBeTruthy();
     expect(await db.validateApiKey(k.key)).toBeFalsy();
     const hist = await db.getUsageHistory({});
-    expect(hist.some((h) => h.apiKeyMasked === "LIC-ROTA***")).toBe(true);
+    // maskApiKey keeps the tail (upstream 4a57df8b) so keys sharing a
+    // machine-id prefix no longer collide into one bucket.
+    expect(hist.some((h) => h.apiKeyMasked === "LIC-ROTA***ED-1")).toBe(true);
   });
 
   it("updateApiKey rejects a duplicate custom value and keeps the current one on empty", async () => {
