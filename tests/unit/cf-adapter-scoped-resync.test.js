@@ -32,6 +32,7 @@ function makeD1() {
         run: async () => ({ success: true }),
         bind: (...values) => ({
           all: async () => {
+            await holder.onFetch?.();
             calls.push({ sql, values });
             const tables = match
               ? values
@@ -45,6 +46,7 @@ function makeD1() {
           run: async () => ({ success: true }),
         }),
         all: async () => {
+          await holder.onFetch?.();
           calls.push({ sql, values: null });
           return {
             results: Object.keys(rowsByTable).flatMap((t) =>
@@ -167,5 +169,56 @@ describe("cloudflare memory adapter — scoped resync", () => {
     await adapter.resync(true, ["usageHistory"]);
     expect(calls.filter((c) => c.values).at(-1).values).toEqual(["usageHistory"]);
     expect(adapter.all("SELECT * FROM usageHistory")).toHaveLength(500);
+  });
+});
+
+describe("resync does not lose uncommitted writes", () => {
+  // Regression guard. A resync that cleared live state before checking
+  // dirtyTables destroyed rows that existed only in memory, and the dirty check
+  // then skipped restoring them — silent data loss on Workers.
+  //
+  // The window is a transaction opened *while the resync awaits D1*, which is
+  // what the onFetch hook reproduces: the write is committed to memory, the
+  // persist is still in flight, and the resync then swaps the table.
+  const insertPending = (adapter, id) => {
+    holder.onFetch = () => {
+      adapter.transaction(() => {
+        adapter.run(`INSERT INTO apiKeys(id, key, name) VALUES(?, ?, ?)`, [id, `sk-${id}`, "pending"]);
+      });
+    };
+  };
+
+  beforeEach(() => { holder.onFetch = null; });
+
+  it("keeps a row committed while the resync was awaiting D1", async () => {
+    adapter = await makeAdapter(d1);
+    insertPending(adapter, "new-1");
+    await adapter.resync(true, ["apiKeys"]);
+    holder.onFetch = null;
+    expect(adapter.all("SELECT * FROM apiKeys").map((r) => r.id)).toContain("new-1");
+  });
+
+  it("keeps it across an unscoped resync too", async () => {
+    adapter = await makeAdapter(d1);
+    insertPending(adapter, "new-2");
+    await adapter.resync(true);
+    holder.onFetch = null;
+    expect(adapter.all("SELECT * FROM apiKeys").map((r) => r.id)).toContain("new-2");
+  });
+
+  it("does not duplicate the row either", async () => {
+    adapter = await makeAdapter(d1);
+    insertPending(adapter, "new-3");
+    await adapter.resync(true, ["apiKeys"]);
+    holder.onFetch = null;
+    const ids = adapter.all("SELECT * FROM apiKeys").map((r) => r.id);
+    expect(ids.filter((id) => id === "new-3")).toHaveLength(1);
+  });
+
+  it("still picks up another isolate's write for a clean table", async () => {
+    adapter = await makeAdapter(d1);
+    rowsByTable.apiKeys.push({ id: "k3", key: "sk-c", name: "c", ownerRef: "t3", isActive: true });
+    await adapter.resync(true, ["apiKeys"]);
+    expect(adapter.all("SELECT * FROM apiKeys").map((r) => r.id)).toContain("k3");
   });
 });

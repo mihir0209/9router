@@ -201,8 +201,15 @@ export async function createCloudflareMemoryAdapter() {
     (table) => table !== "usageHistory" && table !== "requestDetails"
   );
 
-  async function loadTablesFromD1(tableNames) {
-    if (!d1 || !tableNames.length) return;
+  /**
+   * Read the given tables into a scratch object. Live state is never touched
+   * here — the caller decides what to swap in — so a table with uncommitted
+   * local rows keeps them.
+   */
+  async function fetchTablesFromD1(tableNames) {
+    const fresh = {};
+    for (const table of tableNames) fresh[table] = [];
+    if (!d1 || !tableNames.length) return fresh;
     const result = tableNames.length === 1 && tableNames[0] === "*"
       ? await d1.prepare(`SELECT table_name, data FROM ${D1_TABLE}`).all()
       : await d1
@@ -212,10 +219,10 @@ export async function createCloudflareMemoryAdapter() {
           .bind(...tableNames)
           .all();
     for (const row of result.results || []) {
-      if (!state.tables[row.table_name]) continue;
+      if (!fresh[row.table_name]) continue;
       try {
         const parsed = JSON.parse(row.data);
-        state.tables[row.table_name].push(parsed);
+        fresh[row.table_name].push(parsed);
         if (AUTOINCREMENT.has(row.table_name) && Number.isFinite(Number(parsed.id))) {
           state.sequences[row.table_name] = Math.max(state.sequences[row.table_name] || 0, Number(parsed.id));
         }
@@ -223,6 +230,7 @@ export async function createCloudflareMemoryAdapter() {
         // Ignore corrupt persisted rows; the in-memory adapter is fail-open.
       }
     }
+    return fresh;
   }
 
   async function initializeD1() {
@@ -235,7 +243,10 @@ export async function createCloudflareMemoryAdapter() {
       `updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, ` +
       `PRIMARY KEY (table_name, row_key))`
     ).run();
-    await loadTablesFromD1(EAGER_TABLES);
+    const fresh = await fetchTablesFromD1(EAGER_TABLES);
+    for (const table of EAGER_TABLES) {
+      state.tables[table] = fresh[table] || [];
+    }
   }
 
   let lastD1SyncTs = Date.now();
@@ -259,13 +270,20 @@ export async function createCloudflareMemoryAdapter() {
     if (!force && now - lastD1SyncTs < D1_RESYNC_INTERVAL_MS) return;
     lastD1SyncTs = now;
     const wanted = scoped || EAGER_TABLES;
+    // Snapshot each table's row count. Anything awaited below yields to other
+    // requests, and one of them may write to a table we are about to replace.
+    // A table whose length moved while we were fetching has been written to and
+    // must not be overwritten. Clearing state up front instead would silently
+    // drop writes that only ever existed in memory.
+    const before = new Map(wanted.map((table) => [table, (state.tables[table] || []).length]));
     try {
-      // Replace rather than append, so a resync cannot double up rows.
-      for (const table of wanted) state.tables[table] = [];
-      await loadTablesFromD1(wanted);
+      const fresh = await fetchTablesFromD1(wanted);
       for (const table of wanted) {
         if (dirtyTables.has(table) || transactionDepth > 0) continue;
-        state.tables[table] = [...(state.tables[table] || [])];
+        // Rows are pushed in place, so the array identity is unchanged by a
+        // concurrent write; its length is what moves.
+        if ((state.tables[table] || []).length !== before.get(table)) continue; // written to mid-fetch
+        state.tables[table] = fresh[table] || [];
       }
     } catch (error) {
       console.warn(`[DB] D1 resync failed: ${error.message}`);
