@@ -1,18 +1,10 @@
 // Route-level acceptance for the Zed live-model wiring:
 //   GET /api/providers/[connectionId]/models  →  resolveZedModels  →  UI rows
-// RUN WITH AN ISOLATED DB:  DATA_DIR=$(mktemp -d) npx vitest run ...
-// Isolate this file's SQLite state before any import resolves DATA_DIR
-// (src/lib/dataDir.js reads it at module load). These acceptance tests write
-// real connections; without this they share ~/.9router with every other
-// DB-writing test file running concurrently, which races the driver and
-// intermittently fails an assertion unrelated to the code under test.
-vi.hoisted(() => {
-  const base = process.env.TMPDIR || process.env.TEMP || process.env.TMP || "/tmp";
-  process.env.DATA_DIR = `${base}/9router-test-${process.pid}-${Math.random().toString(36).slice(2)}`;
-});
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { GET } from "@/app/api/providers/[id]/models/route.js";
-import { createProviderConnection } from "@/models/index.js";
+// Self-isolating: DATA_DIR points at a temp dir so seeding never touches ~/.9router.
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 
 // Transport stub BELOW resolveZedModels: proxyAwareFetch captures the native
 // fetch at import time, so stubbing globalThis.fetch cannot intercept it.
@@ -79,6 +71,24 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+// Imports must be dynamic so DATA_DIR is set before the DB layer loads.
+const originalDataDir = process.env.DATA_DIR;
+let GET;
+let createProviderConnection;
+
+beforeAll(async () => {
+  process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "9router-zed-live-"));
+  vi.resetModules();
+  ({ GET } = await import("@/app/api/providers/[id]/models/route.js"));
+  ({ createProviderConnection } = await import("@/models/index.js"));
+});
+
+afterAll(() => {
+  fs.rmSync(process.env.DATA_DIR, { recursive: true, force: true });
+  if (originalDataDir === undefined) delete process.env.DATA_DIR;
+  else process.env.DATA_DIR = originalDataDir;
 });
 
 async function seedZed(n) {

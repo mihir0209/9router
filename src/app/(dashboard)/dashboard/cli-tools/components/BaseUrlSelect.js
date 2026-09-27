@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { readPresets, upsertPreset, deletePreset, subscribePresets, stripSlash, getLocalAppPort } from "./cliEndpointPresets";
+import { UPDATER_CONFIG } from "@/shared/constants/config";
+import { readPresets, upsertPreset, deletePreset, subscribePresets, stripSlash } from "./cliEndpointPresets";
 
 const CUSTOM_VALUE = "__custom__";
 const SAVE_VALUE = "__save__";
@@ -12,11 +13,11 @@ const ensureV1 = (url) => {
   return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
 };
 
-const buildOptions = ({ requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1, port }) => {
+const buildOptions = ({ requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1 }) => {
   const opts = [];
   const wrap = (url) => (withV1 ? ensureV1(url) : (url || "").replace(/\/+$/, ""));
   if (!requiresExternalUrl) {
-    const localUrl = wrap(`http://127.0.0.1:${port}`);
+    const localUrl = wrap(`http://127.0.0.1:${UPDATER_CONFIG.appPort}`);
     opts.push({ value: "local", label: localUrl, url: localUrl });
   }
   if (tunnelEnabled && tunnelPublicUrl) {
@@ -53,15 +54,14 @@ export default function BaseUrlSelect({
 }) {
   const [savedPresets, setSavedPresets] = useState([]);
   const [presetsLoaded, setPresetsLoaded] = useState(false);
-  const [port, setPort] = useState(getLocalAppPort());
   const [mode, setMode] = useState("");
   const [customInput, setCustomInput] = useState("");
   const initializedRef = useRef(false);
+  const currentUrlRef = useRef("");
   const customInputRef = useRef("");
 
   useEffect(() => {
     const sync = () => {
-      setPort(getLocalAppPort());
       const presets = readPresets();
       setSavedPresets(presets);
       // A preset saved elsewhere (e.g. on Apply) takes over the custom slot
@@ -75,37 +75,45 @@ export default function BaseUrlSelect({
         });
         return match ? `saved:${match.name}` : prev;
       });
-      setPresetsLoaded(true);
     };
     sync();
+    setPresetsLoaded(true);
     return subscribePresets(sync);
   }, []);
 
   const options = useMemo(
-    () => buildOptions({ requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1, port }),
-    [requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1, port]
+    () => buildOptions({ requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1 }),
+    [requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1]
   );
 
-  // Prefer a saved preset matching the currently configured URL, else first option
+  // Sync the active config URL without replacing edits unless the config itself changes.
   useEffect(() => {
-    if (initializedRef.current) return;
     if (!presetsLoaded || options.length === 0) return;
+    const normalizeUrl = (url) => (withV1 ? ensureV1(url) : stripSlash(url));
+    const current = normalizeUrl(currentUrl);
+    if (initializedRef.current && currentUrlRef.current === current) return;
     initializedRef.current = true;
-    const applyInitialSelection = () => {
-      const current = stripSlash(currentUrl);
-      const matched = current
-        ? options.find((o) => o.saved && stripSlash(o.url) === current)
-        : null;
-      const target = matched || options.find((o) => o.value !== CUSTOM_VALUE);
-      if (target) {
-        setMode(target.value);
-        onChange(target.url);
-      } else {
-        setMode(CUSTOM_VALUE);
-      }
-    };
-    applyInitialSelection();
-  }, [presetsLoaded, options, onChange, currentUrl]);
+    currentUrlRef.current = current;
+    const matched = current
+      ? options.find((o) => o.value !== CUSTOM_VALUE && normalizeUrl(o.url) === current)
+      : null;
+    if (matched) {
+      setCustomInput("");
+      customInputRef.current = "";
+      setMode(matched.value);
+      onChange(matched.url);
+    } else if (current) {
+      setCustomInput(current);
+      customInputRef.current = current;
+      setMode(CUSTOM_VALUE);
+      onChange(current);
+    } else {
+      const target = options.find((o) => o.value !== CUSTOM_VALUE);
+      if (!target) return;
+      setMode(target.value);
+      onChange(target.url);
+    }
+  }, [presetsLoaded, options, onChange, currentUrl, withV1]);
 
   const handleSelect = (e) => {
     const next = e.target.value;
