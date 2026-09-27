@@ -4,6 +4,22 @@ import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 const DEFAULT_MITM_ROUTER_BASE = `http://localhost:${process.env.PORT || "20128"}`;
 const DEFAULT_HEADROOM_URL = process.env.HEADROOM_URL || "http://localhost:8787";
 
+// "live"    — /v1/models asks every configured provider for its current models
+//             (accurate, but one upstream round trip per provider per request).
+// "cached"  — /v1/models answers from the database, refreshed explicitly via
+//             the per-provider Refresh button or POST /api/models/refresh.
+// Env var sets the default; the settings page can override it at runtime.
+const VALID_MODELS_LIST_SOURCES = new Set(["live", "cached"]);
+const ENV_MODELS_LIST_SOURCE = String(process.env.MODELS_LIST_SOURCE || "").trim().toLowerCase();
+const DEFAULT_MODELS_LIST_SOURCE = VALID_MODELS_LIST_SOURCES.has(ENV_MODELS_LIST_SOURCE)
+  ? ENV_MODELS_LIST_SOURCE
+  : "live";
+
+export function normalizeModelsListSource(value) {
+  const v = String(value ?? "").trim().toLowerCase();
+  return VALID_MODELS_LIST_SOURCES.has(v) ? v : DEFAULT_MODELS_LIST_SOURCE;
+}
+
 const DEFAULT_SETTINGS = {
   cloudEnabled: false,
   tunnelEnabled: false,
@@ -121,6 +137,9 @@ const DEFAULT_SETTINGS = {
   proxyPoolQuarantine: { global: {}, scoped: {} },
   proxyPoolRateLimitCooldownMinutes: 30,
   proxyPoolNetworkCooldownMinutes: 10,
+  // Where /v1/models gets its model list: "live" (query providers) or "cached"
+  // (serve the DB copy). Default comes from MODELS_LIST_SOURCE; see above.
+  modelsListSource: DEFAULT_MODELS_LIST_SOURCE,
 };
 
 const SETTINGS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -209,6 +228,7 @@ export function mergeWithDefaults(raw) {
       }
     }
   }
+  merged.modelsListSource = normalizeModelsListSource(merged.modelsListSource);
   if (merged.capacityAdapter && typeof merged.capacityAdapter === "object") {
     for (const capKey of Object.keys(merged.capacityAdapter)) {
       const entry = merged.capacityAdapter[capKey];

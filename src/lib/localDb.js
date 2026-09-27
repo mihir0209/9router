@@ -1,7 +1,7 @@
 // Shim → re-export from new SQLite-based DB layer (src/lib/db/)
 // Kept for backward compatibility with existing imports.
 export {
-  getSettings, updateSettings, isCloudEnabled, getCloudUrl,
+  getSettings, updateSettings, isCloudEnabled, getCloudUrl, normalizeModelsListSource,
   getProviderConnections, getProviderConnectionById,
   createProviderConnection, updateProviderConnection,
   deleteProviderConnection, deleteProviderConnectionsByProvider,
@@ -19,5 +19,6 @@ export {
   getMitmAlias, setMitmAliasAll,
   getModelDisplayNames, setModelDisplayName, deleteModelDisplayName,
   getPricing, getPricingForModel, updatePricing, resetPricing, resetAllPricing,
+  getProviderModelCache, getAllProviderModelCaches, saveProviderModelCache, clearProviderModelCache,
   exportDb, importDb,
 } from "@/lib/db/index.js";

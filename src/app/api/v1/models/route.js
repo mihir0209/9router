@@ -7,151 +7,12 @@ import {
 } from "@/shared/constants/providers";
 import { getProviderConnections, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
-import { resolveKiroModels } from "open-sse/services/kiroModels.js";
-import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
-import { resolveQoderModels, routableQoderModels } from "open-sse/services/qoderModels.js";
-import { resolveCopilotModels } from "open-sse/services/copilotModels.js";
-import { resolveClinepassModels, resolveClineModels } from "open-sse/services/clinepassModels.js";
-import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
-import { resolveCursorModels } from "open-sse/services/cursorModels.js";
-import { resolveZedModels } from "open-sse/shared/zedAuth.js";
-import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
-import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
 import { mapWithConcurrency } from "@/lib/async/mapWithConcurrency.js";
+import { resolveProviderModelList, INTERNAL_MODELS_FETCH_HEADER } from "@/lib/modelCatalog/providerModelResolver.js";
+import { getSettings } from "@/lib/localDb";
+import { normalizeModelsListSource } from "@/lib/db/repos/settingsRepo.js";
 
-// Qoder shares one live resolver across intl (qoder) and CN (qoder-cn); the
-// credentials carry the provider id so qoderModels picks the right region's
-// catalog endpoint.
-async function resolveQoderLiveModels(conn, provider, signal) {
-  const result = await resolveQoderModels({
-    provider,
-    accessToken: conn.accessToken,
-    // PAT (pt-...) connections keep the token in apiKey; without it the live
-    // catalog silently fails and /v1/models falls back to the static list.
-    apiKey: conn.apiKey,
-    refreshToken: conn.refreshToken,
-    email: conn.email,
-    displayName: conn.displayName,
-    providerSpecificData: conn.providerSpecificData || {}
-  }, { signal });
-  // Visible + hidden (enable:false) catalog keys — chat routes all of them.
-  const models = routableQoderModels(result);
-  if (!models.length) return null;
-  return { models: models.map((m) => ({ id: m.id, name: m.name })) };
-}
-
-// Per-provider live model resolvers. Each receives a connection record and
-// returns { models: [{ id, name? }, ...] } | null on failure.
-// Adding a provider here makes /v1/models prefer the live catalog for it.
-const LIVE_MODEL_RESOLVERS = {
-  kiro: async (conn, signal) => {
-    const result = await resolveKiroModels({
-      accessToken: conn.accessToken,
-      refreshToken: conn.refreshToken,
-      providerSpecificData: conn.providerSpecificData || {}
-    }, { log: console, signal });
-    return result?.models?.length ? { models: result.models } : null;
-  },
-  qoder: async (conn, signal) => resolveQoderLiveModels(conn, "qoder", signal),
-  "qoder-cn": async (conn, signal) => resolveQoderLiveModels(conn, "qoder-cn", signal),
-  kimchi: async (conn, signal) => {
-    const result = await resolveKimchiModels({
-      accessToken: conn.accessToken,
-      apiKey: conn.apiKey,
-      providerSpecificData: conn.providerSpecificData || {}
-    }, { log: console, signal });
-    return result?.models?.length ? { models: result.models } : null;
-  },
-  github: async (conn, signal) => {
-    const result = await resolveCopilotModels({
-      accessToken: conn.accessToken,
-      refreshToken: conn.refreshToken,
-      providerSpecificData: conn.providerSpecificData || {}
-    }, {
-      log: console,
-      signal,
-      onCredentialsRefreshed: async (refreshed) => {
-        await updateProviderCredentials(conn.id, {
-          copilotToken: refreshed.copilotToken,
-          copilotTokenExpiresAt: refreshed.copilotTokenExpiresAt,
-          existingProviderSpecificData: conn.providerSpecificData || {},
-        });
-      },
-    });
-    return result?.models?.length ? { models: result.models } : null;
-  },
-  clinepass: async (conn) => {
-    const result = await resolveClinepassModels({
-      accessToken: conn.accessToken,
-      apiKey: conn.apiKey,
-    });
-    return result?.models?.length ? { models: result.models } : null;
-  },
-  cline: async (conn) => {
-    const result = await resolveClineModels({
-      accessToken: conn.accessToken,
-      apiKey: conn.apiKey,
-    });
-    return result?.models?.length ? { models: result.models } : null;
-  },
-  "grok-cli": async (conn, signal) => {
-    const proxy = await resolveConnectionProxyConfig(conn.providerSpecificData || {});
-    const result = await resolveGrokCliModels({
-      ...conn,
-      connectionId: conn.id,
-    }, {
-      log: console,
-      signal,
-      proxyOptions: {
-        connectionProxyEnabled: proxy.connectionProxyEnabled === true,
-        connectionProxyUrl: proxy.connectionProxyUrl || "",
-        connectionNoProxy: proxy.connectionNoProxy || "",
-        vercelRelayUrl: proxy.vercelRelayUrl || "",
-        strictProxy: proxy.strictProxy === true,
-      },
-      onCredentialsRefreshed: async (refreshed) => {
-        await updateProviderCredentials(conn.id, {
-          ...refreshed,
-          existingProviderSpecificData: conn.providerSpecificData || {},
-        });
-      },
-    });
-    return result?.models?.length ? { models: result.models } : null;
-  },
-  cursor: async (conn, signal) => {
-    const result = await resolveCursorModels({
-      accessToken: conn.accessToken,
-      providerSpecificData: conn.providerSpecificData || {},
-    }, { log: console, signal });
-    return result?.models?.length ? { models: result.models } : null;
-  },
-  zed: async (conn, signal) => {
-    const result = await resolveZedModels({
-      accessToken: conn.accessToken,
-      providerSpecificData: conn.providerSpecificData || {},
-    }, { signal });
-    if (!result?.models?.length) return null;
-    return {
-      models: result.models
-        .filter((m) => !m.isDisabled)
-        .map((m) => ({
-          id: m.id,
-          name: m.name,
-          capabilities: m.supportsTools ? { tools: true } : undefined,
-        })),
-    };
-  },
-};
-
-const parseOpenAIStyleModels = (data) => {
-  if (Array.isArray(data)) return data;
-  return data?.data || data?.models || data?.results || [];
-};
-
-// Header sent by fetchCompatibleModelIds to detect cross-instance /models fetches
-// and break recursive loops between 9router instances connected to each other.
-const INTERNAL_MODELS_FETCH_HEADER = "x-9r-internal-models-fetch";
 
 // LLM kind sentinel — combos/models with no explicit kind default to LLM
 const LLM_KIND = "llm";
@@ -170,6 +31,22 @@ if (!global._modelsListCache) {
 }
 const modelsListCache = global._modelsListCache;
 const isCloudflareRuntime = () => process.env.NINEROUTER_RUNTIME === "cloudflare";
+
+/**
+ * Resolve the model list source, tolerating a failed settings read.
+ * A settings hiccup must degrade to the default rather than 500 the whole
+ * model list, so this never throws.
+ */
+async function resolveModelsListSource(explicit) {
+  if (explicit) return normalizeModelsListSource(explicit);
+  try {
+    const settings = await getSettings();
+    return normalizeModelsListSource(settings?.modelsListSource);
+  } catch (err) {
+    console.log(`Could not read modelsListSource, using default: ${err?.message || err}`);
+    return normalizeModelsListSource(undefined);
+  }
+}
 
 function modelsListHeaders(extra = {}) {
   return {
@@ -250,66 +127,6 @@ function stripProviderPrefix(modelId, aliases) {
   return value;
 }
 
-async function fetchCompatibleModelIds(connection, signal) {
-  if (!connection?.apiKey) return [];
-
-  const baseUrl = typeof connection?.providerSpecificData?.baseUrl === "string"
-    ? connection.providerSpecificData.baseUrl.trim().replace(/\/$/, "")
-    : "";
-
-  if (!baseUrl) return [];
-
-  let url = `${baseUrl}/models`;
-  const headers = {
-    "Content-Type": "application/json",
-  };
-
-  if (isOpenAICompatibleProvider(connection.provider)) {
-    headers.Authorization = `Bearer ${connection.apiKey}`;
-  } else if (isAnthropicCompatibleProvider(connection.provider)) {
-    if (url.endsWith("/messages/models")) {
-      url = url.slice(0, -9);
-    } else if (url.endsWith("/messages")) {
-      url = `${url.slice(0, -9)}/models`;
-    }
-    headers["x-api-key"] = connection.apiKey;
-    headers["anthropic-version"] = "2023-06-01";
-    headers.Authorization = `Bearer ${connection.apiKey}`;
-  } else {
-    return [];
-  }
-
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    const requestSignal = signal
-      ? AbortSignal.any([signal, controller.signal])
-      : controller.signal;
-    const response = await fetch(url, {
-      method: "GET",
-      headers: { ...headers, [INTERNAL_MODELS_FETCH_HEADER]: "1" },
-      cache: "no-store",
-      signal: requestSignal,
-    });
-    clearTimeout(timeoutId);
-
-    if (!response.ok) return [];
-
-    const data = await response.json();
-    const rawModels = parseOpenAIStyleModels(data);
-
-    return Array.from(
-      new Set(
-        rawModels
-          .map((model) => model?.id || model?.name || model?.model)
-          .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "")
-      )
-    );
-  } catch {
-    return [];
-  }
-}
-
 // Provider matches kindFilter when its serviceKinds intersect the requested kinds.
 // LLM is the default kind for providers missing serviceKinds.
 function providerMatchesKinds(providerId, kindFilter, connection = null) {
@@ -344,8 +161,15 @@ export async function buildModelsList(kindFilter, options = {}) {
   // cross-instance recursive loops.
   // On Workers, also skip live catalog / upstream discovery: they burn CPU
   // past the free-plan budget (error 1102) while building thousands of entries.
-  const skipDynamicFetch = options.skipDynamicFetch === true || isCloudflareRuntime();
-  const skipLiveResolvers = options.skipLiveResolvers === true || isCloudflareRuntime();
+  // Where the model list comes from:
+  //   "live"   — ask each provider (one upstream round trip per provider).
+  //   "cached" — serve the DB copy, refreshed via POST /api/models/refresh.
+  // Env default via MODELS_LIST_SOURCE, overridable in the settings page.
+  // Cloudflare used to hard-force the cached path because that upstream work
+  // blew the free-plan CPU budget; that is now a choice instead of a hardcode,
+  // and "cached" remains the recommended setting there.
+  const modelsListSource = await resolveModelsListSource(options.modelsListSource);
+  const allowLive = modelsListSource === "live" && options.skipDynamicFetch !== true && !isCloudflareRuntime();
   const providerConcurrency = options.providerConcurrency || MODEL_PROVIDER_CONCURRENCY;
   const providerTimeoutMs = options.providerTimeoutMs || MODEL_PROVIDER_TIMEOUT_MS;
   const dbReads = await Promise.allSettled([
@@ -437,15 +261,6 @@ export async function buildModelsList(kindFilter, options = {}) {
         || staticAlias
         ).trim();
         const providerModels = PROVIDER_MODELS[staticAlias] || [];
-        const configuredMediaModels = conn?.providerSpecificData?.models;
-        const enabledModels = Array.isArray(configuredMediaModels) && configuredMediaModels.length > 0
-          ? configuredMediaModels
-          : conn?.providerSpecificData?.enabledModels;
-        const hasExplicitEnabledModels =
-          Array.isArray(enabledModels) && enabledModels.length > 0;
-        const isCompatibleProvider =
-          isOpenAICompatibleProvider(providerId) || isAnthropicCompatibleProvider(providerId);
-
       // Build kind lookup for static models so we can filter even when only IDs are exposed
       const staticModelKindById = new Map(
         providerModels.map((m) => [m.id, modelKind(m)])
@@ -453,44 +268,17 @@ export async function buildModelsList(kindFilter, options = {}) {
       let liveModelKindById = new Map();
       let liveCapabilitiesById = new Map();
 
-      let rawModelIds = hasExplicitEnabledModels
-        ? Array.from(
-            new Set(
-              enabledModels.filter(
-                (modelId) => typeof modelId === "string" && modelId.trim() !== "",
-              ),
-            ),
-          )
-        : providerModels.map((model) => model.id);
-
-      if (isCompatibleProvider && rawModelIds.length === 0 && !skipDynamicFetch) {
-        rawModelIds = await fetchCompatibleModelIds(conn, signal);
-      }
-
-      // Config-driven live catalog override (e.g. Kiro returns dynamic
-      // -thinking/-agentic variants per account). On failure, fall back to
-      // whatever rawModelIds already holds.
-      const liveResolver = LIVE_MODEL_RESOLVERS[providerId];
-      if (liveResolver && !hasExplicitEnabledModels && !skipLiveResolvers) {
-        try {
-          const live = await liveResolver(conn, signal);
-          if (live?.models?.length) {
-            rawModelIds = live.models.map((m) => m.id);
-            liveModelKindById = new Map(
-              live.models
-                .filter((m) => m?.id)
-                .map((m) => [m.id, modelKind(m)])
-            );
-            liveCapabilitiesById = new Map(
-              live.models
-                .filter((m) => m?.id && m.capabilities)
-                .map((m) => [m.id, m.capabilities])
-            );
-          }
-        } catch (err) {
-          console.log(`Live model fetch failed for ${providerId}: ${err?.message || err}`);
-        }
-      }
+      // Single source of truth for provider model lists — shared with the
+      // manual refresh endpoint so a refreshed cache yields exactly the list
+      // the live path would have produced.
+      const resolved = await resolveProviderModelList(conn, providerId, { allowLive, signal });
+      const rawModelIds = resolved.models.map((m) => m.id);
+      liveModelKindById = new Map(
+        resolved.models.filter((m) => m?.kind).map((m) => [m.id, modelKind(m)])
+      );
+      liveCapabilitiesById = new Map(
+        resolved.models.filter((m) => m?.capabilities).map((m) => [m.id, m.capabilities])
+      );
 
       const modelIds = rawModelIds
         .map((modelId) => stripProviderPrefix(modelId, [outputAlias, staticAlias, providerId]))

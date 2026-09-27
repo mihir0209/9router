@@ -299,6 +299,21 @@ export default function ProfilePage() {
     }
   };
 
+  const updateModelsListSource = async (value) => {
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelsListSource: value }),
+      });
+      if (res.ok) {
+        setSettings(prev => ({ ...prev, modelsListSource: value }));
+      }
+    } catch (err) {
+      console.error("Failed to update model list source:", err);
+    }
+  };
+
   const updateStickyLimit = async (limit) => {
     const numLimit = parseInt(limit);
     if (isNaN(numLimit) || numLimit < 1) return;
@@ -1825,6 +1840,25 @@ export default function ProfilePage() {
               <option value="on">Always on</option>
               <option value="extreme">Extreme (no analytics writes)</option>
               <option value="off">Always off</option>
+            </select>
+          </div>
+
+          {/* Model List Source */}
+          <div className="flex items-start sm:items-center justify-between gap-4 pt-4 mt-4 border-t border-border">
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-sm sm:text-base">Model List Source</p>
+              <p className="text-xs sm:text-sm text-text-muted">
+                Where /v1/models gets its list. <strong>Live</strong> asks every configured provider each time (accurate, but one upstream round trip per provider, which is slow and expensive on Workers). <strong>Cached</strong> answers from the database, refreshed manually with the Refresh button on each provider&apos;s page. Recommended: Cached on Cloudflare.
+              </p>
+            </div>
+            <select
+              value={settings.modelsListSource || "live"}
+              onChange={e => updateModelsListSource(e.target.value)}
+              disabled={loading}
+              className="shrink-0 rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm"
+            >
+              <option value="live">Live (query providers)</option>
+              <option value="cached">Cached (from database)</option>
             </select>
           </div>
           <div className="flex items-start sm:items-center justify-between gap-4 pt-4 mt-4 border-t border-border">

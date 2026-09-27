@@ -14,7 +14,17 @@ export function makeKv(scope) {
       await db.ensureTables?.(["kv"]);
       const rows = db.all(`SELECT key, value FROM kv WHERE scope = ?`, [scope]);
       const out = {};
-      for (const r of rows) out[r.key] = parseJson(r.value);
+      for (const r of rows) {
+        const parsed = parseJson(r.value);
+        // parseJson returns null for a NULL or malformed column. Handing that
+        // back as a "value" turns a single corrupt row into `null` at a
+        // consumer's key, which then crashes on the first property access
+        // (e.g. `null.startsWith` in ModelSelectModal). Skip unusable values
+        // here so every consumer of every kv scope is safe, not just the ones
+        // that remember to type-check.
+        if (parsed === null || parsed === undefined) continue;
+        out[r.key] = parsed;
+      }
       return out;
     },
     async set(key, value) {

@@ -8,6 +8,7 @@ import { stringifyJson, parseJson } from "./helpers/jsonCol.js";
 // Settings
 export {
   getSettings, updateSettings, isCloudEnabled, getCloudUrl, exportSettings, resetSettingsCache,
+  normalizeModelsListSource,
 } from "./repos/settingsRepo.js";
 
 // Provider connections
@@ -52,6 +53,12 @@ export {
   getMitmAlias, setMitmAliasAll,
   getModelDisplayNames, setModelDisplayName, deleteModelDisplayName,
 } from "./repos/aliasRepo.js";
+
+// Cached live-discovered provider model lists
+export {
+  getProviderModelCache, getAllProviderModelCaches,
+  saveProviderModelCache, clearProviderModelCache,
+} from "./repos/providerModelCacheRepo.js";
 
 // Pricing
 export {
