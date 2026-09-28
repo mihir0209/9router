@@ -114,3 +114,54 @@ describe("memory engine — pagination", () => {
     expect(got.every((r) => r.id !== "c")).toBe(true);
   });
 });
+
+describe("memory engine — SET expressions", () => {
+  const seeded = () =>
+    withRows((ops) => {
+      ops.run(`INSERT INTO apiKeys (id, key, name, regenerateVersion, createdAt) VALUES (?, ?, ?, ?, ?)`, [
+        "k1",
+        "sk-1",
+        "one",
+        0,
+        "2026-01-01",
+      ]);
+      ops.run(`INSERT INTO apiKeys (id, key, name, regenerateVersion, createdAt) VALUES (?, ?, ?, ?, ?)`, [
+        "k2",
+        "sk-2",
+        "two",
+        4,
+        "2026-01-01",
+      ]);
+    });
+
+  it("evaluates COALESCE(col, 0) + 1 against the row being updated", () => {
+    // With literal-only SET parsing this stored the text
+    // "COALESCE(regenerateVersion, 0) + 1" into an INTEGER column, so
+    // regenerating an API key on Workers never incremented the version.
+    const ops = seeded();
+    ops.run(`UPDATE apiKeys SET regenerateVersion = COALESCE(regenerateVersion, 0) + 1 WHERE id = ?`, ["k1"]);
+    expect(ops.get(`SELECT regenerateVersion FROM apiKeys WHERE id = ?`, ["k1"]).regenerateVersion).toBe(1);
+  });
+
+  it("each row increments from its own value, not a shared one", () => {
+    const ops = seeded();
+    ops.run(`UPDATE apiKeys SET regenerateVersion = COALESCE(regenerateVersion, 0) + 1`);
+    expect(ops.get(`SELECT regenerateVersion FROM apiKeys WHERE id = ?`, ["k1"]).regenerateVersion).toBe(1);
+    expect(ops.get(`SELECT regenerateVersion FROM apiKeys WHERE id = ?`, ["k2"]).regenerateVersion).toBe(5);
+  });
+
+  it("still handles a plain literal SET with its own placeholder", () => {
+    const ops = seeded();
+    ops.run(`UPDATE apiKeys SET name = ? WHERE id = ?`, ["renamed", "k2"]);
+    expect(ops.get(`SELECT name FROM apiKeys WHERE id = ?`, ["k2"]).name).toBe("renamed");
+    expect(ops.get(`SELECT name FROM apiKeys WHERE id = ?`, ["k1"]).name).toBe("one");
+  });
+
+  it("a SET with several assignments binds each placeholder in order", () => {
+    const ops = seeded();
+    ops.run(`UPDATE apiKeys SET name = ?, regenerateVersion = ? WHERE id = ?`, ["x", 9, "k1"]);
+    const row = ops.get(`SELECT * FROM apiKeys WHERE id = ?`, ["k1"]);
+    expect(row.name).toBe("x");
+    expect(row.regenerateVersion).toBe(9);
+  });
+});

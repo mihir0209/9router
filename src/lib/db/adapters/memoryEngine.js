@@ -93,6 +93,133 @@ export function literalValue(token, params, cursor) {
   return { value: t, cursor };
 }
 
+/**
+ * Evaluate a small SQL expression against a row.
+ *
+ * The SET clause needs this, not just literals: "regenerateVersion =
+ * COALESCE(regenerateVersion, 0) + 1" has to read the row being updated. With
+ * literal-only parsing the whole expression was stored as a string, so
+ * regenerating an API key on Workers wrote the text
+ * "COALESCE(regenerateVersion, 0) + 1" into an INTEGER column.
+ *
+ * Handles: params, quoted/numeric/null/boolean literals, bare columns,
+ * COALESCE(...), parenthesised arithmetic with + - * /, and substr(col, a, b).
+ */
+export function evalExpression(token, params, cursor, row = {}) {
+  const src = String(token || "").trim();
+  if (!src) return null;
+
+  // Strip an alias before evaluating.
+  const alias = src.split(/\s+AS\s+/i);
+  const expr = alias[0].trim();
+  const aliasName = alias[1] ? alias[1].trim() : null;
+
+  const value = evaluateNode(expr, params, cursor, row);
+  return { value, alias: aliasName };
+}
+
+function evaluateNode(src, params, cursor, row) {
+  const text = String(src || "").trim();
+
+  // Literals and parameters first — before column lookup, so the string "1" is
+  // a number and not a column called 1.
+  const lit = literalValue(text, params, { value: cursor.value });
+  // literalValue advances its own cursor; keep ours in step.
+  if (text === "?" || /^(null|true|false)$/i.test(text) || /^'.*'$/.test(text) || /^".*"$/.test(text) || /^-?\d+(\.\d+)?$/.test(text)) {
+    cursor.value = lit.cursor.value;
+    return lit.value;
+  }
+
+  const coalesce = text.match(/^COALESCE\s*\((.+)\)$/i);
+  if (coalesce) {
+    const args = splitCsv(coalesce[1]);
+    for (const arg of args) {
+      const v = evaluateNode(arg, params, cursor, row);
+      if (v !== null && v !== undefined) return v;
+    }
+    return null;
+  }
+
+  const sub = text.match(/^(?:substr|substring)\s*\((.+)\)$/i);
+  if (sub) {
+    const args = splitCsv(sub[1]);
+    const [value, from, len] = args.map((a) => evaluateNode(a, params, cursor, row));
+    if (value === null || value === undefined) return null;
+    const start = Math.max(0, (Number(from) || 1) - 1);
+    const count = len === undefined ? undefined : Number(len);
+    return String(value).slice(start, count === undefined ? undefined : start + count);
+  }
+
+  // Arithmetic, respecting the innermost group.
+  for (const [pattern, apply] of [
+    [/^\((.*)\)$/, null],
+  ]) {
+    if (apply === null) {
+      const m = text.match(pattern);
+      if (m) return evaluateNode(m[1], params, cursor, row);
+    }
+  }
+  const arith = splitArithmetic(text);
+  if (arith) {
+    const { parts, ops } = arith;
+    let acc = evaluateNode(parts[0], params, cursor, row);
+    for (let i = 0; i < ops.length; i++) {
+      const rhs = evaluateNode(parts[i + 1], params, cursor, row);
+      const a = Number(acc) || 0;
+      const b = Number(rhs) || 0;
+      if (ops[i] === "+") acc = a + b;
+      else if (ops[i] === "-") acc = a - b;
+      else if (ops[i] === "*") acc = a * b;
+      else if (ops[i] === "/") acc = b === 0 ? null : a / b;
+      else acc = rhs;
+    }
+    return acc;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(row, text)) return row[text];
+  return text;
+}
+
+/** Number of "?" placeholders in a SQL fragment, ignoring those in quotes. */
+export function countPlaceholders(sql) {
+  let count = 0;
+  let quote = null;
+  const text = String(sql || "");
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (ch === "?") count++;
+  }
+  return count;
+}
+
+/** Split "a + b - c" on top-level arithmetic operators, respecting parens. */
+function splitArithmetic(src) {
+  const parts = [];
+  const ops = [];
+  let depth = 0;
+  let current = "";
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (depth === 0 && (ch === "+" || ch === "-" || ch === "*" || ch === "/") && current.trim() && i > 0) {
+      parts.push(current);
+      ops.push(ch);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (!ops.length) return null;
+  parts.push(current);
+  return { parts: parts.map((x) => x.trim()), ops };
+}
+
 export function compare(a, op, b) {
   if (op === "=") return a === b;
   if (op === "!=" || op === "<>") return a !== b;
@@ -322,24 +449,54 @@ export function createInMemoryOps(state, {
   }
 
   function runUpdate(sql, params) {
-    const match = sql.match(/^UPDATE\s+(\w+)\s+SET\s+(.+?)\s+WHERE\s+(.+)$/i);
+    // WHERE is optional, matching SQL. runDelete already allowed that; runUpdate
+    // demanded it, so an unconditional UPDATE silently matched nothing and
+    // reported changes: 0 as though it had run.
+    const match = sql.match(/^UPDATE\s+(\w+)\s+SET\s+(.+?)(?:\s+WHERE\s+(.+))?$/i);
     if (!match) return { changes: 0, lastInsertRowid: null };
     const [, table, setSql, whereSql] = match;
     const assignments = splitCsv(setSql);
-    const setCursor = { value: 0 };
     const updates = {};
     for (const assignment of assignments) {
       const m = assignment.match(/^(\w+)\s*=\s*(.+)$/i);
       if (!m) continue;
-      updates[m[1]] = literalValue(m[2], params, setCursor).value;
+      // Evaluated per row, not once: "regenerateVersion = COALESCE(
+      // regenerateVersion, 0) + 1" has to read the row it is updating, so
+      // consecutive rows each increment from their own current value.
+      const perRow = /\w*\s*\(|\b\w+\b\s*[+\-*/]\s*\S/.test(m[2]) && !/^\s*\?\s*$/.test(m[2]);
+      if (!perRow) {
+        updates[m[1]] = { __literal: m[2] };
+      } else {
+        updates[m[1]] = { __expr: m[2] };
+      }
     }
-    const whereParams = params.slice(setCursor.value);
+    // Count the SET clause's placeholders directly rather than inferring it from
+    // a cursor: literals and expressions consume parameters at different points
+    // in the row loop, and getting this wrong mis-slices the WHERE parameters
+    // and silently matches the wrong row.
+    const setPlaceholders = countPlaceholders(setSql);
+    const whereParams = params.slice(setPlaceholders);
     const where = buildWhere(whereSql, whereParams);
     let changes = 0;
     const changedRows = [];
     for (const row of rowsFor(table)) {
       if (!where(row)) continue;
-      Object.assign(row, updates);
+      // Expressions are evaluated against the row as it stands, so a self-
+      // reference sees the value it is replacing.
+      const resolved = {};
+      // Literals consume the same parameters on every row, so evaluate them
+      // once. Expressions see the row and re-read the placeholders they contain.
+      const literalCursor = { value: 0 };
+      for (const [field, value] of Object.entries(updates)) {
+        if (value.__literal === undefined) continue;
+        resolved[field] = evalExpression(value.__literal, params, literalCursor, row).value;
+      }
+      for (const [field, value] of Object.entries(updates)) {
+        if (value.__expr === undefined) continue;
+        const c = { value: 0 };
+        resolved[field] = evalExpression(value.__expr, params, c, row).value;
+      }
+      Object.assign(row, resolved);
       changedRows.push(row);
       changes++;
     }
