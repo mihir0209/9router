@@ -75,6 +75,11 @@ Two authoritative docs already exist — read them before working in these areas
 
 ### Persistence — IMPORTANT (ARCHITECTURE.md is stale here)
 State is **no longer `db.json`**. It's a SQLite layer under `src/lib/db/` with an adapter fallback chain (`driver.js`): `bun:sqlite` → `better-sqlite3` (optional native dep) → `node:sqlite` (Node ≥22.5) → `sql.js` (pure-JS fallback, always works). `better-sqlite3` is deliberately in `optionalDependencies` so install never fails without build tools.
+- `src/lib/localDb.js` is a **backward-compat shim** with an **explicit re-export list** (not `export *`) — adding a repo export to `src/lib/db/index.js` does not make it available via `@/lib/localDb`. Both lists must be updated.
+- Adapter fallback chain (`src/lib/db/driver.js`): `DATABASE_URL` (Postgres) → `bun:sqlite` → `better-sqlite3` → `node:sqlite` → `sql.js`. Postgres is only skipped on Cloudflare, where D1 is the durable store. A set-but-unreachable `DATABASE_URL` throws rather than falling back.
+- **The adapter interface is synchronous** (`db.run/get/all/transaction`), so async stores are served by an in-memory engine (`src/lib/db/adapters/memoryEngine.js`) that both the D1 and Postgres adapters share. Persistence is asynchronous and outside the caller's control — see `CRITICAL_TABLES` in the Postgres adapter, which flush immediately, vs analytics tables that batch.
+- `db.transaction()` is a **batching** boundary, not ACID. It defers persistence to the commit and has no undo log, so a throw still flushes. Long-standing on every backend; pinned by a test.
+- Postgres tests need a real server: `tests/helpers/pg.sh up`, then export the `TEST_DATABASE_URL` it prints. They skip without it. Never point them at a real `DATABASE_URL` — they drop the public schema.
 - `src/lib/localDb.js` is a **backward-compat shim** re-exporting `src/lib/db/index.js`. New code should import from `@/lib/db/index.js`; per-entity logic lives in `src/lib/db/repos/*`. Schema/migrations in `src/lib/db/migrations/`.
 - DB file location resolves via `src/lib/db/paths.js` (`DATA_DIR`, else `~/.9router/`).
 - Usage/logs (`src/lib/usageDb.js`, `usage.json` + `log.txt`) still live under `~/.9router` and do **not** follow `DATA_DIR`.

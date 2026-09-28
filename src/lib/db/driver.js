@@ -65,6 +65,27 @@ async function trySqlJs() {
 }
 
 async function initAdapter() {
+  // Postgres is opt-in via DATABASE_URL and takes precedence over every local
+  // SQLite driver, but not over the Cloudflare binding: on Workers the durable
+  // store is D1, which is already wired and tested there.
+  if (!isCloudflareRuntime && (process.env.DATABASE_URL || process.env.POSTGRES_URL)) {
+    try {
+      const { createPostgresMemoryAdapter } = await import("./adapters/postgresMemoryAdapter.js");
+      const adapter = await createPostgresMemoryAdapter();
+      if (!state.logged) {
+        console.log(`[DB] Driver: ${adapter.driver} | Postgres`);
+        state.logged = true;
+      }
+      return adapter;
+    } catch (e) {
+      // Do not fall through silently: a configured DATABASE_URL that cannot be
+      // reached must be visible, or the app will quietly start writing a fresh
+      // local SQLite file and appear to have lost everything.
+      console.error(`[DB] Postgres unavailable (${e.message}) — refusing to fall back to a local database`);
+      throw e;
+    }
+  }
+
   if (isCloudflareRuntime) {
     const { createCloudflareMemoryAdapter } = await import("./adapters/cloudflareMemoryAdapter.js");
     const adapter = await createCloudflareMemoryAdapter();
