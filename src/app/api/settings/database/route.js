@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { exportDb, getSettings, importDb } from "@/lib/localDb";
 import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
 import { verifyDashboardPassword } from "@/lib/auth/dashboardSession";
+import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
 
 const CLI_TOKEN_HEADER = "x-9r-cli-token";
 const PASSWORD_HEADER = "x-9r-password";
@@ -10,6 +11,24 @@ const PASSWORD_HEADER = "x-9r-password";
 function isCliRequest(request) {
   if (process.env.NINEROUTER_RUNTIME === "cloudflare") return false;
   return Boolean(request.headers.get(CLI_TOKEN_HEADER));
+}
+
+/**
+ * Whether this request may read or replace the whole database.
+ *
+ * The admin API token is accepted as well as the dashboard password. A hosted
+ * deployment has no CLI token to present — that is derived from the machine
+ * identity, which a container does not have — so on Antideploy the password was
+ * the only way in, and automation had no route at all. ADMIN_API_TOKEN exists
+ * for exactly this kind of operator action.
+ *
+ * Note for whoever hits a failure here: a restore that does not authorise comes
+ * back 401 and changes nothing. It cannot half-apply.
+ */
+async function isAuthorized(request, password) {
+  if (isCliRequest(request)) return true;
+  if (await hasValidAdminApiToken(request)) return true;
+  return verifyDashboardPassword(password);
 }
 
 function preserveProtectedSettings(importedSettings, currentSettings) {
@@ -27,8 +46,8 @@ function preserveProtectedSettings(importedSettings, currentSettings) {
 
 export async function GET(request) {
   try {
-    if (!isCliRequest(request) && !(await verifyDashboardPassword(request.headers.get(PASSWORD_HEADER)))) {
-      return NextResponse.json({ error: "Invalid password" }, { status: 401 });
+    if (!(await isAuthorized(request, request.headers.get(PASSWORD_HEADER)))) {
+      return NextResponse.json({ error: "Invalid password or admin token" }, { status: 401 });
     }
     const payload = await exportDb();
     return NextResponse.json(payload);
@@ -42,8 +61,8 @@ export async function POST(request) {
   try {
     const { password, ...payload } = await request.json();
     const currentSettings = await getSettings();
-    if (!isCliRequest(request) && !(await verifyDashboardPassword(password))) {
-      return NextResponse.json({ error: "Invalid password" }, { status: 401 });
+    if (!(await isAuthorized(request, password))) {
+      return NextResponse.json({ error: "Invalid password or admin token" }, { status: 401 });
     }
 
     payload.settings = preserveProtectedSettings(payload.settings, currentSettings);
