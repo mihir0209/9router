@@ -11,6 +11,7 @@ import {
   parseSelect,
   projectRows,
   createState,
+  createInMemoryOps,
 } from "./memoryEngine.js";
 import { TABLES } from "../schema.js";
 
@@ -31,14 +32,11 @@ export async function createCloudflareMemoryAdapter() {
   const state = createState();
   const context = await getD1Context();
   const d1 = context?.env?.DB || null;
-  let transactionDepth = 0;
-  const dirtyTables = new Set();
   // Row-level dirty tracking inside transactions: table -> Map(rowKey, "upsert"|"delete").
   // Commit persists ONLY touched rows. Previously every transaction rewrote each
   // touched table wholesale (DELETE all + re-INSERT all), so a kv model sync
   // cost ~7000 D1 row writes and a requestDetails save ~700. On metered D1
   // (100k writes/day) that amplification is the budget killer.
-  const dirtyRows = new Map();
 
   // Tables whose row count is bounded by configuration rather than by traffic.
   // usageHistory and requestDetails grow by one persisted row per request, so
@@ -67,7 +65,7 @@ export async function createCloudflareMemoryAdapter() {
   async function ensureTables(names) {
     if (!d1) return;
     const wanted = (Array.isArray(names) ? names : [names]).filter((n) => LAZY_TABLES.has(n) && !loadedTables.has(n));
-    if (!wanted.length || transactionDepth > 0) return;
+    if (!wanted.length || ops?.inTransaction()) return;
     // Mark before awaiting so a concurrent caller cannot double-load.
     for (const table of wanted) loadedTables.add(table);
     try {
@@ -162,7 +160,7 @@ export async function createCloudflareMemoryAdapter() {
     try {
       const fresh = await fetchTablesFromD1(wanted);
       for (const table of wanted) {
-        if (dirtyTables.has(table) || transactionDepth > 0) continue;
+        if (ops?.hasDirty(table) || ops?.inTransaction()) continue;
         // Rows are pushed in place, so the array identity is unchanged by a
         // concurrent write; its length is what moves.
         if ((state.tables[table] || []).length !== before.get(table)) continue; // written to mid-fetch
@@ -173,22 +171,10 @@ export async function createCloudflareMemoryAdapter() {
     }
   }
 
-  // Last-op-wins per row key: delete-then-insert resolves to upsert (row is
-  // present at commit), insert-then-delete resolves to delete (row is gone).
-  function markDirty(table, row = null, op = "upsert") {
-    if (transactionDepth <= 0) return false;
-    dirtyTables.add(table);
-    if (row) {
-      if (!dirtyRows.has(table)) dirtyRows.set(table, new Map());
-      dirtyRows.get(table).set(primaryKeyFor(table, row), op);
-    }
-    return true;
-  }
-
   function persistTable(table) {
     if (!d1 || !state.tables[table]) return;
-    if (transactionDepth > 0) {
-      dirtyTables.add(table);
+    if (ops?.inTransaction()) {
+      ops.markDirty(table);
       return;
     }
     const rows = state.tables[table].map((row) => ({ key: primaryKeyFor(table, row), data: JSON.stringify(row) }));
@@ -211,7 +197,7 @@ export async function createCloudflareMemoryAdapter() {
 
   function persistRow(table, row) {
     if (!d1 || !state.tables[table]) return;
-    if (markDirty(table, row, "upsert")) return;
+    if (ops?.markDirty(table, row, "upsert")) return;
     const task = d1.prepare(
       `INSERT INTO ${D1_TABLE}(table_name, row_key, data, updated_at) ` +
       `VALUES(?, ?, ?, CURRENT_TIMESTAMP) ` +
@@ -223,8 +209,8 @@ export async function createCloudflareMemoryAdapter() {
 
   function deletePersistedRows(table, rows) {
     if (!d1 || !state.tables[table] || !rows.length) return;
-    if (transactionDepth > 0) {
-      for (const row of rows) markDirty(table, row, "delete");
+    if (ops?.inTransaction()) {
+      for (const row of rows) ops.markDirty(table, row, "delete");
       return;
     }
     const task = d1.batch(rows.map((row) =>
@@ -234,160 +220,26 @@ export async function createCloudflareMemoryAdapter() {
     context?.ctx?.waitUntil?.(task);
   }
 
+  // Shared in-memory engine. D1 supplies only the persistence hooks; the SQL
+  // interpretation and transaction semantics are the same code Postgres runs.
+  const ops = createInMemoryOps(state, {
+    persistRow,
+    deletePersistedRows,
+    persistDirtyRows: (table) => persistDirtyRows(table),
+  });
+
   await initializeD1();
-
-  function rowsFor(table) {
-    if (!state.tables[table]) state.tables[table] = [];
-    return state.tables[table];
-  }
-
-  function findConflictIndex(table, row, conflictCols) {
-    const keys = conflictCols?.length ? conflictCols : PRIMARY_KEYS[table] || [];
-    if (!keys.length) return -1;
-    return rowsFor(table).findIndex((existing) => keys.every((key) => existing[key] === row[key]));
-  }
-
-  function runInsert(sql, params) {
-    const match = sql.match(/^INSERT(?:\s+OR\s+REPLACE)?\s+INTO\s+(\w+)\s*\((.+?)\)\s*VALUES\s*\((.+?)\)(?:\s+ON\s+CONFLICT\s*\((.+?)\)\s+DO\s+UPDATE\s+SET\s+(.+))?$/i);
-    if (!match) return { changes: 0, lastInsertRowid: null };
-
-    const [, table, columnsSql, valuesSql, conflictSql] = match;
-    const columns = splitCsv(columnsSql);
-    const values = splitCsv(valuesSql);
-    const cursor = { value: 0 };
-    const row = {};
-    columns.forEach((column, index) => {
-      row[column] = literalValue(values[index], params, cursor).value;
-    });
-
-    if (AUTOINCREMENT.has(table) && (row.id === undefined || row.id === null)) {
-      state.sequences[table] = (state.sequences[table] || 0) + 1;
-      row.id = state.sequences[table];
-    }
-
-    const conflictCols = conflictSql ? splitCsv(conflictSql) : PRIMARY_KEYS[table];
-    const index = findConflictIndex(table, row, conflictCols);
-    const replace = /^INSERT\s+OR\s+REPLACE/i.test(sql);
-    if (index >= 0) {
-      rowsFor(table)[index] = replace ? row : { ...rowsFor(table)[index], ...row };
-      persistRow(table, rowsFor(table)[index]);
-    } else {
-      rowsFor(table).push(row);
-      persistRow(table, row);
-    }
-    return { changes: 1, lastInsertRowid: row.id ?? null };
-  }
-
-  function runUpdate(sql, params) {
-    const match = sql.match(/^UPDATE\s+(\w+)\s+SET\s+(.+?)\s+WHERE\s+(.+)$/i);
-    if (!match) return { changes: 0, lastInsertRowid: null };
-    const [, table, setSql, whereSql] = match;
-    const assignments = splitCsv(setSql);
-    const setCursor = { value: 0 };
-    const updates = {};
-    for (const assignment of assignments) {
-      const m = assignment.match(/^(\w+)\s*=\s*(.+)$/i);
-      if (!m) continue;
-      updates[m[1]] = literalValue(m[2], params, setCursor).value;
-    }
-    const whereParams = params.slice(setCursor.value);
-    const where = buildWhere(whereSql, whereParams);
-    let changes = 0;
-    const changedRows = [];
-    for (const row of rowsFor(table)) {
-      if (!where(row)) continue;
-      Object.assign(row, updates);
-      changedRows.push(row);
-      changes++;
-    }
-    for (const row of changedRows) persistRow(table, row);
-    return { changes, lastInsertRowid: null };
-  }
-
-  function runDelete(sql, params) {
-    const match = sql.match(/^DELETE\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+))?$/i);
-    if (!match) return { changes: 0, lastInsertRowid: null };
-    const [, table, whereSql] = match;
-    const where = buildWhere(whereSql, params);
-    const existingRows = rowsFor(table);
-    const deletedRows = existingRows.filter((row) => where(row));
-    const before = existingRows.length;
-    state.tables[table] = existingRows.filter((row) => !where(row));
-    const changes = before - state.tables[table].length;
-    if (changes) deletePersistedRows(table, deletedRows);
-    return { changes, lastInsertRowid: null };
-  }
-
-  function run(sql, params = []) {
-    const normalized = normalizeSql(sql);
-    if (/^INSERT/i.test(normalized)) return runInsert(normalized, params);
-    if (/^UPDATE/i.test(normalized)) return runUpdate(normalized, params);
-    if (/^DELETE/i.test(normalized)) return runDelete(normalized, params);
-    return { changes: 0, lastInsertRowid: null };
-  }
-
-  function all(sql, params = []) {
-    const normalized = normalizeSql(sql).replace(/;$/, "");
-    const parsed = parseSelect(normalized);
-    if (!parsed) return [];
-    let rows = rowsFor(parsed.table).filter(buildWhere(parsed.where, params));
-
-    if (parsed.order) {
-      const [field, direction = "ASC"] = parsed.order.split(/\s+/);
-      rows = [...rows].sort((a, b) => {
-        const av = a[field];
-        const bv = b[field];
-        if (av === bv) return 0;
-        const result = av > bv ? 1 : -1;
-        return direction.toUpperCase() === "DESC" ? -result : result;
-      });
-    }
-
-    if (parsed.limit) {
-      const cursor = { value: 0 };
-      const limit = Number(literalValue(parsed.limit, params, cursor).value);
-      rows = rows.slice(0, Number.isFinite(limit) ? limit : undefined);
-    }
-
-    return projectRows(rows, parsed.columns);
-  }
-
-  function get(sql, params = []) {
-    return all(sql, params)[0];
-  }
-
-  function exec(sql) {
-    for (const statement of String(sql || "").split(";")) {
-      const normalized = normalizeSql(statement);
-      if (normalized) run(normalized);
-    }
-    return [];
-  }
-
-  function transaction(fn) {
-    transactionDepth++;
-    try {
-      return fn();
-    } finally {
-      transactionDepth--;
-      if (transactionDepth === 0 && dirtyTables.size) {
-        const tables = [...dirtyTables];
-        dirtyTables.clear();
-        for (const table of tables) persistDirtyRows(table);
-      }
-    }
-  }
 
   // Commit path: persist only rows touched inside the transaction. Tables
   // with no row-level record (defensive; all writers record rows) fall back
   // to the legacy whole-table rewrite.
   function persistDirtyRows(table) {
     if (!d1 || !state.tables[table]) {
-      dirtyRows.delete(table);
+      ops?.pendingDirtyRows().delete(table);
       return;
     }
-    const touched = dirtyRows.get(table);
-    dirtyRows.delete(table);
+    const touched = ops.pendingDirtyRows().get(table);
+    ops.pendingDirtyRows().delete(table);
     if (!touched || !touched.size) {
       persistTable(table);
       return;
@@ -399,7 +251,7 @@ export async function createCloudflareMemoryAdapter() {
         deletes.push(key);
         continue;
       }
-      const row = rowsFor(table).find((r) => primaryKeyFor(table, r) === key);
+      const row = ops.rowsFor(table).find((r) => primaryKeyFor(table, r) === key);
       if (row) upserts.push(row);
       else deletes.push(key);
     }
@@ -425,11 +277,11 @@ export async function createCloudflareMemoryAdapter() {
 
   return {
     driver: d1 ? "cloudflare-d1-backed-memory" : "cloudflare-memory-js",
-    run,
-    get,
-    all,
-    exec,
-    transaction,
+    run: ops.run,
+    get: ops.get,
+    all: ops.all,
+    exec: ops.exec,
+    transaction: ops.transaction,
     resync: resyncFromD1,
     ensureTables,
     close: () => {},
