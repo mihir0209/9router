@@ -14,6 +14,7 @@
 // connection to a 250ms timer would be a real bug; losing a usageHistory row
 // that is about to be aggregated anyway is not.
 
+import { createHash } from "node:crypto";
 import {
   createState,
   createInMemoryOps,
@@ -49,6 +50,13 @@ const COLUMNS = Object.fromEntries(
   Object.entries(TABLES).map(([name, def]) => [name, Object.keys(def.columns)])
 );
 
+/** Deterministic, valid schema name for a DATA_DIR, or null when unset. */
+export function dataDirSchema(dataDir) {
+  if (!dataDir || typeof dataDir !== "string" || !dataDir.trim()) return null;
+  const digest = createHash("sha256").update(dataDir).digest("hex").slice(0, 16);
+  return `nr_${digest}`;
+}
+
 export async function createPostgresMemoryAdapter(options = {}) {
   const connectionString =
     options.connectionString || process.env.DATABASE_URL || process.env.POSTGRES_URL;
@@ -56,7 +64,7 @@ export async function createPostgresMemoryAdapter(options = {}) {
     throw new Error("createPostgresMemoryAdapter: DATABASE_URL is required");
   }
 
-  const { Pool } = await import("pg");
+  const { Pool, default: pgDefault } = await import("pg");
   // SSL is left to the connection string and PGSSLMODE rather than forced.
   // Managed providers (Neon, Supabase) put ?sslmode=require in the URL, and pg
   // honours it; a local or in-cluster Postgres has no SSL and fails the handshake
@@ -73,6 +81,29 @@ export async function createPostgresMemoryAdapter(options = {}) {
 
   const state = createState();
   const loadedTables = new Set(ALL_TABLES.filter((t) => !LAZY_TABLES.has(t)));
+
+  // DATA_DIR selects the Postgres schema, as well as the SQLite file.
+  //
+  // The test suite already isolates itself by pointing DATA_DIR at a fresh temp
+  // directory and deleting the cached adapter — which gives every test its own
+  // database file. Honouring DATA_DIR as a schema means that machinery keeps
+  // working unchanged against Postgres, instead of every one of those tests
+  // needing to be rewritten. It is also the right production behaviour: two
+  // instances sharing one database can be kept apart by DATA_DIR alone.
+  //
+  // Unset (the normal case) leaves the schema to the connection string.
+  const schema = dataDirSchema(options.dataDir ?? process.env.DATA_DIR);
+  if (schema) {
+    const bootstrap = new Pool({ connectionString, max: 1 });
+    try {
+      await bootstrap.query(`CREATE SCHEMA IF NOT EXISTS ${pgIdent(schema)}`);
+    } finally {
+      await bootstrap.end();
+    }
+    pool.on("connect", (client) => {
+      client.query(`SET search_path TO ${pgIdent(schema)}`).catch(() => {});
+    });
+  }
 
   // ── write-behind queue ────────────────────────────────────────────────────
   // Keyed by row identity so a row written several times before a flush costs

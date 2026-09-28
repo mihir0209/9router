@@ -6,10 +6,18 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 let tempDir;
 const originalDataDir = process.env.DATA_DIR;
+const originalDatabaseUrl = process.env.DATABASE_URL;
+const originalPostgresUrl = process.env.POSTGRES_URL;
 
 beforeEach(() => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-mig-"));
   process.env.DATA_DIR = tempDir;
+  // This file is specifically the SQLite migration chain: PRAGMA pragmas, index
+  // re-creation, and the legacy db.json import. The Postgres adapter bootstraps
+  // its own DDL and never runs these, so DATABASE_URL is cleared — otherwise a
+  // Postgres run made these assert against the wrong backend.
+  delete process.env.DATABASE_URL;
+  delete process.env.POSTGRES_URL;
   // Reset global singleton so each test gets fresh adapter pointed at tempDir
   delete global._dbAdapter;
   vi.resetModules();
@@ -22,6 +30,10 @@ afterEach(() => {
   if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
   if (originalDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = originalDataDir;
+  if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = originalDatabaseUrl;
+  if (originalPostgresUrl === undefined) delete process.env.POSTGRES_URL;
+  else process.env.POSTGRES_URL = originalPostgresUrl;
 });
 
 describe("Schema migrations", () => {

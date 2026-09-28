@@ -17,6 +17,10 @@ export default defineConfig({
     maxConcurrency: 60,
     // Suppress noisy console output from handlers under test
     silent: false,
+    // Gives every test file its own Postgres schema when TEST_DATABASE_URL is
+    // set, so the suite behaves the way it does on a fresh SQLite file. A no-op
+    // otherwise.
+    setupFiles: ["./setup/postgres-isolation.js"],
   },
   resolve: {
     // Use array form so subpath aliases (e.g. "@/lib/db/index.js") resolve correctly.
