@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { exportDb, getSettings, importDb } from "@/lib/localDb";
+import { getAdapter } from "@/lib/db/driver.js";
 import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
 import { verifyDashboardPassword } from "@/lib/auth/dashboardSession";
 import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
@@ -67,6 +68,17 @@ export async function POST(request) {
 
     payload.settings = preserveProtectedSettings(payload.settings, currentSettings);
     await importDb(payload);
+
+    // Wait for the write to actually be durable before reporting success.
+    //
+    // Writes are applied to the in-memory working set synchronously and persisted
+    // asynchronously, so importDb returning does not mean the rows are stored. A
+    // restore answered 200 {"success":true} while Neon still held a single row:
+    // on a host that suspends an idle app, the in-flight flush died with it. A
+    // caller told "it worked" has no reason to look again, which makes this the
+    // worst possible place to be eventually consistent.
+    const db = await getAdapter();
+    if (typeof db.flush === "function") await db.flush();
 
     // Ensure proxy settings take effect immediately after a DB import.
     try {
