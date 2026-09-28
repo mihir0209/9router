@@ -223,9 +223,13 @@ export async function proxy(request) {
     }
   }
 
-  // Always protected - require valid JWT or local CLI token (machineId-based)
+  // Always protected - require valid JWT, local CLI token, or the admin token.
+  // The admin token is a service credential meant for automation; on a hosted
+  // deployment there is no CLI token to present, because that is derived from
+  // the machine identity a container does not have. Without this, a restore or
+  // shutdown could only be driven by someone typing the dashboard password.
   if (ALWAYS_PROTECTED.some((p) => pathname.startsWith(p))) {
-    if (await hasValidCliToken(request) || await hasValidToken(request))
+    if (await hasValidCliToken(request) || await hasValidToken(request) || await hasValidAdminApiToken(request))
       return NextResponse.next();
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
