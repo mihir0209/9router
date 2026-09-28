@@ -43,8 +43,19 @@ fi
 
 # tests/ is ~1,050 files of test-only material. It is not needed to serve the
 # app, and excluding it keeps the push well inside both limits.
+# .env and .env.deploy are excluded: the archive would otherwise carry local
+# secrets, and the real ones travel in the API's write-only `env` field instead.
 EXCLUDES=(--exclude=.git --exclude=node_modules --exclude=.next --exclude=.open-next
-          --exclude=tests --exclude=./tests/node_modules --exclude='*.log')
+          --exclude=tests --exclude=./tests/node_modules --exclude='*.log'
+          --exclude=.env --exclude=.env.deploy)
+
+# Next.js inlines NEXT_PUBLIC_* at BUILD time, so a variable that is only in the
+# runtime env never reaches the client bundle. This one file is the exception:
+# it carries only the public build-time value, and no secrets.
+BUILD_ENV="$(mktemp)"
+trap 'rm -f "$BUILD_ENV"' EXIT
+grep -E '^NEXT_PUBLIC_' .env.deploy 2>/dev/null > "$BUILD_ENV" || true
+cp "$BUILD_ENV" .env.antideploy-build
 
 echo "packing (excluding tests/, .next/, node_modules/)…"
 FILES=$(find . -type f \
@@ -64,6 +75,7 @@ RESPONSE=$(tar czf - "${EXCLUDES[@]}" . | \
   curl -sS -X POST "https://antideploy.com/api/v1/deploy?applicationId=$APP_ID" \
     -H "Authorization: Bearer $KEY" \
     -F "archive=@-")
+rm -f .env.antideploy-build
 echo "$RESPONSE" | head -c 400; echo
 
 STATUS=$(echo "$RESPONSE" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).status||"?"))}catch{process.stdout.write("?")}})')

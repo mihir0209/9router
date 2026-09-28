@@ -104,3 +104,7 @@ graphify-out/*
 .start-dev.ps1
 start-dev-silent.cjs
 debug.log
+
+# Deploy secrets — never commit
+.env.deploy
+.env.antideploy-build
