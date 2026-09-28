@@ -94,10 +94,25 @@ if [[ -f .env.deploy ]]; then
 fi
 ENV_ARGS=()
 
+# A push that fails still updates the platform's "last content hash", so a retry
+# of the same tree comes back {"status":"unchanged"} and builds nothing — while
+# the live deployment is still the older one that did succeed. The hash is
+# compared against the last push, not the last release. FORGE=1 forces the
+# rebuild that actually gets the fix live.
+FORCE_FORM=()
+if [[ "${FORCE:-0}" == "1" ]]; then
+  # ${arr[@]+"${arr[@]}"} so an empty array expands to nothing at all. Without
+  # the guard this passes an empty argument to curl, which fails and closes the
+  # pipe while tar is still writing — tar dies on SIGPIPE (status 141) and the
+  # deploy never happens.
+  FORCE_FORM=(-F "force=true")
+fi
+FORCE_FORM=(${FORCE_FORM[@]+"${FORCE_FORM[@]}"})
+
 RESPONSE=$(tar czf - "${EXCLUDES[@]}" . | \
   curl -sS -X POST "https://antideploy.com/api/v1/deploy?applicationId=$APP_ID" \
     -H "Authorization: Bearer $KEY" \
-    -F "archive=@-")
+    -F "archive=@-" ${FORCE_FORM[@]+"${FORCE_FORM[@]}"})
 rm -f .env.antideploy-build
 echo "$RESPONSE" | head -c 400; echo
 
