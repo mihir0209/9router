@@ -103,10 +103,14 @@ export function compare(a, op, b) {
   return false;
 }
 
-export function buildWhere(whereSql, params) {
+export function buildWhere(whereSql, params, sharedCursor) {
   if (!whereSql) return () => true;
   const parts = whereSql.split(/\s+AND\s+/i).map((p) => p.trim()).filter(Boolean);
-  const cursor = { value: 0 };
+  // The cursor is shared with the caller so that placeholders after the WHERE
+  // clause — LIMIT ?, OFFSET ? — read the parameters that belong to them. With a
+  // private cursor, "WHERE provider = ? LIMIT ?" bound the limit to the provider
+  // value instead.
+  const cursor = sharedCursor || { value: 0 };
   const tests = parts.map((part) => {
     let m = part.match(/^(\w+)\s+IS\s+NOT\s+NULL$/i);
     if (m) return (row) => row[m[1]] !== null && row[m[1]] !== undefined;
@@ -133,7 +137,15 @@ export function buildWhere(whereSql, params) {
 }
 
 export function parseSelect(sql) {
-  const match = sql.match(/^SELECT\s+(.+?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+LIMIT\s+(.+?))?$/i);
+  // OFFSET has to be matched explicitly. Left out, the LIMIT group swallowed
+  // "LIMIT ? OFFSET ?" whole, Number() of that was NaN, and the query silently
+  // returned every row — so a request for page 9999 of the request-details tab
+  // answered with the whole table. This is the engine the D1 adapter serves too,
+  // so pagination was broken on Workers as well; it only stayed invisible because
+  // SQLite runs the real thing.
+  const match = sql.match(
+    /^SELECT\s+(.+?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+LIMIT\s+([^\s]+))?(?:\s+OFFSET\s+([^\s]+))?$/i
+  );
   if (!match) return null;
   return {
     columns: match[1].trim(),
@@ -141,6 +153,7 @@ export function parseSelect(sql) {
     where: match[3]?.trim(),
     order: match[4]?.trim(),
     limit: match[5]?.trim(),
+    offset: match[6]?.trim(),
   };
 }
 
@@ -157,6 +170,37 @@ export function projectRows(rows, columns) {
 
   const count = columns.match(/^COUNT\(\*\)\s+(?:AS\s+)?(\w+)$/i);
   if (count) return [{ [count[1]]: rows.length }];
+
+  // MIN/MAX/AVG. These were missing, and a missing aggregate does not throw —
+  // it falls through to the column-list branch, which cannot parse the parens,
+  // so it returns {}. So "SELECT MAX(priority) AS m" came back as an empty
+  // object, `maxRow?.m` was undefined, and provider priority was computed as
+  // (0 || 0) + 1 — i.e. every connection got priority 1. Provider ordering was
+  // silently broken on the adapters that use this engine (Cloudflare D1), and
+  // only visible because the SQLite path runs real SQL.
+  //
+  // Empty input yields null rather than 0: MAX of nothing is null, and a 0 here
+  // would be indistinguishable from a real minimum.
+  const extremum = columns.match(/^(MIN|MAX)\(\s*([\w.]+)\s*\)\s*(?:AS\s+)?(\w+)?$/i);
+  if (extremum) {
+    const [, fn, field, alias] = extremum;
+    const values = rows
+      .map((row) => row[field])
+      .filter((value) => value !== null && value !== undefined);
+    const result = values.length
+      ? values.reduce((acc, v) => (fn.toUpperCase() === "MAX" ? (v > acc ? v : acc) : v < acc ? v : acc))
+      : null;
+    return [{ [alias || field]: result }];
+  }
+
+  const average = columns.match(/^AVG\(\s*([\w.]+)\s*\)\s*(?:AS\s+)?(\w+)?$/i);
+  if (average) {
+    const [, field, alias] = average;
+    const values = rows
+      .map((row) => Number(row[field]))
+      .filter((value) => Number.isFinite(value));
+    return [{ [alias || field]: values.length ? values.reduce((a, b) => a + b, 0) / values.length : null }];
+  }
 
   const distinct = columns.match(/^DISTINCT\s+(\w+)$/i);
   if (distinct) {
@@ -329,7 +373,10 @@ export function createInMemoryOps(state, {
     const normalized = normalizeSql(sql).replace(/;$/, "");
     const parsed = parseSelect(normalized);
     if (!parsed) return [];
-    let rows = rowsFor(parsed.table).filter(buildWhere(parsed.where, params));
+    // One cursor across the whole statement so WHERE, LIMIT and OFFSET consume
+    // their own placeholders in order.
+    const cursor = { value: 0 };
+    let rows = rowsFor(parsed.table).filter(buildWhere(parsed.where, params, cursor));
 
     if (parsed.order) {
       const [field, direction = "ASC"] = parsed.order.split(/\s+/);
@@ -342,11 +389,18 @@ export function createInMemoryOps(state, {
       });
     }
 
-    if (parsed.limit) {
-      const cursor = { value: 0 };
-      const limit = Number(literalValue(parsed.limit, params, cursor).value);
-      rows = rows.slice(0, Number.isFinite(limit) ? limit : undefined);
-    }
+    // Read the placeholders in SQL order — LIMIT precedes OFFSET, so the bound
+    // parameters do too. Applying them in the other order silently swapped them.
+    const limit = parsed.limit
+      ? Number(literalValue(parsed.limit, params, cursor).value)
+      : null;
+    const offset = parsed.offset
+      ? Number(literalValue(parsed.offset, params, cursor).value)
+      : 0;
+
+    // ...then slice in array order.
+    if (Number.isFinite(offset) && offset > 0) rows = rows.slice(offset);
+    if (Number.isFinite(limit)) rows = rows.slice(0, limit);
 
     return projectRows(rows, parsed.columns);
   }
