@@ -324,6 +324,38 @@ function buildYouComRequest(config, params) {
   };
 }
 
+/**
+ * TinyFish Search — GET with query parameters, authenticated by X-API-Key
+ * rather than a bearer token.
+ *
+ * Its three domain types are web / news / research_paper. It has no domain
+ * filter, so include/exclude lists are dropped rather than silently sent under
+ * names it would ignore; TinyFish has no equivalent, and pretending otherwise
+ * would filter nothing while looking like it did.
+ */
+function buildTinyfishRequest(config, params) {
+  const qp = new URLSearchParams({ query: params.query });
+  qp.set("domain_type", params.searchType || "web");
+  if (params.language) qp.set("language", params.language);
+  if (params.country) qp.set("location", params.country);
+  // TinyFish takes either a recency window or a date pair, never both.
+  if (params.timeRange === "day") qp.set("recency_minutes", "1440");
+  else if (params.timeRange === "week") qp.set("recency_minutes", "10080");
+  else if (params.timeRange === "month") qp.set("recency_minutes", "43200");
+  else if (params.timeRange === "year") qp.set("recency_minutes", "525600");
+
+  return {
+    url: `${resolveBaseUrl(config, params)}?${qp}`,
+    init: {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "X-API-Key": params.token,
+      },
+    },
+  };
+}
+
 function buildSearxngRequest(config, params) {
   const baseUrl = resolveBaseUrl(config, params);
   const url = baseUrl.endsWith("/search") ? baseUrl : `${baseUrl}/search`;
@@ -438,6 +470,7 @@ const BUILDERS = {
   "xquik": buildXquikRequest,
   "ollama-search": buildOllamaSearchRequest,
   "glm": buildGlmSearchRequest,
+  "tinyfish": buildTinyfishRequest,
 };
 
 /**

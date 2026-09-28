@@ -130,7 +130,9 @@ import p126 from "./dahl.js";
 import p127 from "./atria.js";
 import p129 from "./agnes.js";
 import p130 from "./bai.js";
+import p131 from "./tinyfish.js";
 export default [
+  p131,
   p0,
   p1,
   p2,

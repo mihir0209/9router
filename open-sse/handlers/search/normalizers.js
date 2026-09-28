@@ -12,7 +12,10 @@ function makeResult(providerId, item, idx, now) {
     url,
     display_url: url ? url.replace(/^https?:\/\/(www\.)?/, "").split("?")[0] : undefined,
     snippet: item.snippet || "",
-    position: idx + 1,
+    // Prefer the upstream rank when it gave one. Falling back to the array index
+    // is wrong once results are paginated: the second page's first hit is rank
+    // 11 upstream, not 1.
+    position: Number.isFinite(item.position) ? item.position : idx + 1,
     score: typeof item.score === "number" ? Math.min(1, Math.max(0, item.score)) : null,
     published_at: item.published_at || null,
     favicon_url: item.favicon_url || null,
@@ -282,6 +285,32 @@ function normalizeGlmSearch(data, _query, _searchType) {
   return { results, totalResults: results.length };
 }
 
+/**
+ * TinyFish returns { query, results: [{ position, site_name, snippet, title,
+ * url }], total_results, page }. That maps almost one-to-one onto SearchResult;
+ * site_name has no equivalent field, so it goes to metadata rather than being
+ * dropped.
+ */
+function normalizeTinyfish(data, _query, _searchType) {
+  const now = new Date().toISOString();
+  const items = data.results;
+  if (!Array.isArray(items)) return { results: [], totalResults: null };
+  const results = items.map((item, idx) =>
+    makeResult("tinyfish", {
+      title: item.title,
+      url: item.url,
+      snippet: item.snippet,
+      // The upstream already ranks; carry its position rather than our index so
+      // the two agree when a page is requested.
+      position: item.position,
+    }, idx, now)
+  );
+  return {
+    results,
+    totalResults: Number.isFinite(data.total_results) ? data.total_results : results.length,
+  };
+}
+
 const NORMALIZERS = {
   "serper": normalizeSerper,
   "brave-search": normalizeBrave,
@@ -296,6 +325,7 @@ const NORMALIZERS = {
   "xquik": normalizeXquik,
   "ollama-search": normalizeOllamaSearch,
   "glm": normalizeGlmSearch,
+  "tinyfish": normalizeTinyfish,
 };
 
 /**

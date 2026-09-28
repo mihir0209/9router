@@ -56,13 +56,20 @@ function parseJinaTitle(text) {
   return m ? m[1].trim() : null;
 }
 
-function buildData({ provider, url, title, format, text, links, costUsd, responseMs, upstreamMs }) {
+function buildData({ provider, url, title, format, text, links, costUsd, responseMs, upstreamMs, author, publishedAt, language }) {
   const data = {
     provider,
     url,
     title: title || null,
     content: { format, text: text || "", length: (text || "").length },
-    metadata: { author: null, published_at: null, language: null },
+    // Only populated when a provider actually supplies them; the keys were
+    // always present and always null, so this changes no existing provider's
+    // output.
+    metadata: {
+      author: author ?? null,
+      published_at: publishedAt ?? null,
+      language: language ?? null,
+    },
     usage: { fetch_cost_usd: costUsd ?? null },
     metrics: { response_time_ms: responseMs, upstream_latency_ms: upstreamMs }
   };
@@ -104,6 +111,67 @@ export async function handleFetchCore({ url, format, maxCharacters, provider, pr
   const costPerQuery = providerConfig?.costPerQuery ?? null;
   const startedAt = Date.now();
 
+/**
+ * TinyFish Fetch — POST { urls: [url], format } with X-API-Key.
+ *
+ * Worth knowing: it returns author and published_date, which buildData() has
+ * always hardcoded to null for every other provider. Passing them through is
+ * the whole reason to prefer it over firecrawl for pages that carry bylines.
+ *
+ * Per-URL failures arrive in `errors` alongside a 200, so a single bad page
+ * must not be read as an empty success — hence the explicit errors[] check.
+ */
+async function runTinyfish({ url, fmt, timeoutMs, apiKey, maxCharacters, costPerQuery, startedAt }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch("https://api.fetch.tinyfish.ai", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": apiKey,
+      },
+      body: JSON.stringify({ urls: [url], format: fmt }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) {
+      return { success: false, status: response.status, error: `TinyFish fetch failed: ${response.status}` };
+    }
+    const data = await response.json();
+    const page = Array.isArray(data.results) ? data.results[0] : null;
+    if (!page) {
+      const detail = Array.isArray(data.errors) && data.errors[0];
+      return {
+        success: false,
+        status: 502,
+        error: detail ? `TinyFish could not fetch the page: ${detail.error || "unknown"}` : "TinyFish returned no content",
+      };
+    }
+    let text = typeof page.text === "string" ? page.text : JSON.stringify(page.text ?? "");
+    if (maxCharacters && text.length > maxCharacters) text = text.slice(0, maxCharacters);
+    return {
+      success: true,
+      data: buildData({
+        provider: "tinyfish",
+        url: page.final_url || page.url || url,
+        title: page.title,
+        format: page.format || fmt,
+        text,
+        costUsd: costPerQuery,
+        responseMs: Date.now() - startedAt,
+        upstreamMs: page.latency_ms ?? null,
+        author: page.author || null,
+        publishedAt: page.published_date || null,
+        language: page.language || null,
+      }),
+    };
+  } catch (error) {
+    clearTimeout(timer);
+    return { success: false, status: 500, error: `TinyFish fetch error: ${error.message}` };
+  }
+}
+
   try {
     if (provider === "firecrawl") {
       return await runFirecrawl({ url, fmt, timeoutMs, apiKey, maxCharacters, costPerQuery, startedAt });
@@ -116,6 +184,9 @@ export async function handleFetchCore({ url, format, maxCharacters, provider, pr
     }
     if (provider === "exa") {
       return await runExa({ url, fmt, timeoutMs, apiKey, maxCharacters, costPerQuery, startedAt });
+    }
+    if (provider === "tinyfish") {
+      return await runTinyfish({ url, fmt, timeoutMs, apiKey, maxCharacters, costPerQuery, startedAt });
     }
     if (provider === "ollama") {
       return await runOllama({
