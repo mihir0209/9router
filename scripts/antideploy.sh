@@ -63,13 +63,36 @@ FILES=$(find . -type f \
   -not -path './.open-next/*' -not -path './tests/*' | wc -l)
 echo "  $FILES files"
 
-# Secrets are write-only over the API; the env travels with the push.
-ENV_ARGS=()
+# Secrets go through PUT /api/v1/secrets, NOT the deploy's `env` form field.
+#
+# The form field was tried first and silently did nothing: a deploy carrying it
+# came up healthy with no ADMIN_API_TOKEN and no INITIAL_PASSWORD, so the app
+# came up on a default password and every admin call 401'd — with no warning and
+# no hazard to say so. The dedicated endpoint is the documented runtime path and
+# answers with what it actually wrote.
+#
+# Body shape is { "env": { ... } }. PORT is ignored by the platform: it assigns
+# the port and routes to it.
 if [[ -f .env.deploy ]]; then
-  ENV_ARGS=(-F "env=$(cat .env.deploy)")
-elif [[ -f .env ]]; then
-  ENV_ARGS=(-F "env=$(cat .env)")
+  SECRETS_JSON="$(mktemp)"
+  trap 'rm -f "$BUILD_ENV" "$SECRETS_JSON"' EXIT
+  node -e '
+    const fs = require("fs");
+    const env = Object.fromEntries(
+      fs.readFileSync(".env.deploy", "utf8").split("\n")
+        .filter((l) => l.trim() && !l.trim().startsWith("#"))
+        .map((l) => { const i = l.indexOf("="); return [l.slice(0, i), l.slice(i + 1)]; })
+    );
+    delete env.PORT;            // the platform assigns it
+    delete env.NODE_OPTIONS;    // build-time only
+    fs.writeFileSync(process.argv[1], JSON.stringify({ env }));
+  ' "$SECRETS_JSON"
+  echo "pushing secrets…"
+  curl -sS -X PUT "https://antideploy.com/api/v1/secrets?applicationId=$APP_ID" \
+    -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+    --data @"$SECRETS_JSON" -o /dev/null -w '  http %{http_code}\n'
 fi
+ENV_ARGS=()
 
 RESPONSE=$(tar czf - "${EXCLUDES[@]}" . | \
   curl -sS -X POST "https://antideploy.com/api/v1/deploy?applicationId=$APP_ID" \
