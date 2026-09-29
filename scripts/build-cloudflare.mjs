@@ -1,6 +1,7 @@
 import { renameSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const root = process.cwd();
 const proxyPath = join(root, "src", "proxy.js");
@@ -78,13 +79,74 @@ function readModelsPathsFromSource() {
   return paths;
 }
 
+/**
+ * Execute the generated guard and check what it actually decides.
+ *
+ * Parsing is not enough. A bare expression where a declaration belonged parses
+ * perfectly and then throws ReferenceError on first use, which is how the
+ * previous deploy 1101'd on every route. This runs the real generated code
+ * against a real Request and asserts the public paths pass and the guarded ones
+ * do not, so a broken guard fails the build instead of the site.
+ */
+function assertGuardDecidesCorrectly(guardSource, modelsPaths) {
+  const driver = `
+const __cases = ${JSON.stringify(modelsPaths)};
+for (const path of __cases) {
+  const res = await guardCloudflareAdminRequest(new Request("https://w.test" + path), {});
+  if (res !== null) {
+    throw new Error("guard rejected public path " + path + " with " + (res && res.status));
+  }
+}
+for (const path of ["/v1/chat/completions", "/v1/completions", "/v1/messages"]) {
+  const res = await guardCloudflareAdminRequest(new Request("https://w.test" + path), {});
+  if (!res || res.status !== 401) {
+    throw new Error("guard did not require a key for " + path);
+  }
+}
+`;
+  const tmp = join(tmpdir(), `9router-guard-check-${process.pid}.mjs`);
+  writeFileSync(tmp, guardSource + driver);
+  try {
+    const result = spawnSync(process.execPath, [tmp], { encoding: "utf8" });
+    if (result.status !== 0) {
+      throw new Error(
+        `the generated auth guard does not behave correctly, refusing to deploy:\n` +
+          `${(result.stderr || "").split("\n").slice(0, 6).join("\n")}`
+      );
+    }
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * Parse the generated worker before it can become a deployment.
+ *
+ * The guard is assembled by string substitution, so a mistake in it is invisible
+ * until runtime: the deploy succeeds, the bundle contains the code, and every
+ * request fails. That is exactly how a bare placeholder shipped as a
+ * ReferenceError and turned the whole worker into 1101s. Checking the syntax
+ * here costs seconds and would have caught it before the deploy.
+ */
+function assertWorkerParses(source) {
+  const tmp = join(tmpdir(), `9router-worker-check-${process.pid}.mjs`);
+  writeFileSync(tmp, source);
+  try {
+    const result = spawnSync(process.execPath, ["--check", tmp], { encoding: "utf8" });
+    if (result.status !== 0) {
+      throw new Error(
+        `generated worker.js does not parse, refusing to hand a broken bundle to wrangler:\n${result.stderr}`
+      );
+    }
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
 function injectWorkerGuard() {
   if (!existsSync(workerPath)) throw new Error(`${workerPath} does not exist after OpenNext build`);
   const modelsPaths = readModelsPathsFromSource();
-  let source = readFileSync(workerPath, "utf8");
-  // Substitute the generated list for the placeholder in the guard template, so
-  // the two copies cannot drift: there is only one list, in the source.
-  source = source.replace("__MODELS_PATHS__", `new Set(${JSON.stringify(modelsPaths)})`);
+  const source = readFileSync(workerPath, "utf8");
   if (source.includes("__9ROUTER_CF_ADMIN_GUARD__")) return;   // already injected
 
   const guard = String.raw`
@@ -264,13 +326,15 @@ async function __9ROUTER_SCHEDULED__(event, env, ctx) {
     // ship while production kept enforcing the old policy.
     const guardWithPaths = guard.replace(
       "__MODELS_PATHS__",
-      `new Set(${JSON.stringify(modelsPaths)})`
+      `const MODELS_PATHS = new Set(${JSON.stringify(modelsPaths)});`
     );
     let withGuard = coordinatorRuntime + source.replace("export default {", `${guardWithPaths}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
       .replace(
       "return runWithCloudflareRequestContext(request, env, ctx, async () => {",
       "if (env) { for (const [k, v] of Object.entries(env)) { if (typeof v === 'string' && !process.env[k]) process.env[k] = v; } }\n        const guardResponse = await guardCloudflareAdminRequest(request, env);\n        if (guardResponse) return guardResponse;\n        let __9ROUTER_DOWNSTREAM_REQUEST = request;\n        const __9ROUTER_CF_IP = request.headers.get('cf-connecting-ip');\n        if (__9ROUTER_CF_IP) { const __9ROUTER_HEADERS = new Headers(request.headers); __9ROUTER_HEADERS.set('x-9r-real-ip', __9ROUTER_CF_IP); __9ROUTER_DOWNSTREAM_REQUEST = new Request(request.clone(), { headers: __9ROUTER_HEADERS }); }\n        else { const __9ROUTER_HEADERS = new Headers(request.headers); __9ROUTER_HEADERS.delete('x-9r-real-ip'); __9ROUTER_DOWNSTREAM_REQUEST = new Request(request, { headers: __9ROUTER_HEADERS }); }\n        return runWithCloudflareRequestContext(__9ROUTER_DOWNSTREAM_REQUEST, env, ctx, async () => {"
     );
+  assertWorkerParses(withGuard);
+  assertGuardDecidesCorrectly(guardWithPaths, modelsPaths);
   writeFileSync(workerPath, withGuard);
 }
 
