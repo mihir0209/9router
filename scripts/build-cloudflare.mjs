@@ -48,10 +48,44 @@ function run(command, args) {
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with status ${result.status || 1}`);
 }
 
+/**
+ * Fail the build when the two copies of the auth policy disagree.
+ *
+ * The guard below duplicates the policy in src/proxy.cloudflare.js because it
+ * has to run before the Next middleware. That duplication is invisible: editing
+ * only the source file produces a build that contains the change and a
+ * production worker that ignores it, which is exactly what happened here — the
+ * edit shipped, the artifact was correct, and /v1/models still returned 401.
+ * Both copies are read from source, so this check stays true as they change.
+ */
+function readModelsPathsFromSource() {
+  // By the time this runs the build has already renamed proxy.cloudflare.js to
+  // middleware.js, so that is where the live copy of the policy is.
+  const livePath = join(root, "src", "middleware.js");
+  const source = readFileSync(
+    existsSync(livePath) ? livePath : join(root, "src", "proxy.cloudflare.js"),
+    "utf8"
+  );
+  const block = source.match(/export const MODELS_PATHS = new Set\(\[([\s\S]*?)\]\)/);
+  if (!block) {
+    throw new Error(
+      "auth guard drift: MODELS_PATHS not found in src/proxy.cloudflare.js. The injected " +
+      "worker guard is generated from it, so the build cannot continue."
+    );
+  }
+  const paths = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  if (!paths.length) throw new Error("auth guard drift: MODELS_PATHS is empty in src/proxy.cloudflare.js");
+  return paths;
+}
+
 function injectWorkerGuard() {
   if (!existsSync(workerPath)) throw new Error(`${workerPath} does not exist after OpenNext build`);
-  const source = readFileSync(workerPath, "utf8");
-  if (source.includes("__9ROUTER_CF_ADMIN_GUARD__")) return;
+  const modelsPaths = readModelsPathsFromSource();
+  let source = readFileSync(workerPath, "utf8");
+  // Substitute the generated list for the placeholder in the guard template, so
+  // the two copies cannot drift: there is only one list, in the source.
+  source = source.replace("__MODELS_PATHS__", `new Set(${JSON.stringify(modelsPaths)})`);
+  if (source.includes("__9ROUTER_CF_ADMIN_GUARD__")) return;   // already injected
 
   const guard = String.raw`
 const __9ROUTER_CF_ADMIN_GUARD__ = true;
@@ -78,6 +112,8 @@ function pathMatches(pathname, path) {
 function isPublicCloudflarePath(pathname) {
   return PUBLIC_CLOUDFLARE_PATHS.some((path) => pathMatches(pathname, path));
 }
+
+__MODELS_PATHS__
 
 function isPublicLlmApi(pathname) {
   return PUBLIC_LLM_PREFIXES.some((path) => pathMatches(pathname, path));
@@ -164,6 +200,17 @@ async function guardCloudflareAdminRequest(request, env) {
 
   if (isPublicCloudflarePath(pathname)) return null;
 
+  // The model catalogue is public. A client needs it to know what it can call,
+  // often before it holds a key, and it contains no user data. Every other LLM
+  // route still requires a key.
+  //
+  // This mirrors src/proxy.cloudflare.js. It has to be mirrored: the guard below
+  // is a hand-maintained copy injected directly into worker.js, and it runs
+  // BEFORE the Next middleware. Editing only the source file leaves the copy
+  // answering first, which is exactly what happened — the source change shipped,
+  // the build contained it, and /v1/models still 401'd.
+  if (MODELS_PATHS.has(pathname)) return null;
+
   if (isPublicLlmApi(pathname)) {
     if (hasApiKeyHeader(request, url)) return null;
     return Response.json({ error: "API key required" }, { status: 401 });
@@ -210,8 +257,17 @@ async function __9ROUTER_SCHEDULED__(event, env, ctx) {
     .trim();
   const coordinatorRuntime = `import { DurableObject } from "cloudflare:workers";\n${coordinatorSource}\n`;
 
-  let withGuard = coordinatorRuntime + source.replace("export default {", `${guard}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
-    .replace(
+  // The public model-list paths are defined once, in src/proxy.cloudflare.js, and
+    // read from there at build time. Substituting them into the guard means the
+    // injected guard and the Next middleware agree by construction rather than by
+    // discipline — they were two hand-maintained copies, and a source edit would
+    // ship while production kept enforcing the old policy.
+    const guardWithPaths = guard.replace(
+      "__MODELS_PATHS__",
+      `new Set(${JSON.stringify(modelsPaths)})`
+    );
+    let withGuard = coordinatorRuntime + source.replace("export default {", `${guardWithPaths}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
+      .replace(
       "return runWithCloudflareRequestContext(request, env, ctx, async () => {",
       "if (env) { for (const [k, v] of Object.entries(env)) { if (typeof v === 'string' && !process.env[k]) process.env[k] = v; } }\n        const guardResponse = await guardCloudflareAdminRequest(request, env);\n        if (guardResponse) return guardResponse;\n        let __9ROUTER_DOWNSTREAM_REQUEST = request;\n        const __9ROUTER_CF_IP = request.headers.get('cf-connecting-ip');\n        if (__9ROUTER_CF_IP) { const __9ROUTER_HEADERS = new Headers(request.headers); __9ROUTER_HEADERS.set('x-9r-real-ip', __9ROUTER_CF_IP); __9ROUTER_DOWNSTREAM_REQUEST = new Request(request.clone(), { headers: __9ROUTER_HEADERS }); }\n        else { const __9ROUTER_HEADERS = new Headers(request.headers); __9ROUTER_HEADERS.delete('x-9r-real-ip'); __9ROUTER_DOWNSTREAM_REQUEST = new Request(request, { headers: __9ROUTER_HEADERS }); }\n        return runWithCloudflareRequestContext(__9ROUTER_DOWNSTREAM_REQUEST, env, ctx, async () => {"
     );
