@@ -64,6 +64,18 @@ export default async function proxy(request) {
     return NextResponse.next();
   }
 
+  // The model catalogue is public. A client needs it to know what it can call,
+  // often before it has a key at all — several clients fetch /v1/models to
+  // populate a picker. It contains no user data, and every other LLM route
+  // still requires a key.
+  //
+  // It is the ONLY public LLM path, and a restricted key gets a filtered list
+  // from the route itself — that filtering is per-caller and is not the proxy's
+  // job. So an absent key here is not an error, just an unrestricted request.
+  if (pathname === "/v1/models" || pathname === "/api/v1/models" || pathname === "/v1beta/models" || pathname === "/api/v1beta/models") {
+    return NextResponse.next();
+  }
+
   if (isPublicLlmApi(pathname)) {
     if (hasApiKeyHeader(request)) return NextResponse.next();
     return NextResponse.json({ error: "API key required" }, { status: 401 });

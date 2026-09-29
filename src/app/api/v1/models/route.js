@@ -5,7 +5,7 @@ import {
   isAnthropicCompatibleProvider,
   isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
-import { getProviderConnections, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
+import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getApiKeyByKey } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
 import { mapWithConcurrency } from "@/lib/async/mapWithConcurrency.js";
@@ -170,6 +170,14 @@ export async function buildModelsList(kindFilter, options = {}) {
   // and "cached" remains the recommended setting there.
   const modelsListSource = await resolveModelsListSource(options.modelsListSource);
   const allowLive = modelsListSource === "live" && options.skipDynamicFetch !== true && !isCloudflareRuntime();
+
+  // An allow-list on the caller's key narrows the list. Empty or "*" means
+  // unrestricted, and then the full catalog is correct.
+  const rawAllowed = options.allowedModels;
+  const allowedList = typeof rawAllowed === "string"
+    ? rawAllowed.split(",").map((s) => s.trim()).filter(Boolean)
+    : Array.isArray(rawAllowed) ? rawAllowed.map((s) => String(s).trim()).filter(Boolean) : [];
+  const restrictedModels = allowedList.length > 0 && !allowedList.includes("*") ? allowedList : null;
   const providerConcurrency = options.providerConcurrency || MODEL_PROVIDER_CONCURRENCY;
   const providerTimeoutMs = options.providerTimeoutMs || MODEL_PROVIDER_TIMEOUT_MS;
   const dbReads = await Promise.allSettled([
@@ -207,6 +215,97 @@ export async function buildModelsList(kindFilter, options = {}) {
 
   // Lookup map so aggregateComboCapabilities can recursively resolve nested combos
   const comboByName = Object.fromEntries(combos.map((c) => [c.name, c.models]));
+
+  // ── Restricted API key: answer from the database, never from providers ──
+  //
+  // A key with an allow-list is entitled to a known, small set of models. That
+  // set is already in hand, so listing it must not cost a round trip to every
+  // configured provider to discover models this caller could not use anyway.
+  // This branch returns before the provider-connection loop entirely, which is
+  // the point: the full list fans out to 10+ upstreams, and a restricted key
+  // would pay that cost for a result it would then be forbidden to use.
+  //
+  // An allow-listed id is emitted even when the static catalog has never heard
+  // of it. That is deliberate in both directions:
+  //
+  //   Hiding it would be wrong when the model is real but dynamically
+  //   discovered upstream. The admin allow-listed it, enforcement permits it, and
+  //   the client would be unable to see something it is allowed to call.
+  //
+  //   Not hiding it can show an entry with no capability metadata, when the
+  //   allow-list names something that does not exist. The cost of that is a
+  //   client seeing a model it cannot usefully call; the cost of hiding is a
+  //   client unable to see one it can. The admin made the claim, so the claim
+  //   is surfaced.
+  if (restrictedModels) {
+    const emitted = new Set();
+    const push = (entry) => {
+      if (!entry?.id || emitted.has(entry.id)) return;
+      emitted.add(entry.id);
+      models.push(entry);
+    };
+
+    // Flatten each allowed entry. A combo is authorised by name (see
+    // enforceApiKeyRestrictions), so listing one means listing what it can
+    // actually reach — a client that can call `auto` should see its members.
+    const wanted = [];
+    const seenCombo = new Set();
+    const expandCombo = (name) => {
+      if (seenCombo.has(name)) return;   // bounded: a cyclic combo stops here
+      seenCombo.add(name);
+      const members = comboByName[name];
+      if (!Array.isArray(members)) return;
+      for (const member of members) {
+        if (comboByName[member]) expandCombo(member);
+        else wanted.push(member);
+      }
+    };
+    for (const entry of restrictedModels) {
+      if (comboByName[entry]) {
+        expandCombo(entry);
+      } else {
+        wanted.push(entry);
+      }
+    }
+
+    // alias -> full id, so an allow-list entry written as an alias still resolves
+    const aliasToFull = {};
+    for (const [aliasKey, fullModel] of Object.entries(modelAliases || {})) {
+      if (typeof fullModel === "string") aliasToFull[aliasKey] = fullModel;
+    }
+
+    for (const rawId of wanted) {
+      if (typeof rawId !== "string" || rawId.trim() === "") continue;
+      const fullId = aliasToFull[rawId] || rawId;
+      const slash = fullId.indexOf("/");
+      const alias = slash > 0 ? fullId.slice(0, slash) : rawId;
+      const modelId = slash > 0 ? fullId.slice(slash + 1) : rawId;
+      if (isDisabled(alias, modelId)) continue;
+
+      const caps = getCapabilitiesForModel(alias, modelId);
+      const entry = { id: fullId, object: "model", owned_by: alias };
+      if (caps) entry.capabilities = caps;
+      if (Number.isFinite(caps?.contextWindow)) entry.context_length = caps.contextWindow;
+      if (Number.isFinite(caps?.maxOutput)) entry.max_completion_tokens = caps.maxOutput;
+      push(entry);
+      // The alias is a usable id in its own right, so expose it too — that is
+      // what an allow-list entry usually looks like.
+      if (aliasToFull[rawId]) push({ ...entry, id: rawId });
+    }
+
+    // A custom model the allow-list names by id, even if it is not in the static
+    // catalog. Otherwise restricting a key to a custom model returns nothing.
+    for (const m of customModels) {
+      if (!m?.id) continue;
+      const fullId = `${m.providerAlias}/${m.id}`;
+      if (!emitted.has(fullId) && (emitted.has(m.id) || wanted.includes(fullId) || wanted.includes(m.id))) {
+        const caps = getCapabilitiesForModel(m.providerAlias, m.id);
+        push({ id: fullId, object: "model", owned_by: m.providerAlias, capabilities: caps || undefined });
+      }
+    }
+
+    return models;
+  }
 
   // Combos first (filtered by kind). Web combos expose `kind` so AI knows search vs fetch.
   for (const combo of combos) {
@@ -446,20 +545,52 @@ export async function OPTIONS() {
  * GET /v1/models - OpenAI compatible models list (LLM/chat models only by default).
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
  */
+/** Read the caller's key if one was offered. Listing models is public, so this
+ *  is best-effort: a bad or absent key narrows nothing, it does not 401. */
+function offeredApiKey(request) {
+  const auth = request?.headers?.get("Authorization");
+  if (auth?.startsWith("Bearer ")) return auth.slice(7);
+  return request?.headers?.get("x-api-key")
+    || request?.headers?.get("x-goog-api-key")
+    || request?.nextUrl?.searchParams?.get("key")
+    || null;
+}
+
 export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
     const now = Date.now();
 
-    if (!skipDynamicFetch && modelsListCache.body && now - modelsListCache.ts < MODELS_LIST_TTL_MS) {
+    // An allow-list on the caller's key changes the answer per caller, so the
+    // shared memory and edge caches must be bypassed for it. They are keyed by
+    // nothing: one restricted list landing in there would be handed to every
+    // other caller, which is exactly the leak this branch exists to prevent.
+    // The restricted list is cheap to build anyway — it never contacts a
+    // provider — so nothing is lost by rebuilding it.
+    const offeredKey = offeredApiKey(request);
+    let allowedModels = null;
+    if (offeredKey) {
+      const keyRecord = await getApiKeyByKey(offeredKey).catch(() => null);
+      const raw = keyRecord?.allowedModels;
+      if (typeof raw === "string") {
+        const list = raw.split(",").map((s) => s.trim()).filter(Boolean);
+        if (list.length > 0 && !list.includes("*")) allowedModels = list;
+      } else if (Array.isArray(raw)) {
+        const list = raw.map((s) => String(s).trim()).filter(Boolean);
+        if (list.length > 0 && !list.includes("*")) allowedModels = list;
+      }
+    }
+    const keySpecific = allowedModels !== null;
+
+    if (!keySpecific && !skipDynamicFetch && modelsListCache.body && now - modelsListCache.ts < MODELS_LIST_TTL_MS) {
       return new Response(modelsListCache.body, {
         headers: modelsListHeaders({ "x-models-cache": "memory" }),
       });
     }
 
     // Cross-isolate edge cache (Workers): avoids re-paying CPU on every cold isolate.
-    if (!skipDynamicFetch) {
+    if (!keySpecific && !skipDynamicFetch) {
       const edgeBody = await readModelsEdgeCache(request);
       if (edgeBody) {
         modelsListCache.body = edgeBody;
@@ -471,7 +602,7 @@ export async function GET(request) {
     }
 
     // Coalesce concurrent rebuilds so a burst of /v1/models only pays CPU once.
-    if (!skipDynamicFetch && modelsListCache.inflight) {
+    if (!keySpecific && !skipDynamicFetch && modelsListCache.inflight) {
       const body = await modelsListCache.inflight;
       return new Response(body, {
         headers: modelsListHeaders({ "x-models-cache": "coalesced" }),
@@ -479,11 +610,13 @@ export async function GET(request) {
     }
 
     const build = (async () => {
-      const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+      const data = await buildModelsList([LLM_KIND], { skipDynamicFetch, allowedModels });
       return JSON.stringify({ object: "list", data });
     })();
 
-    if (!skipDynamicFetch) modelsListCache.inflight = build;
+    // Coalescing is per-response-shape too: a key-specific build must not be
+    // handed to an unrestricted caller, or vice versa.
+    if (!skipDynamicFetch && !keySpecific) modelsListCache.inflight = build;
 
     let body;
     try {
@@ -492,7 +625,11 @@ export async function GET(request) {
       if (modelsListCache.inflight === build) modelsListCache.inflight = null;
     }
 
-    if (!skipDynamicFetch && body) {
+    // Never store a key-specific body in the shared caches. This is the write
+    // side of the same rule as the read side above: a restricted list written
+    // here would be served to every unrestricted caller afterwards, and the
+    // edge cache is shared across isolates besides.
+    if (!skipDynamicFetch && !keySpecific && body) {
       modelsListCache.body = body;
       modelsListCache.ts = Date.now();
       await writeModelsEdgeCache(request, body);
