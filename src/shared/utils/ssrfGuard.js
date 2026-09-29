@@ -179,6 +179,24 @@ export async function assertPublicUrlResolved(rawUrl) {
   const bracketless = host.replace(/^\[|\]$/g, "");
   if (ipv4ToInt(bracketless) !== null || bracketless.includes(":")) return;
 
+  // DNS resolution only means something where there is a resolver to ask.
+  //
+  // Cloudflare Workers has none: `node:dns` is present under nodejs_compat but
+  // does not resolve real hostnames, and what comes back is not a dependable
+  // answer. Treating that as authoritative rejected perfectly public sites —
+  // en.wikipedia.org and iana.org came back "resolves to an internal host" while
+  // example.com happened to pass — so web fetch was broken for most of the web
+  // on Workers, and which sites failed looked arbitrary.
+  //
+  // Skipping the lookup there is a real reduction in coverage: layer 2 is what
+  // catches a hostname that resolves to a private address (a nip.io domain, or
+  // an attacker's domain pointed at 127.0.0.1). Layer 1 still rejects literal
+  // private IPs, localhost, and the .internal/.local/.localhost suffixes, and a
+  // Worker cannot reach the host's metadata service in the first place, so the
+  // exposure is limited to a hostname-based pivot from a Worker specifically.
+  // On every other runtime the lookup runs exactly as before.
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare") return;
+
   let addresses;
   try {
     addresses = await dns.promises.lookup(host, { all: true, verbatim: true });
