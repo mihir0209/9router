@@ -2,6 +2,7 @@ import { renameSync, existsSync, readFileSync, writeFileSync, rmSync } from "nod
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { PUBLIC_MODEL_PATHS } from "../src/lib/publicModelPaths.js";
 
 const root = process.cwd();
 const proxyPath = join(root, "src", "proxy.js");
@@ -60,24 +61,12 @@ function run(command, args) {
  * Both copies are read from source, so this check stays true as they change.
  */
 function readModelsPathsFromSource() {
-  // By the time this runs the build has already renamed proxy.cloudflare.js to
-  // middleware.js, so that is where the live copy of the policy is.
-  const livePath = join(root, "src", "middleware.js");
-  const source = readFileSync(
-    existsSync(livePath) ? livePath : join(root, "src", "proxy.cloudflare.js"),
-    "utf8"
-  );
-  const block = source.match(/export const MODELS_PATHS = new Set\(\[([\s\S]*?)\]\)/);
-  if (!block) {
-    throw new Error(
-      "auth guard drift: MODELS_PATHS not found in src/proxy.cloudflare.js. The injected " +
-      "worker guard is generated from it, so the build cannot continue."
-    );
+  if (!PUBLIC_MODEL_PATHS.length) {
+    throw new Error("PUBLIC_MODEL_PATHS is empty; the generated guard would 401 every request");
   }
-  const paths = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-  if (!paths.length) throw new Error("auth guard drift: MODELS_PATHS is empty in src/proxy.cloudflare.js");
-  return paths;
+  return PUBLIC_MODEL_PATHS;
 }
+
 
 /**
  * Execute the generated guard and check what it actually decides.
@@ -91,7 +80,7 @@ function readModelsPathsFromSource() {
 function assertGuardDecidesCorrectly(guardSource, modelsPaths) {
   const driver = `
 const __cases = ${JSON.stringify(modelsPaths)};
-for (const path of __cases) {
+for (const path of [...__cases, ...__cases.map((p) => p + "/")]) {
   const res = await guardCloudflareAdminRequest(new Request("https://w.test" + path), {});
   if (res !== null) {
     throw new Error("guard rejected public path " + path + " with " + (res && res.status));
@@ -271,7 +260,7 @@ async function guardCloudflareAdminRequest(request, env) {
   // BEFORE the Next middleware. Editing only the source file leaves the copy
   // answering first, which is exactly what happened — the source change shipped,
   // the build contained it, and /v1/models still 401'd.
-  if (MODELS_PATHS.has(pathname)) return null;
+  if (MODELS_PATHS.has(pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname)) return null;
 
   if (isPublicLlmApi(pathname)) {
     if (hasApiKeyHeader(request, url)) return null;

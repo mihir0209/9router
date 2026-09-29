@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { jwtVerify } from "jose";
 import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
+import { isPublicModelPath } from "./lib/publicModelPaths.js";
 
 const PUBLIC_CLOUDFLARE_PATHS = [
   "/api/health",
@@ -19,18 +20,6 @@ const PUBLIC_CLOUDFLARE_PATHS = [
 
 const PUBLIC_LLM_PREFIXES = ["/v1", "/v1beta", "/api/v1", "/api/v1beta"];
 
-// Single source of truth for the public model-list paths.
-// scripts/build-cloudflare.mjs injects a second copy of the auth policy into
-// worker.js, because that guard runs before the Next middleware. It reads this
-// list from here at build time rather than keeping its own, because two
-// hand-maintained copies of an auth decision diverge silently: the source edit
-// ships, the build contains it, and production ignores it.
-export const MODELS_PATHS = new Set([
-  "/v1/models",
-  "/api/v1/models",
-  "/v1beta/models",
-  "/api/v1beta/models",
-]);
 
 function pathMatches(pathname, path) {
   return pathname === path || pathname.startsWith(`${path}/`);
@@ -85,7 +74,7 @@ export default async function proxy(request) {
   // It is the ONLY public LLM path, and a restricted key gets a filtered list
   // from the route itself — that filtering is per-caller and is not the proxy's
   // job. So an absent key here is not an error, just an unrestricted request.
-  if (MODELS_PATHS.has(pathname)) {
+  if (isPublicModelPath(pathname)) {
     return NextResponse.next();
   }
 
