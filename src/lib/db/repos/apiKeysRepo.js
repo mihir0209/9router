@@ -250,6 +250,11 @@ export async function createApiKey(name, machineId, options = {}) {
     `INSERT INTO apiKeys(${API_KEY_FIELDS.join(", ")}) VALUES(${API_KEY_FIELDS.map(() => "?").join(", ")})`,
     API_KEY_FIELDS.map(f => f === "isActive" ? (apiKey[f] ? 1 : 0) : apiKey[f])
   );
+  // A local write makes the local cache stale, full stop. The control version
+  // below only moves when a coordinator is recording it — on SQLite and on
+  // Postgres without a Durable Object it does not — so relying on it left a
+  // read immediately after a write returning the pre-write row.
+  resetApiKeysCache();
   await publishControlVersion();
   return apiKey;
 }
@@ -310,6 +315,11 @@ export async function updateApiKey(id, data) {
 
     result = rowToKey(db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]));
   });
+  // A local write makes the local cache stale, full stop. The control version
+  // below only moves when a coordinator is recording it — on SQLite and on
+  // Postgres without a Durable Object it does not — so relying on it left a
+  // read immediately after a write returning the pre-write row.
+  resetApiKeysCache();
   await publishControlVersion();
   return result;
 }
@@ -330,6 +340,11 @@ export async function regenerateApiKey(id) {
     result = rowToKey(db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]));
   });
 
+  // A local write makes the local cache stale, full stop. The control version
+  // below only moves when a coordinator is recording it — on SQLite and on
+  // Postgres without a Durable Object it does not — so relying on it left a
+  // read immediately after a write returning the pre-write row.
+  resetApiKeysCache();
   await publishControlVersion();
   return result;
 }

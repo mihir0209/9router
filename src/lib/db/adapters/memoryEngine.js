@@ -118,6 +118,32 @@ export function evalExpression(token, params, cursor, row = {}) {
   return { value, alias: aliasName };
 }
 
+/**
+ * Arguments of `NAME(...)` only when the call spans the whole expression.
+ *
+ * A plain `/^COALESCE\s*\((.+)\)$/` is not enough: the `.+` is greedy, so
+ * "COALESCE(a, 0) + COALESCE(b, 0)" matched with the argument list
+ * "a, 0) + COALESCE(b, 0" and the first non-null argument won. Every compound
+ * aggregate — a token total added from two SUMs — evaluated to only its first
+ * term, with nothing to notice it by.
+ */
+function balancedCallArgs(src, namePattern) {
+  const m = src.match(new RegExp(`^(${namePattern})\\s*\\(`, "i"));
+  if (!m) return null;
+  const open = m[0].length - 1;
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      // The call has to close exactly at the end of the expression.
+      if (depth === 0) return i === src.length - 1 ? src.slice(open + 1, i) : null;
+    }
+  }
+  return null;
+}
+
 function evaluateNode(src, params, cursor, row) {
   const text = String(src || "").trim();
 
@@ -130,14 +156,23 @@ function evaluateNode(src, params, cursor, row) {
     return lit.value;
   }
 
-  const coalesce = text.match(/^COALESCE\s*\((.+)\)$/i);
-  if (coalesce) {
-    const args = splitCsv(coalesce[1]);
-    for (const arg of args) {
+  const coalesceArgs = balancedCallArgs(text, "COALESCE");
+  if (coalesceArgs !== null) {
+    for (const arg of splitCsv(coalesceArgs)) {
       const v = evaluateNode(arg, params, cursor, row);
       if (v !== null && v !== undefined) return v;
     }
     return null;
+  }
+
+  const subArgs = balancedCallArgs(text, "(?:substr|substring)");
+  if (subArgs !== null) {
+    const args = splitCsv(subArgs);
+    const [value, from, len] = args.map((a) => evaluateNode(a, params, cursor, row));
+    if (value === null || value === undefined) return null;
+    const start = Math.max(0, (Number(from) || 1) - 1);
+    const count = len === undefined ? undefined : Number(len);
+    return String(value).slice(start, count === undefined ? undefined : start + count);
   }
 
   const sub = text.match(/^(?:substr|substring)\s*\((.+)\)$/i);
@@ -270,18 +305,119 @@ export function parseSelect(sql) {
   // answered with the whole table. This is the engine the D1 adapter serves too,
   // so pagination was broken on Workers as well; it only stayed invisible because
   // SQLite runs the real thing.
+  //
+  // GROUP BY sits before ORDER BY for the same reason: an unrecognised clause
+  // made the whole match fail, parseSelect returned null, and `all` returned []
+  // with no error. Every aggregate report — usage stats, per-key daily usage —
+  // therefore came back empty on the adapters that use this engine (Cloudflare
+  // D1 and Postgres), while SQLite ran the real query and looked fine.
   const match = sql.match(
-    /^SELECT\s+(.+?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+LIMIT\s+([^\s]+))?(?:\s+OFFSET\s+([^\s]+))?$/i
+    /^SELECT\s+(.+?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+?))?(?:\s+GROUP\s+BY\s+(.+?))?(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+LIMIT\s+([^\s]+))?(?:\s+OFFSET\s+([^\s]+))?$/i
   );
   if (!match) return null;
   return {
     columns: match[1].trim(),
     table: match[2],
     where: match[3]?.trim(),
-    order: match[4]?.trim(),
-    limit: match[5]?.trim(),
-    offset: match[6]?.trim(),
+    groupBy: match[4]?.trim(),
+    order: match[5]?.trim(),
+    limit: match[6]?.trim(),
+    offset: match[7]?.trim(),
   };
+}
+
+const AGGREGATE_NAMES = ["COUNT", "SUM", "MIN", "MAX", "AVG"];
+
+/** The column a bare aggregate names its result after, or null if it is not one. */
+function bareAggregateColumn(expression) {
+  const m = expression.match(
+    new RegExp(`^(${AGGREGATE_NAMES.join("|")})\\s*\\(\\s*([\\w.]+)\\s*\\)$`, "i")
+  );
+  return m ? m[2] : null;
+}
+
+/** True when a select item contains an aggregate and so collapses a group to one value. */
+function containsAggregate(expression) {
+  return new RegExp(`\\b(${AGGREGATE_NAMES.join("|")})\\s*\\(`, "i").test(expression);
+}
+
+/** Compute one aggregate over the rows of a group. */
+function computeAggregate(fn, argument, rows) {
+  const upper = fn.toUpperCase();
+  if (upper === "COUNT") {
+    if (!argument || argument === "*") return rows.length;
+    return rows.filter((row) => row[argument] !== null && row[argument] !== undefined).length;
+  }
+  if (upper === "SUM") {
+    return rows.reduce((total, row) => total + (Number(row[argument]) || 0), 0);
+  }
+  if (upper === "AVG") {
+    const values = rows.map((row) => Number(row[argument])).filter((n) => Number.isFinite(n));
+    return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+  }
+  // MIN/MAX. Empty input yields null rather than 0: MAX of nothing is null, and a
+  // 0 here would be indistinguishable from a real minimum.
+  const values = rows
+    .map((row) => row[argument])
+    .filter((value) => value !== null && value !== undefined);
+  if (!values.length) return null;
+  return values.reduce((acc, v) => (upper === "MAX" ? (v > acc ? v : acc) : v < acc ? v : acc));
+}
+
+/**
+ * Project one group of rows.
+ *
+ * Handles the shapes real reporting queries use: a bare column, an aggregate, an
+ * aggregate wrapped in COALESCE, a sum of two coalesced aggregates, or a plain
+ * expression such as substr(timestamp, 1, 10) used as the group label. A select
+ * item that is none of those used to be dropped by the old column-list parser,
+ * which returned {} for the row — the caller saw undefined for every field.
+ */
+function projectGroup(rows, columns, params) {
+  const fields = splitCsv(columns);
+  const out = {};
+  for (const raw of fields) {
+    const field = raw.trim();
+    if (!field) continue;
+    const aliased = field.match(/^(.*?)\s+AS\s+(\w+)$/i);
+    const expression = (aliased ? aliased[1] : field).trim();
+    const alias = aliased ? aliased[2] : null;
+
+    if (containsAggregate(expression)) {
+      // Substitute every aggregate in the item, not just the first: report
+      // queries add two of them ("COALESCE(SUM(promptTokens),0) +
+      // COALESCE(SUM(completionTokens),0) AS tokens") and leaving the second as
+      // literal text silently produced a wrong total.
+      let rewritten = expression;
+      const pattern = new RegExp(`\\b(${AGGREGATE_NAMES.join("|")})\\s*\\(\\s*([^)]*?)\\s*\\)`, "gi");
+      for (let guard = 0; guard < 16; guard++) {
+        const inner = pattern.exec(rewritten);
+        if (!inner) break;
+        const value = computeAggregate(inner[1], inner[2].trim(), rows);
+        rewritten = `${rewritten.slice(0, inner.index)}${value}${rewritten.slice(inner.index + inner[0].length)}`;
+        pattern.lastIndex = 0;
+      }
+      const cursor = { value: 0 };
+      const { value } = evalExpression(rewritten, params, cursor, rows[0] || {});
+      // A bare aggregate is named after its column, not after its own text:
+      // "SELECT MAX(priority)" has to come back as { priority: 7 } because that
+      // is what the column-list parser used to produce and callers read it.
+      const defaultName = bareAggregateColumn(expression) || expression;
+      out[alias || defaultName] = value;
+      continue;
+    }
+
+    // Not an aggregate: a per-row expression, constant across the group.
+    const bare = expression.match(/^([\w.]+)$/);
+    if (bare) {
+      out[alias || bare[1]] = rows[0] ? rows[0][bare[1]] : undefined;
+      continue;
+    }
+    const cursor = { value: 0 };
+    const { value } = evalExpression(expression, params, cursor, rows[0] || {});
+    out[alias || expression] = value;
+  }
+  return out;
 }
 
 export function projectRows(rows, columns) {
@@ -535,14 +671,48 @@ export function createInMemoryOps(state, {
     const cursor = { value: 0 };
     let rows = rowsFor(parsed.table).filter(buildWhere(parsed.where, params, cursor));
 
+    // GROUP BY: bucket the filtered rows, then project one row per bucket.
+    // Skipped entirely when absent, so a plain SELECT still returns one row per
+    // matching record — except when the select list aggregates, where SQL
+    // collapses the whole set to a single row.
+    let grouped = null;
+    const aggregatesWholeSet = !parsed.groupBy && containsAggregate(parsed.columns);
+    if (parsed.groupBy) {
+      const buckets = new Map();
+      for (const row of rows) {
+        const key = evalExpression(parsed.groupBy, params, { value: 0 }, row).value;
+        // Map keys distinguish 1 from "1" and null from "null", so a group label
+        // of two different types never merges.
+        const bucketKey = `${typeof key}:${key}`;
+        if (!buckets.has(bucketKey)) buckets.set(bucketKey, []);
+        buckets.get(bucketKey).push(row);
+      }
+      grouped = [...buckets.values()];
+    } else if (aggregatesWholeSet) {
+      grouped = [rows];
+    }
+
     if (parsed.order) {
-      const [field, direction = "ASC"] = parsed.order.split(/\s+/);
+      const terms = splitCsv(parsed.order).map((term) => {
+        const [field, direction = "ASC"] = term.trim().split(/\s+/);
+        return { field, direction: direction.toUpperCase() };
+      });
+      const sortKey = (row) => {
+        // An ORDER BY may name the select alias ("ORDER BY requests") or the
+        // underlying column; both have to work, because report queries use each.
+        if (row[terms[0].field] !== undefined) return row[terms[0].field];
+        if (grouped) {
+          const first = grouped[0]?.[0];
+          if (first) return first[terms[0].field];
+        }
+        return undefined;
+      };
       rows = [...rows].sort((a, b) => {
-        const av = a[field];
-        const bv = b[field];
+        const av = sortKey(a);
+        const bv = sortKey(b);
         if (av === bv) return 0;
         const result = av > bv ? 1 : -1;
-        return direction.toUpperCase() === "DESC" ? -result : result;
+        return terms[0].direction === "DESC" ? -result : result;
       });
     }
 
@@ -555,11 +725,27 @@ export function createInMemoryOps(state, {
       ? Number(literalValue(parsed.offset, params, cursor).value)
       : 0;
 
-    // ...then slice in array order.
-    if (Number.isFinite(offset) && offset > 0) rows = rows.slice(offset);
-    if (Number.isFinite(limit)) rows = rows.slice(0, limit);
+    let result;
+    if (grouped) {
+      result = grouped.map((bucket) => projectGroup(bucket, parsed.columns, params));
+    } else {
+      // ...then slice in array order.
+      if (Number.isFinite(offset) && offset > 0) rows = rows.slice(offset);
+      if (Number.isFinite(limit)) rows = rows.slice(0, limit);
+      // "*" and DISTINCT keep their dedicated handling; everything else goes
+      // through the same projector as a grouped query, one row at a time, so a
+      // per-row expression (substr(timestamp,1,10) AS day) projects instead of
+      // being dropped as unparseable.
+      result = parsed.columns === "*" || /^\s*DISTINCT\b/i.test(parsed.columns)
+        ? projectRows(rows, parsed.columns)
+        : rows.map((row) => projectGroup([row], parsed.columns, params));
+    }
 
-    return projectRows(rows, parsed.columns);
+    if (grouped) {
+      if (Number.isFinite(offset) && offset > 0) result = result.slice(offset);
+      if (Number.isFinite(limit)) result = result.slice(0, limit);
+    }
+    return result;
   }
 
   function get(sql, params = []) {

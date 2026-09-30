@@ -248,30 +248,57 @@ export async function getSettings() {
 }
 
 // Atomic read-merge-write inside transaction (prevents losing concurrent updates)
+// Settings updates are read-modify-write, and two of those interleaving lose a
+// field each. On top of that, the resync below is awaited: a slow resync started
+// by one caller can land *after* a faster caller has already written in memory,
+// and overwriting the row with the older database state silently reverts it.
+// Serializing the whole read-resync-merge-write makes the second caller observe
+// the first caller's write instead of racing it.
+//
+// One chain per isolate. Cross-isolate the same race exists on D1 and is not
+// fixable from here — but settings writes are rare and admin-driven, so the
+// window is small and the previous behaviour lost data even within one isolate.
+let settingsWriteChain = Promise.resolve();
+
 export async function updateSettings(updates) {
-  const db = await getAdapter();
-  // On Workers each isolate holds its own copy of the settings row, refreshed
-  // from D1 only every few minutes. Merging against a stale copy would let an
-  // isolate silently revert another isolate's change (e.g. re-enabling a key
-  // someone just disabled, or undoing a kill switch). Writes are rare, so pay
-  // for a forced refresh and merge against current state.
-  if (typeof db.resync === "function") {
-    await db.resync(true, ["settings"]).catch(() => {});
-  }
-  let next;
-  db.transaction(function () {
-    const row = db.get(`SELECT data FROM settings WHERE id = 1`);
-    const current = row ? parseJson(row.data, {}) : {};
-    next = { ...current, ...updates };
-    db.run(
-      `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
-      [stringifyJson(next)],
-    );
-  });
-  resetSettingsCache();
-  const { bumpControlVersion } = await import("@/lib/coordinator/controlVersion.js");
-  await bumpControlVersion(CONTROL_DOMAIN);
-  return mergeWithDefaults(next);
+  const run = async () => {
+    const db = await getAdapter();
+    // On Workers each isolate holds its own copy of the settings row, refreshed
+    // from D1 only every few minutes. Merging against a stale copy would let an
+    // isolate silently revert another isolate's change (e.g. re-enabling a key
+    // someone just disabled, or undoing a kill switch). Writes are rare, so pay
+    // for a forced refresh and merge against current state.
+    //
+    // Workers only. Postgres has a single writer process, so there is no other
+    // isolate to race — and refreshing there is actively harmful: the write is
+    // flushed at commit without being awaited, so the next caller can resync
+    // from the database *before* the previous write lands and read a row that
+    // predates it, then overwrite the newer value. That is how 50 parallel
+    // settings updates lost 49 fields.
+    if (process.env.NINEROUTER_RUNTIME === "cloudflare" && typeof db.resync === "function") {
+      await db.resync(true, ["settings"]).catch(() => {});
+    }
+    let next;
+    db.transaction(function () {
+      const row = db.get(`SELECT data FROM settings WHERE id = 1`);
+      const current = row ? parseJson(row.data, {}) : {};
+      next = { ...current, ...updates };
+      db.run(
+        `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
+        [stringifyJson(next)],
+      );
+    });
+    resetSettingsCache();
+    const { bumpControlVersion } = await import("@/lib/coordinator/controlVersion.js");
+    await bumpControlVersion(CONTROL_DOMAIN);
+    return mergeWithDefaults(next);
+  };
+
+  // Chain on both settle paths, so one rejected update does not wedge every
+  // later settings write behind it.
+  const result = settingsWriteChain.then(run, run);
+  settingsWriteChain = result.then(() => {}, () => {});
+  return result;
 }
 
 export async function isCloudEnabled() {
