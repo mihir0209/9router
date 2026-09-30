@@ -195,6 +195,15 @@ export async function buildModelsList(kindFilter, options = {}) {
   //   is surfaced.
   if (restrictedModels) {
     const emitted = new Set();
+    // "providerAlias/modelId" -> service kind, from the static catalogue. Built
+    // here rather than globally so the restricted path stays independent of how
+    // the main loop is written.
+    const staticKindByFullId = new Map();
+    for (const [aliasKey, providerModels] of Object.entries(PROVIDER_MODELS)) {
+      for (const staticModel of providerModels) {
+        if (staticModel?.id) staticKindByFullId.set(`${aliasKey}/${staticModel.id}`, modelKind(staticModel));
+      }
+    }
     const push = (entry) => {
       if (!entry?.id || emitted.has(entry.id)) return;
       emitted.add(entry.id);
@@ -204,25 +213,31 @@ export async function buildModelsList(kindFilter, options = {}) {
     // Flatten each allowed entry. A combo is authorised by name (see
     // enforceApiKeyRestrictions), so listing one means listing what it can
     // actually reach — a client that can call `auto` should see its members.
-    const wanted = [];
-    const seenCombo = new Set();
-    const expandCombo = (name) => {
-      if (seenCombo.has(name)) return;   // bounded: a cyclic combo stops here
-      seenCombo.add(name);
-      const members = comboByName[name];
-      if (!Array.isArray(members)) return;
-      for (const member of members) {
-        if (comboByName[member]) expandCombo(member);
-        else wanted.push(member);
+      const wanted = [];
+      const seenCombo = new Set();
+      const expandCombo = (name) => {
+        if (seenCombo.has(name)) return;   // bounded: a cyclic combo stops here
+        seenCombo.add(name);
+        const members = comboByName[name];
+        if (!Array.isArray(members)) return;
+        for (const member of members) {
+          if (comboByName[member]) expandCombo(member);
+          else wanted.push(member);
+        }
+      };
+      for (const entry of restrictedModels) {
+        // A combo is only in scope for the kind being asked about. Without this
+        // /v1/models/image answered a restricted key with its chat models: the
+        // branch built the allow-list expansion and returned, never consulting
+        // kindFilter, so every capability route returned the same list.
+        const combo = combos.find((c) => c.name === entry);
+        if (combo && !comboMatchesKinds(combo, kindFilter)) continue;
+        if (comboByName[entry]) {
+          expandCombo(entry);
+        } else {
+          wanted.push(entry);
+        }
       }
-    };
-    for (const entry of restrictedModels) {
-      if (comboByName[entry]) {
-        expandCombo(entry);
-      } else {
-        wanted.push(entry);
-      }
-    }
 
     // alias -> full id, so an allow-list entry written as an alias still resolves
     const aliasToFull = {};
@@ -238,8 +253,17 @@ export async function buildModelsList(kindFilter, options = {}) {
       const modelId = slash > 0 ? fullId.slice(slash + 1) : rawId;
       if (isDisabled(alias, modelId)) continue;
 
-      const caps = getCapabilitiesForModel(alias, modelId);
-      const entry = { id: fullId, object: "model", owned_by: alias };
+        const caps = getCapabilitiesForModel(alias, modelId);
+        // Same kind test the unrestricted path applies to static models, so a
+        // restricted key's /v1/models/image lists image models and nothing else.
+        // The kind comes from the static catalogue entry, not from capabilities:
+        // capabilities describe features (reasoning, vision, context window) and
+        // do not say whether a model is an image or a chat model.
+        const kind = staticKindByFullId.get(fullId) || inferKindFromUnknownModelId(fullId);
+        const inScope = kindFilter.includes(kind)
+          || (kind === "imageToText" && kindFilter.includes(LLM_KIND));
+        if (!inScope) continue;
+        const entry = { id: fullId, object: "model", owned_by: alias };
       if (caps) entry.capabilities = caps;
       if (Number.isFinite(caps?.contextWindow)) entry.context_length = caps.contextWindow;
       if (Number.isFinite(caps?.maxOutput)) entry.max_completion_tokens = caps.maxOutput;

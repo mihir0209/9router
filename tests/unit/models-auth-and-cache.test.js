@@ -136,3 +136,29 @@ describe("catalogue caching", () => {
     expect(res.headers.get("vary")).toMatch(/authorization/i);
   });
 });
+
+describe("allow-listed keys honour the requested capability", () => {
+  let id;
+  beforeEach(() => { id = seed(); });
+
+  // Regression: the restricted branch built the allow-list expansion and
+  // returned without consulting kindFilter, so /v1/models/image answered a
+  // restricted key with its chat models. Every capability route returned the
+  // same list, which made the kind URLs useless for exactly the keys that need
+  // them most.
+  it("does not answer /v1/models/{kind} with the LLM list", async () => {
+    const url = `http://localhost/v1/models/image?k=${id}`;
+    const res = await GET_KIND(authed(url), { params: Promise.resolve({ model: ["image"] }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const ids = body.data.map((m) => m.id);
+    // The key is allowed gpt-4o and auto, which are chat models, so an image
+    // listing is legitimately empty. What matters is that it is not the chat list.
+    expect(ids).not.toContain("gpt-4o");
+  });
+
+});
+
+function authed(url) {
+  return new Request(url, { headers: { authorization: `Bearer ${RESTRICTED_KEY}` } });
+}
