@@ -1170,7 +1170,11 @@ export default function APIPageClient({ machineId }) {
           </div>
         ) : (
           <div className="flex flex-col">
-            {keys.map((key) => (
+            {keys.map((key) => {
+              // Workspace keys (ownerRef) have their secret withheld by the
+              // API, so there is nothing to reveal or copy for them.
+              const hasSecret = Boolean(key.key);
+              return (
               <div
                 key={key.id}
                 className={`group flex items-center justify-between py-3 border-b border-black/[0.03] dark:border-white/[0.03] last:border-b-0 ${key.isActive === false ? "opacity-60" : ""}`}
@@ -1184,28 +1188,43 @@ export default function APIPageClient({ machineId }) {
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 mt-1">
-                    <code className="text-xs text-text-muted font-mono">
-                      {visibleKeys.has(key.id) ? key.key : maskKey(key.key)}
-                    </code>
-                    <button
-                      onClick={() => toggleKeyVisibility(key.id)}
-                      className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
-                      title={visibleKeys.has(key.id) ? "Hide key" : "Show key"}
-                    >
-                      <span className="material-symbols-outlined text-[14px]">
-                        {visibleKeys.has(key.id) ? "visibility_off" : "visibility"}
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => copy(key.key, key.id)}
-                      className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
-                    >
-                      <span className="material-symbols-outlined text-[14px]">
-                        {copied === key.id ? "check" : "content_copy"}
-                      </span>
-                    </button>
-                  </div>
+                    <div className="flex items-center gap-2 mt-1">
+                      {hasSecret ? (
+                        <>
+                          <code className="text-xs text-text-muted font-mono">
+                            {visibleKeys.has(key.id) ? key.key : maskKey(key.key)}
+                          </code>
+                          <button
+                            onClick={() => toggleKeyVisibility(key.id)}
+                            className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-text-primary"
+                            title={visibleKeys.has(key.id) ? "Hide key" : "Show key"}
+                          >
+                            <span className="material-symbols-outlined text-[14px]">
+                              {visibleKeys.has(key.id) ? "visibility_off" : "visibility"}
+                            </span>
+                          </button>
+                          <button
+                            onClick={() => copy(key.key, key.id)}
+                            className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-text-primary"
+                            title="Copy key"
+                          >
+                            <span className="material-symbols-outlined text-[14px]">
+                              {copied === key.id ? "check" : "content_copy"}
+                            </span>
+                          </button>
+                        </>
+                      ) : (
+                        // Workspace keys carry an ownerRef, and the API
+                        // deliberately withholds their secret from this
+                        // dashboard — it is shown once, to the admin API caller
+                        // that created it. Offering a reveal and a copy button
+                        // here produced an empty box and a copy that silently
+                        // copied nothing.
+                        <span className="text-xs text-text-muted italic">
+                          Secret not shown here — managed via the admin API
+                        </span>
+                      )}
+                    </div>
                   <div className="flex items-center gap-3 mt-1 flex-wrap">
                     <p className="text-xs text-text-muted">
                       Created {new Date(key.createdAt).toLocaleDateString()}
@@ -1272,12 +1291,13 @@ export default function APIPageClient({ machineId }) {
                     className="p-2 hover:bg-red-500/10 rounded text-red-500 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
                   >
                     <span className="material-symbols-outlined text-[18px]">delete</span>
-                  </button>
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+              );
+              })}
+            </div>
+          )}
       </Card>
 
       {/* Add Key Modal */}
