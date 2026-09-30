@@ -92,7 +92,12 @@ describe("Gemini native v1beta endpoint", () => {
   });
 
   it("lists Gemini TTS models using standard Google model names", async () => {
-    const response = await GET();
+    // /v1beta/models is authenticated like the rest of the catalogue surface.
+    const response = await GET(
+      new Request("https://router.test/v1beta/models", {
+        headers: { authorization: "Bearer sk-gemini-test" },
+      })
+    );
     const body = await response.json();
     const names = body.models.map((model) => model.name);
 

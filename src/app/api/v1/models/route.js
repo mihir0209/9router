@@ -12,24 +12,21 @@ import { mapWithConcurrency } from "@/lib/async/mapWithConcurrency.js";
 import { resolveProviderModelList, INTERNAL_MODELS_FETCH_HEADER } from "@/lib/modelCatalog/providerModelResolver.js";
 import { getSettings } from "@/lib/localDb";
 import { normalizeModelsListSource } from "@/lib/db/repos/settingsRepo.js";
+import {
+  authenticateModelsRequest,
+  modelsCacheId,
+  modelsListHeaders,
+  parseModelList,
+  unauthorizedModelsResponse,
+  withModelsCache,
+} from "@/lib/modelCatalog/modelsListCache.js";
 
 
 // LLM kind sentinel — combos/models with no explicit kind default to LLM
 const LLM_KIND = "llm";
 const CLOUDFLARE_STATIC_PROVIDER_BLOCKLIST = new Set(["opencode"]);
-const MODEL_PROVIDER_CONCURRENCY = 4;
-const MODEL_PROVIDER_TIMEOUT_MS = 6000;
-
-// Pre-serialized /v1/models body. Rebuilding capabilities for thousands of
-// models blows the Workers CPU budget (Cloudflare error 1102 → 503); serving
-// a cached string keeps warm requests near-zero CPU.
-// isolate-local (fast path) + Cache API on Workers (shared across isolates).
-const MODELS_LIST_TTL_MS = 300_000;
-const MODELS_EDGE_TTL_S = 300;
-if (!global._modelsListCache) {
-  global._modelsListCache = { body: null, ts: 0, inflight: null };
-}
-const modelsListCache = global._modelsListCache;
+// Live provider fan-out is never allowed on Workers: it cannot complete inside
+// the CPU budget, so `live` degrades to the cached catalogue there.
 const isCloudflareRuntime = () => process.env.NINEROUTER_RUNTIME === "cloudflare";
 
 /**
@@ -47,49 +44,8 @@ async function resolveModelsListSource(explicit) {
     return normalizeModelsListSource(undefined);
   }
 }
-
-function modelsListHeaders(extra = {}) {
-  return {
-    "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
-    "Cache-Control": "public, max-age=30",
-    ...extra,
-  };
-}
-
-function modelsEdgeCacheKey(request) {
-  // Auth-agnostic: the catalog shape does not depend on the caller's key.
-  return new Request(new URL("/v1/models", request.url).href, {
-    method: "GET",
-    headers: { accept: "application/json" },
-  });
-}
-
-async function readModelsEdgeCache(request) {
-  if (!isCloudflareRuntime()) return null;
-  try {
-    const hit = await caches.default.match(modelsEdgeCacheKey(request));
-    if (!hit) return null;
-    const body = await hit.text();
-    return body || null;
-  } catch {
-    return null;
-  }
-}
-
-async function writeModelsEdgeCache(request, body) {
-  if (!isCloudflareRuntime() || !body) return;
-  try {
-    const res = new Response(body, {
-      headers: modelsListHeaders({
-        "Cache-Control": `public, max-age=${MODELS_EDGE_TTL_S}`,
-      }),
-    });
-    await caches.default.put(modelsEdgeCacheKey(request), res);
-  } catch {
-    /* edge cache is best-effort */
-  }
-}
+const MODEL_PROVIDER_CONCURRENCY = 4;
+const MODEL_PROVIDER_TIMEOUT_MS = 6000;
 
 // Map per-model `type` field (in PROVIDER_MODELS) to service kind.
 // Models without `type` are treated as LLM.
@@ -545,116 +501,36 @@ export async function OPTIONS() {
  * GET /v1/models - OpenAI compatible models list (LLM/chat models only by default).
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
  */
-/** Read the caller's key if one was offered. Listing models is public, so this
- *  is best-effort: a bad or absent key narrows nothing, it does not 401. */
-function offeredApiKey(request) {
-  const auth = request?.headers?.get("Authorization");
-  if (auth?.startsWith("Bearer ")) return auth.slice(7);
-  return request?.headers?.get("x-api-key")
-    || request?.headers?.get("x-goog-api-key")
-    || request?.nextUrl?.searchParams?.get("key")
-    || null;
-}
-
 export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
-    const now = Date.now();
 
-    // An allow-list on the caller's key changes the answer per caller, so the
-    // shared memory and edge caches must be bypassed for it. They are keyed by
-    // nothing: one restricted list landing in there would be handed to every
-    // other caller, which is exactly the leak this branch exists to prevent.
-    // The restricted list is cheap to build anyway — it never contacts a
-    // provider — so nothing is lost by rebuilding it.
-    const offeredKey = offeredApiKey(request);
-    let allowedModels = null;
-    if (offeredKey) {
-      const keyRecord = await getApiKeyByKey(offeredKey).catch(() => null);
-      const raw = keyRecord?.allowedModels;
-      if (typeof raw === "string") {
-        const list = raw.split(",").map((s) => s.trim()).filter(Boolean);
-        if (list.length > 0 && !list.includes("*")) allowedModels = list;
-      } else if (Array.isArray(raw)) {
-        const list = raw.map((s) => String(s).trim()).filter(Boolean);
-        if (list.length > 0 && !list.includes("*")) allowedModels = list;
-      }
+    const auth = await authenticateModelsRequest(request);
+    if (!auth.ok) {
+      return unauthorizedModelsResponse(auth.error, auth.status);
     }
-    const keySpecific = allowedModels !== null;
+    const keyRecord = auth.keyRecord;
+    const allowedModels = parseModelList(keyRecord.allowedModels);
 
-    if (!keySpecific && !skipDynamicFetch && modelsListCache.body && now - modelsListCache.ts < MODELS_LIST_TTL_MS) {
-      return new Response(modelsListCache.body, {
-        headers: modelsListHeaders({ "x-models-cache": "memory" }),
-      });
-    }
-
-    // Cross-isolate edge cache (Workers): avoids re-paying CPU on every cold isolate.
-    if (!keySpecific && !skipDynamicFetch) {
-      const edgeBody = await readModelsEdgeCache(request);
-      if (edgeBody) {
-        modelsListCache.body = edgeBody;
-        modelsListCache.ts = Date.now();
-        return new Response(edgeBody, {
-          headers: modelsListHeaders({ "x-models-cache": "edge" }),
-        });
-      }
-    }
-
-    // Coalesce concurrent rebuilds so a burst of /v1/models only pays CPU once.
-    if (!keySpecific && !skipDynamicFetch && modelsListCache.inflight) {
-      const body = await modelsListCache.inflight;
-      return new Response(body, {
-        headers: modelsListHeaders({ "x-models-cache": "coalesced" }),
-      });
-    }
-
-    const build = (async () => {
-      const data = await buildModelsList([LLM_KIND], { skipDynamicFetch, allowedModels });
-      return JSON.stringify({ object: "list", data });
-    })();
-
-    // Coalescing is per-response-shape too: a key-specific build must not be
-    // handed to an unrestricted caller, or vice versa.
-    if (!skipDynamicFetch && !keySpecific) modelsListCache.inflight = build;
-
-    let body;
-    try {
-      body = await build;
-    } finally {
-      if (modelsListCache.inflight === build) modelsListCache.inflight = null;
-    }
-
-    // Never store a key-specific body in the shared caches. This is the write
-    // side of the same rule as the read side above: a restricted list written
-    // here would be served to every unrestricted caller afterwards, and the
-    // edge cache is shared across isolates besides.
-    if (!skipDynamicFetch && !keySpecific && body) {
-      modelsListCache.body = body;
-      modelsListCache.ts = Date.now();
-      await writeModelsEdgeCache(request, body);
-    }
+    const { body, source } = await withModelsCache({
+      request,
+      cacheId: modelsCacheId(keyRecord),
+      skipCache: skipDynamicFetch,
+      build: async () => {
+        const data = await buildModelsList([LLM_KIND], { skipDynamicFetch, allowedModels });
+        return { object: "list", data };
+      },
+    });
 
     return new Response(body, {
-      headers: modelsListHeaders({ "x-models-cache": "miss" }),
+      headers: modelsListHeaders({ "x-models-cache": source }),
     });
   } catch (error) {
     console.log("Error fetching models:", error);
-    // Stale cache is better than a hard failure when a rebuild throws.
-    if (modelsListCache.body) {
-      return new Response(modelsListCache.body, {
-        headers: modelsListHeaders({ "x-models-cache": "stale-memory" }),
-      });
-    }
-    const edgeBody = await readModelsEdgeCache(request).catch(() => null);
-    if (edgeBody) {
-      return new Response(edgeBody, {
-        headers: modelsListHeaders({ "x-models-cache": "stale-edge" }),
-      });
-    }
     return Response.json(
       { error: { message: error.message, type: "server_error" } },
-      { status: 500 }
+      { status: 500, headers: modelsListHeaders() }
     );
   }
 }

@@ -1,4 +1,12 @@
 import { buildModelsList } from "../route.js";
+import {
+  authenticateModelsRequest,
+  modelsCacheId,
+  modelsListHeaders,
+  parseModelList,
+  unauthorizedModelsResponse,
+  withModelsCache,
+} from "@/lib/modelCatalog/modelsListCache.js";
 
 // URL slug → service kind(s). `web` covers both webSearch and webFetch.
 const KIND_SLUG_MAP = {
@@ -26,7 +34,7 @@ function json(data, options = {}) {
   return Response.json(data, {
     ...options,
     headers: {
-      "Access-Control-Allow-Origin": "*",
+      ...modelsListHeaders(),
       ...options.headers,
     },
   });
@@ -37,23 +45,52 @@ function json(data, options = {}) {
  * GET /v1/models/{provider}/{model} - OpenAI-compatible single model lookup.
  * Supported kinds: image, tts, stt, embedding, image-to-text, web.
  */
-export async function GET(_request, { params }) {
+export async function GET(request, { params }) {
   try {
+    // Same rule as /v1/models: this route builds the same catalogue and is just
+    // as expensive, so it authenticates and caches identically. Guarding only
+    // the list route would leave the cost on the /{kind} spelling.
+    const auth = await authenticateModelsRequest(request);
+    if (!auth.ok) {
+      return unauthorizedModelsResponse(auth.error, auth.status);
+    }
+    const keyRecord = auth.keyRecord;
+    const allowedModels = parseModelList(keyRecord.allowedModels);
+
     const { model } = await params;
     const path = Array.isArray(model) ? model : [model];
     const identifier = path.filter(Boolean).join("/");
     const kindFilter = path.length === 1 ? KIND_SLUG_MAP[identifier] : null;
 
     if (kindFilter) {
-      const data = await buildModelsList(kindFilter);
-      return json({ object: "list", data });
+      // The cache id carries the key, but not the kind, so the kind is part of
+      // the identity too. Otherwise an image-model list would be served to
+      // someone asking for embeddings.
+      const cacheId = `${modelsCacheId(keyRecord)}|${identifier}`;
+      const { body, source } = await withModelsCache({
+        request,
+        cacheId,
+        skipCache: false,
+        build: async () => ({ object: "list", data: await buildModelsList(kindFilter, { allowedModels }) }),
+      });
+      return new Response(body, { headers: modelsListHeaders({ "x-models-cache": source }) });
     }
 
-    // Match the same LLM catalog exposed by GET /v1/models. A catch-all
-    // parameter is required because provider-prefixed IDs contain a slash.
-    const models = await buildModelsList([LLM_KIND]);
-    const matchedModel = models.find((candidate) => candidate.id === identifier);
+    // A single-model lookup is answered from the cached LLM list rather than a
+    // cached per-model verdict. Caching the verdict would keep answering 404
+    // for up to 10 minutes after the model is added, and would rebuild the
+    // whole list for every distinct model name asked for.
+    const { body } = await withModelsCache({
+      request,
+      cacheId: `${modelsCacheId(keyRecord)}|llm`,
+      skipCache: false,
+      build: async () => ({
+        object: "list",
+        data: await buildModelsList([LLM_KIND], { allowedModels }),
+      }),
+    });
 
+    const matchedModel = JSON.parse(body).data.find((candidate) => candidate.id === identifier);
     if (!matchedModel) {
       return json(
         {
@@ -63,16 +100,15 @@ export async function GET(_request, { params }) {
             code: "model_not_found",
           },
         },
-        { status: 404 },
+        { status: 404 }
       );
     }
-
     return json(matchedModel);
   } catch (error) {
     console.log("Error fetching model:", error);
     return json(
       { error: { message: error.message, type: "server_error" } },
-      { status: 500 },
+      { status: 500 }
     );
   }
 }

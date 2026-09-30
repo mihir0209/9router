@@ -2,7 +2,6 @@ import { renameSync, existsSync, readFileSync, writeFileSync, rmSync } from "nod
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { PUBLIC_MODEL_PATHS } from "../src/lib/publicModelPaths.js";
 
 const root = process.cwd();
 const proxyPath = join(root, "src", "proxy.js");
@@ -60,13 +59,6 @@ function run(command, args) {
  * edit shipped, the artifact was correct, and /v1/models still returned 401.
  * Both copies are read from source, so this check stays true as they change.
  */
-function readModelsPathsFromSource() {
-  if (!PUBLIC_MODEL_PATHS.length) {
-    throw new Error("PUBLIC_MODEL_PATHS is empty; the generated guard would 401 every request");
-  }
-  return PUBLIC_MODEL_PATHS;
-}
-
 
 /**
  * Execute the generated guard and check what it actually decides.
@@ -77,19 +69,16 @@ function readModelsPathsFromSource() {
  * against a real Request and asserts the public paths pass and the guarded ones
  * do not, so a broken guard fails the build instead of the site.
  */
-function assertGuardDecidesCorrectly(guardSource, modelsPaths) {
-  const driver = `
-const __cases = ${JSON.stringify(modelsPaths)};
-for (const path of [...__cases, ...__cases.map((p) => p + "/")]) {
-  const res = await guardCloudflareAdminRequest(new Request("https://w.test" + path), {});
-  if (res !== null) {
-    throw new Error("guard rejected public path " + path + " with " + (res && res.status));
-  }
-}
-for (const path of ["/v1/chat/completions", "/v1/completions", "/v1/messages"]) {
+function assertGuardDecidesCorrectly(guardSource) {
+    const driver = `
+for (const path of ["/v1/models", "/v1/models/", "/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/embeddings"]) {
   const res = await guardCloudflareAdminRequest(new Request("https://w.test" + path), {});
   if (!res || res.status !== 401) {
-    throw new Error("guard did not require a key for " + path);
+    throw new Error(
+      "guard let " + path + " through without a key (status " + (res && res.status) +
+      "). /v1/models must stay authenticated: an open catalogue is an " +
+      "unauthenticated amplification point."
+    );
   }
 }
 `;
@@ -134,7 +123,6 @@ function assertWorkerParses(source) {
 
 function injectWorkerGuard() {
   if (!existsSync(workerPath)) throw new Error(`${workerPath} does not exist after OpenNext build`);
-  const modelsPaths = readModelsPathsFromSource();
   const source = readFileSync(workerPath, "utf8");
   if (source.includes("__9ROUTER_CF_ADMIN_GUARD__")) return;   // already injected
 
@@ -164,7 +152,6 @@ function isPublicCloudflarePath(pathname) {
   return PUBLIC_CLOUDFLARE_PATHS.some((path) => pathMatches(pathname, path));
 }
 
-__MODELS_PATHS__
 
 function isPublicLlmApi(pathname) {
   return PUBLIC_LLM_PREFIXES.some((path) => pathMatches(pathname, path));
@@ -251,16 +238,13 @@ async function guardCloudflareAdminRequest(request, env) {
 
   if (isPublicCloudflarePath(pathname)) return null;
 
-  // The model catalogue is public. A client needs it to know what it can call,
-  // often before it holds a key, and it contains no user data. Every other LLM
-  // route still requires a key.
-  //
-  // This mirrors src/proxy.cloudflare.js. It has to be mirrored: the guard below
-  // is a hand-maintained copy injected directly into worker.js, and it runs
-  // BEFORE the Next middleware. Editing only the source file leaves the copy
-  // answering first, which is exactly what happened — the source change shipped,
-  // the build contained it, and /v1/models still 401'd.
-  if (MODELS_PATHS.has(pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname)) return null;
+  // Every LLM route requires a key, /v1/models included. The model list was
+  // briefly public on the reasoning that a client needs the catalogue before it
+  // holds one, but that is a free amplification point: any bot can make this
+  // instance enumerate thousands of models for free, and it is the costliest
+  // list to build. This guard runs before the middleware and before any database
+  // work, so an unauthenticated caller gets a flat 401 without touching D1.
+
 
   if (isPublicLlmApi(pathname)) {
     if (hasApiKeyHeader(request, url)) return null;
@@ -308,22 +292,13 @@ async function __9ROUTER_SCHEDULED__(event, env, ctx) {
     .trim();
   const coordinatorRuntime = `import { DurableObject } from "cloudflare:workers";\n${coordinatorSource}\n`;
 
-  // The public model-list paths are defined once, in src/proxy.cloudflare.js, and
-    // read from there at build time. Substituting them into the guard means the
-    // injected guard and the Next middleware agree by construction rather than by
-    // discipline — they were two hand-maintained copies, and a source edit would
-    // ship while production kept enforcing the old policy.
-    const guardWithPaths = guard.replace(
-      "__MODELS_PATHS__",
-      `const MODELS_PATHS = new Set(${JSON.stringify(modelsPaths)});`
-    );
-    let withGuard = coordinatorRuntime + source.replace("export default {", `${guardWithPaths}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
+    let withGuard = coordinatorRuntime + source.replace("export default {", `${guard}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
       .replace(
       "return runWithCloudflareRequestContext(request, env, ctx, async () => {",
       "if (env) { for (const [k, v] of Object.entries(env)) { if (typeof v === 'string' && !process.env[k]) process.env[k] = v; } }\n        const guardResponse = await guardCloudflareAdminRequest(request, env);\n        if (guardResponse) return guardResponse;\n        let __9ROUTER_DOWNSTREAM_REQUEST = request;\n        const __9ROUTER_CF_IP = request.headers.get('cf-connecting-ip');\n        if (__9ROUTER_CF_IP) { const __9ROUTER_HEADERS = new Headers(request.headers); __9ROUTER_HEADERS.set('x-9r-real-ip', __9ROUTER_CF_IP); __9ROUTER_DOWNSTREAM_REQUEST = new Request(request.clone(), { headers: __9ROUTER_HEADERS }); }\n        else { const __9ROUTER_HEADERS = new Headers(request.headers); __9ROUTER_HEADERS.delete('x-9r-real-ip'); __9ROUTER_DOWNSTREAM_REQUEST = new Request(request, { headers: __9ROUTER_HEADERS }); }\n        return runWithCloudflareRequestContext(__9ROUTER_DOWNSTREAM_REQUEST, env, ctx, async () => {"
     );
   assertWorkerParses(withGuard);
-  assertGuardDecidesCorrectly(guardWithPaths, modelsPaths);
+  assertGuardDecidesCorrectly(guard);
   writeFileSync(workerPath, withGuard);
 }
 

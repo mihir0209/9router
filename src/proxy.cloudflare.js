@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { jwtVerify } from "jose";
 import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
-import { isPublicModelPath } from "./lib/publicModelPaths.js";
 
 const PUBLIC_CLOUDFLARE_PATHS = [
   "/api/health",
@@ -74,9 +73,12 @@ export default async function proxy(request) {
   // It is the ONLY public LLM path, and a restricted key gets a filtered list
   // from the route itself — that filtering is per-caller and is not the proxy's
   // job. So an absent key here is not an error, just an unrestricted request.
-  if (isPublicModelPath(pathname)) {
-    return NextResponse.next();
-  }
+  // /v1/models is deliberately NOT public. It was briefly, on the reasoning that
+  // a client needs the catalogue before it holds a key. That is a free
+  // amplification point: any bot can make this instance enumerate thousands of
+  // models without a credential, and it is the most expensive list to build.
+  // The injected worker guard rejects the request before this middleware and
+  // before any database work, so an unauthenticated caller never reaches here.
 
   if (isPublicLlmApi(pathname)) {
     if (hasApiKeyHeader(request)) return NextResponse.next();
