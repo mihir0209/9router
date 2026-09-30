@@ -153,8 +153,15 @@ describe("concurrent builds are collapsed", () => {
     // Three concurrent callers, one build. Afterwards the count rises again,
     // because nothing is retained: the next request is a fresh build.
     expect(calls).toBe(1);
-    await GET(authed(url));
+    // With no response cache, this header is the only way to tell a shared build
+    // from a fresh one, so it has to be right.
+    const reports = responses.map((r) => r.headers.get("x-models-build"));
+    expect(reports.filter((v) => v === "fresh")).toHaveLength(1);
+    expect(reports.filter((v) => v === "coalesced")).toHaveLength(2);
+
+    const after = await GET(authed(url));
     expect(calls).toBe(2);
+    expect(after.headers.get("x-models-build")).toBe("fresh");
   });
 });
 

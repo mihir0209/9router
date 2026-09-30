@@ -65,19 +65,19 @@ export async function GET(request, { params }) {
       // Built per request so the list is live. The coalescing key carries the
       // key and the kind, so an image list is never handed to an embeddings
       // caller and one caller's allow-list is never handed to another's.
-      const data = await coalesceModelsBuild(
+      const { value: data, coalesced } = await coalesceModelsBuild(
         `${identifier}:${keyRecord.id}:${allowedModels ? allowedModels.join(",") : "*"}`,
         () => buildModelsList(kindFilter, { allowedModels })
       );
       return new Response(JSON.stringify({ object: "list", data }), {
-        headers: modelsListHeaders(),
+        headers: modelsListHeaders({ "x-models-build": coalesced ? "coalesced" : "fresh" }),
       });
     }
 
     // A single-model lookup builds the LLM list for this caller and reads the one
     // entry, rather than a cached per-model verdict: caching the verdict would
     // keep answering 404 for up to the TTL after a model is added.
-    const data = await coalesceModelsBuild(
+    const { value: data } = await coalesceModelsBuild(
       `llm:${keyRecord.id}:${allowedModels ? allowedModels.join(",") : "*"}`,
       () => buildModelsList([LLM_KIND], { allowedModels })
     );

@@ -117,6 +117,10 @@ export function unauthorizedModelsResponse(error, status) {
  * a burst — several clients starting at once, or one client retrying — from
  * paying for N identical builds.
  *
+ * Reports whether this caller joined a build already in flight. With no response
+ * cache that distinction is otherwise invisible, and it is the number that says
+ * whether the CPU is being spent once per burst or once per request.
+ *
  * Keyed by `cacheId` so a restricted caller's build is never handed to an
  * unrestricted caller, or the reverse.
  */
@@ -124,11 +128,11 @@ const inflight = new Map();
 
 export async function coalesceModelsBuild(cacheId, build) {
   const existing = inflight.get(cacheId);
-  if (existing) return existing;
+  if (existing) return { value: await existing, coalesced: true };
   const pending = (async () => build())();
   inflight.set(cacheId, pending);
   try {
-    return await pending;
+    return { value: await pending, coalesced: false };
   } finally {
     if (inflight.get(cacheId) === pending) inflight.delete(cacheId);
   }

@@ -36,7 +36,7 @@ export async function GET(request) {
     const keyRecord = auth.keyRecord;
 
     // Live per request, like the other catalogue routes.
-    const models = await coalesceModelsBuild(
+    const { value: models, coalesced } = await coalesceModelsBuild(
       `v1beta:${keyRecord.id}`,
       async () => {
         const models = [];
@@ -83,7 +83,7 @@ export async function GET(request) {
       });
 
     return new Response(JSON.stringify({ models }), {
-      headers: modelsListHeaders(),
+      headers: modelsListHeaders({ "x-models-build": coalesced ? "coalesced" : "fresh" }),
     });
   } catch (error) {
     console.log("Error fetching models:", error);

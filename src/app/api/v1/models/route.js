@@ -539,14 +539,16 @@ export async function GET(request) {
     // Built fresh on every request. The response is per-caller and must reflect
     // the connections, combos and disabled-models as they are now, so there is no
     // read-side cache. Concurrency is still collapsed, so a burst pays once.
-    const data = await coalesceModelsBuild(
+    const { value: data, coalesced } = await coalesceModelsBuild(
       `llm:${keyRecord.id}:${allowedModels ? allowedModels.join(",") : "*"}`,
       () => buildModelsList([LLM_KIND], { skipDynamicFetch, allowedModels })
     );
     const body = JSON.stringify({ object: "list", data });
 
     return new Response(body, {
-      headers: modelsListHeaders(),
+      headers: modelsListHeaders({
+        "x-models-build": coalesced ? "coalesced" : "fresh",
+      }),
     });
   } catch (error) {
     console.log("Error fetching models:", error);
