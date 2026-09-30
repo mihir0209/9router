@@ -36,12 +36,35 @@ export function backupFile(srcPath, destDir, destName = null) {
 // Lightweight DB backup via ATTACH: create an empty sqlite file, copy every
 // table EXCEPT the excluded ones into it. Avoids duplicating the huge
 // observability log, so the backup stays small regardless of DB size.
+//
+// ATTACH is a SQLite mechanism. This cannot work against Postgres or D1, and it
+// used to fail that way silently: the ATTACH threw, the error was swallowed, and
+// the function returned a path to a file that was never written. A backup that
+// reports success while producing nothing is the worst outcome available, so the
+// failure is now explicit.
 export function backupDbLite(adapter, destDir, destName = "data.sqlite") {
+  // The engines that can serve this are the native SQLite ones. The in-memory
+  // engines are excluded explicitly: their exec() is a no-op for DDL it does not
+  // model, so ATTACH appears to succeed and the backup silently produces nothing.
+  const driver = adapter?.driver || "";
+  if (driver && !/sqlite/i.test(driver)) {
+    throw new Error(
+      `backupDbLite requires a native SQLite driver (it copies with ATTACH DATABASE) but ` +
+      `was given "${driver}". Use pg_dump for Postgres, or the platform's own export for D1.`
+    );
+  }
+
   const dest = path.join(destDir, destName);
   try { fs.rmSync(dest, { force: true }); } catch {}
   const escaped = dest.replace(/'/g, "''");
 
-  adapter.exec(`ATTACH DATABASE '${escaped}' AS bak`);
+  try {
+    adapter.exec(`ATTACH DATABASE '${escaped}' AS bak`);
+  } catch (error) {
+    throw new Error(
+      `backupDbLite could not attach ${dest}: ${error?.message || error}`
+    );
+  }
   try {
     const excluded = new Set(BACKUP_EXCLUDE_TABLES);
     const tables = adapter

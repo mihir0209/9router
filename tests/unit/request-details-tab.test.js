@@ -128,9 +128,18 @@ describe("backupDbLite — excludes requestDetails, keeps critical data", () => 
     const { backupDbLite } = await import("@/lib/db/backup.js");
     await saveDetail({ id: "bk-1", provider: "openai", model: "m", status: "ok", tokens: {}, request: {}, response: {} });
 
-    const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-bklite-"));
-    const dest = backupDbLite(adapter, backupDir);
-    expect(fs.existsSync(dest)).toBe(true);
+      const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-bklite-"));
+      // backupDbLite copies with ATTACH DATABASE, so it is the SQLite backup path
+      // by definition. Against Postgres it must say so rather than quietly return
+      // a path to a file it never wrote — a backup that reports success while
+      // producing nothing is the worst outcome available.
+      if (!/sqlite/i.test(adapter?.driver || "")) {
+        expect(() => backupDbLite(adapter, backupDir)).toThrow(/requires a native SQLite driver/);
+        fs.rmSync(backupDir, { recursive: true, force: true });
+        return;
+      }
+      const dest = backupDbLite(adapter, backupDir);
+      expect(fs.existsSync(dest)).toBe(true);
 
     // Open backup and assert requestDetails is empty, settings present
     const Database = (await import("better-sqlite3")).default;
