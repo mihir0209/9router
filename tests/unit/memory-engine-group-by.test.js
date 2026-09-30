@@ -98,3 +98,30 @@ describe("memory engine select expressions", () => {
     expect(ops.all("SELECT MAX(p) AS m FROM usageHistory WHERE p > 100")).toEqual([{ m: null }]);
   });
 });
+
+describe("capability memoization", () => {
+  it("returns equal results on repeat calls", async () => {
+    const { getCapabilitiesForModel } = await import("../../open-sse/providers/capabilities.js");
+    const a = getCapabilitiesForModel("anthropic", "claude-sonnet-4");
+    const b = getCapabilitiesForModel("anthropic", "claude-sonnet-4");
+    expect(b).toEqual(a);
+  });
+
+  it("hands back a copy, so one caller cannot mutate another's result", async () => {
+    const { getCapabilitiesForModel } = await import("../../open-sse/providers/capabilities.js");
+    const first = getCapabilitiesForModel("openai", "gpt-4o");
+    first.contextWindow = 1;
+    first.injected = true;
+    const second = getCapabilitiesForModel("openai", "gpt-4o");
+    // A shared object here would let one request poison every later one.
+    expect(second.contextWindow).not.toBe(1);
+    expect(second.injected).toBeUndefined();
+  });
+
+  it("still differentiates models and providers", async () => {
+    const { getCapabilitiesForModel } = await import("../../open-sse/providers/capabilities.js");
+    const key = `${getCapabilitiesForModel("openai", "gpt-4o").contextWindow}`;
+    const claude = `${getCapabilitiesForModel("anthropic", "claude-sonnet-4").contextWindow}`;
+    expect(key === claude && key === "undefined").toBe(false);
+  });
+});

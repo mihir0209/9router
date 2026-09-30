@@ -1,32 +1,34 @@
 import { getApiKeyByKey } from "@/lib/localDb";
 
-// Auth + cache for the /v1/models family.
+// Auth and response policy for the /v1/models family.
 //
 // Three routes serve the catalogue: /v1/models, /v1/models/{kind} and
 // /v1beta/models. They all do the same expensive thing — read every provider
 // connection and build capability metadata for thousands of models — so they
-// share this module to keep one auth decision and one cache policy. Leaving
-// them to each decide was how /v1beta/models ended up publicly readable while
-// /v1/models was guarded.
+// share this module to keep one auth decision and one response policy. Letting
+// each route decide separately is how /v1beta/models ended up publicly readable
+// while /v1/models was guarded.
 
 /**
- * How long a built catalogue is reused.
+ * There is deliberately no server-side cache here.
  *
- * 10 minutes. Every miss costs a full rebuild, and in live mode that includes a
- * fan-out to every provider. Most clients list models on start-up, so without
- * this a client restart pays for a rebuild. The list only changes when an admin
- * edits a connection or a combo, and 10 minutes of staleness is invisible next
- * to that.
+ * An earlier version held the built catalogue for 10 minutes to save work. That
+ * was wrong for this endpoint: some applications treat it as the source of truth
+ * for what they are allowed to call, and answering them with a list up to ten
+ * minutes out of date is not something they can see or override. The caller
+ * cannot tell that a response is stale, so the decision has to be theirs.
+ *
+ * Cost is handled without staleness instead:
+ *   - capability derivation is memoized in open-sse/providers/capabilities.js.
+ *     It is a pure function of (provider, model), so a memo cannot go stale.
+ *   - concurrent identical rebuilds are coalesced, so a burst pays for one build
+ *   - an unauthenticated caller is rejected before any of this runs
+ *
+ * Which leaves caching where it belongs: with the client. The Cache-Control on
+ * the response says the body is per-caller, and `no-cache` lets a client store
+ * it while requiring revalidation — so a client that wants to be fast can
+ * revalidate, and one that needs absolute liveness always gets it.
  */
-export const MODELS_LIST_TTL_MS = 600_000;
-export const MODELS_EDGE_TTL_S = 600;
-
-// Every unrestricted caller gets the same list, so they share one entry. A
-// restricted caller gets their own, keyed by their key record's id, so an
-// allow-list is never handed to someone else.
-const UNRESTRICTED_CACHE_ID = "all";
-
-const isCloudflareRuntime = () => process.env.NINEROUTER_RUNTIME === "cloudflare";
 
 /** Read the caller's key from any of the headers clients actually send. */
 export function offeredApiKey(request) {
@@ -82,140 +84,52 @@ export async function authenticateModelsRequest(request) {
   return { ok: true, keyRecord };
 }
 
-export function unauthorizedModelsResponse(error, status) {
-  return Response.json({ error }, { status, headers: modelsListHeaders() });
-}
-
 /**
  * Response headers for a catalogue body.
  *
- * `private`, not `public`: the body is chosen for one caller, and `public`
- * would let any shared cache in front of this app store an authenticated
- * response and serve it to the next caller. That is the same leak the per-key
- * cache ids exist to prevent, one layer further out.
+ * `private` because the body is chosen for one caller: a restricted key sees
+ * only its allow-list, and a shared cache must not be trusted with that.
+ *
+ * `no-cache` means the response may be stored but must be revalidated before
+ * reuse. That is the honest instruction for an endpoint whose callers rely on it
+ * being current — and it still leaves the choice to the client, which is where
+ * caching belongs. A client that wants fewer round trips can ignore it.
  */
 export function modelsListHeaders(extra = {}) {
   return {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
-    "Cache-Control": "private, max-age=60",
+    "Cache-Control": "private, no-cache, must-revalidate",
     "Vary": "Authorization, x-api-key, x-goog-api-key",
     ...extra,
   };
 }
 
-/** The cache entry identity for a caller: shared when unrestricted, per-key otherwise. */
-export function modelsCacheId(keyRecord) {
-  const allowed = parseModelList(keyRecord?.allowedModels);
-  return allowed ? `k:${keyRecord.id}` : UNRESTRICTED_CACHE_ID;
-}
-
-// Isolate-local cache: cacheId -> { body, ts, inflight }.
-// A Map rather than one slot because restricted keys each need an entry, and
-// bounded because the key count is not — key rotation would otherwise grow this
-// until the isolate ran out of memory.
-const MODELS_MEMORY_ENTRIES_MAX = 64;
-if (!global._modelsListCache) {
-  global._modelsListCache = new Map();
-}
-
-export function memoryEntry(cacheId) {
-  const cache = global._modelsListCache;
-  let entry = cache.get(cacheId);
-  if (!entry) {
-    entry = { body: null, ts: 0, inflight: null };
-    cache.set(cacheId, entry);
-    // Map preserves insertion order, so the first key is the oldest.
-    while (cache.size > MODELS_MEMORY_ENTRIES_MAX) {
-      const oldest = cache.keys().next().value;
-      if (oldest === cacheId) break; // never evict the entry we just created
-      cache.delete(oldest);
-    }
-  }
-  return entry;
-}
-
-function edgeCacheKey(request, cacheId) {
-  // The identity has to travel in the query string: `caches.default` derives its
-  // key from URL + method + Vary, not from arbitrary headers, so two keys asking
-  // the same URL would otherwise share one entry. It is a uuid, not the secret.
-  const url = new URL("/v1/models", request.url);
-  url.searchParams.set("_ck", cacheId);
-  return new Request(url.href, {
-    method: "GET",
-    headers: { accept: "application/json" },
-  });
-}
-
-export async function readModelsEdgeCache(request, cacheId) {
-  if (!isCloudflareRuntime()) return null;
-  try {
-    const hit = await caches.default.match(edgeCacheKey(request, cacheId));
-    if (!hit) return null;
-    return (await hit.text()) || null;
-  } catch {
-    return null;
-  }
-}
-
-export async function writeModelsEdgeCache(request, cacheId, body) {
-  if (!isCloudflareRuntime() || !body) return;
-  try {
-    const res = new Response(body, {
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        // The stored copy lives the full 10 minutes. This header is on the
-        // cached object only; the response returned to the caller is built
-        // separately and stays `private`.
-        "Cache-Control": `public, max-age=${MODELS_EDGE_TTL_S}`,
-      },
-    });
-    await caches.default.put(edgeCacheKey(request, cacheId), res);
-  } catch {
-    /* edge cache is best-effort */
-  }
+export function unauthorizedModelsResponse(error, status) {
+  return Response.json({ error }, { status, headers: modelsListHeaders() });
 }
 
 /**
- * Serve a cached catalogue, or build and cache it.
+ * Collapse concurrent identical builds into one.
  *
- * `build` is only called on a miss, and concurrent misses for the same identity
- * share one build, so a burst of clients costs one rebuild rather than N.
+ * Not a cache: the promise is dropped as soon as it resolves, so nothing is ever
+ * reused after it settles and no caller can receive a stale body. It only stops
+ * a burst — several clients starting at once, or one client retrying — from
+ * paying for N identical builds.
+ *
+ * Keyed by `cacheId` so a restricted caller's build is never handed to an
+ * unrestricted caller, or the reverse.
  */
-export async function withModelsCache({ request, cacheId, skipCache, build }) {
-  const entry = memoryEntry(cacheId);
-  const now = Date.now();
+const inflight = new Map();
 
-  if (!skipCache && entry.body && now - entry.ts < MODELS_LIST_TTL_MS) {
-    return { body: entry.body, source: "memory" };
-  }
-
-  if (!skipCache) {
-    const edgeBody = await readModelsEdgeCache(request, cacheId);
-    if (edgeBody) {
-      entry.body = edgeBody;
-      entry.ts = Date.now();
-      return { body: edgeBody, source: "edge" };
-    }
-    if (entry.inflight) {
-      return { body: await entry.inflight, source: "coalesced" };
-    }
-  }
-
-  const pending = (async () => JSON.stringify(await build()))();
-  if (!skipCache) entry.inflight = pending;
-
-  let body;
+export async function coalesceModelsBuild(cacheId, build) {
+  const existing = inflight.get(cacheId);
+  if (existing) return existing;
+  const pending = (async () => build())();
+  inflight.set(cacheId, pending);
   try {
-    body = await pending;
+    return await pending;
   } finally {
-    if (entry.inflight === pending) entry.inflight = null;
+    if (inflight.get(cacheId) === pending) inflight.delete(cacheId);
   }
-
-  if (!skipCache && body) {
-    entry.body = body;
-    entry.ts = Date.now();
-    await writeModelsEdgeCache(request, cacheId, body);
-  }
-  return { body, source: "miss" };
 }

@@ -2,10 +2,9 @@ import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS } from "@/shared/constants/models
 import { getProviderConnections } from "@/lib/localDb";
 import {
   authenticateModelsRequest,
-  modelsCacheId,
+  coalesceModelsBuild,
   modelsListHeaders,
   unauthorizedModelsResponse,
-  withModelsCache,
 } from "@/lib/modelCatalog/modelsListCache.js";
 
 /**
@@ -35,13 +34,11 @@ export async function GET(request) {
       return unauthorizedModelsResponse(auth.error, auth.status);
     }
     const keyRecord = auth.keyRecord;
-    const cacheId = `${modelsCacheId(keyRecord)}|v1beta`;
 
-    const { body, source } = await withModelsCache({
-      request,
-      cacheId,
-      skipCache: false,
-      build: async () => {
+    // Live per request, like the other catalogue routes.
+    const models = await coalesceModelsBuild(
+      `v1beta:${keyRecord.id}`,
+      async () => {
         const models = [];
         const seen = new Set();
         const connections = (await getProviderConnections()).filter((connection) => connection.isActive !== false);
@@ -82,12 +79,11 @@ export async function GET(request) {
           }
         }
 
-      return { models };
-      },
-    });
+      return models;
+      });
 
-    return new Response(body, {
-      headers: modelsListHeaders({ "x-models-cache": source }),
+    return new Response(JSON.stringify({ models }), {
+      headers: modelsListHeaders(),
     });
   } catch (error) {
     console.log("Error fetching models:", error);

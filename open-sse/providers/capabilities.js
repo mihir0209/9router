@@ -580,8 +580,44 @@ function isCommandCodeTextOnly(model) {
   }
   return false;
 }
+// The static half of capability derivation — the table and pattern matching that
+// produces `base` — is memoized on (provider, model).
+//
+// /v1/models derives capabilities for every model it emits on every request, and
+// that matching is the bulk of the endpoint's cost. Caching the *response* would
+// have made the catalogue stale; caching this cannot go stale on its own, because
+// the static tables are fixed for the life of the process.
+//
+// The half that is NOT cached is refine(), which folds in the synced catalog via
+// the injected source. That source is mutable state — the server installs it with
+// setCatalogSource() and clears it on shutdown, and the catalog file behind it is
+// replaced underneath — so a memo covering it would keep answering with a
+// reader that is no longer installed. Splitting here keeps the expensive part
+// cached and the volatile part live.
+//
+// The memo hands back a copy: callers attach the result to response objects, and
+// a shared object would let one request's mutation leak into every later one.
+const staticBaseMemo = new Map();
+const STATIC_BASE_MEMO_MAX = 20_000;
+
+function staticBaseFor(provider, model) {
+  const key = `${provider}\u0000${model}`;
+  const hit = staticBaseMemo.get(key);
+  if (hit) return hit;
+  const value = computeStaticBase(provider, model);
+  // Bounded so a deployment with a very large custom catalogue cannot grow this
+  // without limit. Clearing wholesale is fine: it refills from the same tables.
+  if (staticBaseMemo.size >= STATIC_BASE_MEMO_MAX) staticBaseMemo.clear();
+  staticBaseMemo.set(key, value);
+  return value;
+}
+
 export function getCapabilitiesForModel(provider, model) {
   if (!model) return { ...DEFAULT_CAPABILITIES };
+  return refine(staticBaseFor(provider, model), provider, model);
+}
+
+function computeStaticBase(provider, model) {
 
   // Canonical exact lookup strips vendor prefix: "anthropic/claude-opus-4.7" -> "claude-opus-4.7".
   const baseModel = model.includes("/") ? model.split("/").pop() : model;
@@ -617,10 +653,10 @@ export function getCapabilitiesForModel(provider, model) {
   // 3. Pattern match (first match wins), refined by catalog + name heuristic
   for (const { pattern, caps } of PATTERN_CAPABILITIES) {
     if (matchPattern(pattern, baseModel) || matchPattern(pattern, model)) {
-      return refine(caps, provider, model);
+      return caps;
     }
   }
 
   // 4. Floor
-  return refine(null, provider, model);
+  return null;
 }

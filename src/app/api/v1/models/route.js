@@ -14,11 +14,10 @@ import { getSettings } from "@/lib/localDb";
 import { normalizeModelsListSource } from "@/lib/db/repos/settingsRepo.js";
 import {
   authenticateModelsRequest,
-  modelsCacheId,
+  coalesceModelsBuild,
   modelsListHeaders,
   parseModelList,
   unauthorizedModelsResponse,
-  withModelsCache,
 } from "@/lib/modelCatalog/modelsListCache.js";
 
 
@@ -537,18 +536,17 @@ export async function GET(request) {
     const keyRecord = auth.keyRecord;
     const allowedModels = parseModelList(keyRecord.allowedModels);
 
-    const { body, source } = await withModelsCache({
-      request,
-      cacheId: modelsCacheId(keyRecord),
-      skipCache: skipDynamicFetch,
-      build: async () => {
-        const data = await buildModelsList([LLM_KIND], { skipDynamicFetch, allowedModels });
-        return { object: "list", data };
-      },
-    });
+    // Built fresh on every request. The response is per-caller and must reflect
+    // the connections, combos and disabled-models as they are now, so there is no
+    // read-side cache. Concurrency is still collapsed, so a burst pays once.
+    const data = await coalesceModelsBuild(
+      `llm:${keyRecord.id}:${allowedModels ? allowedModels.join(",") : "*"}`,
+      () => buildModelsList([LLM_KIND], { skipDynamicFetch, allowedModels })
+    );
+    const body = JSON.stringify({ object: "list", data });
 
     return new Response(body, {
-      headers: modelsListHeaders({ "x-models-cache": source }),
+      headers: modelsListHeaders(),
     });
   } catch (error) {
     console.log("Error fetching models:", error);

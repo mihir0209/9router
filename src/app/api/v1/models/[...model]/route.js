@@ -1,11 +1,10 @@
 import { buildModelsList } from "../route.js";
 import {
   authenticateModelsRequest,
-  modelsCacheId,
+  coalesceModelsBuild,
   modelsListHeaders,
   parseModelList,
   unauthorizedModelsResponse,
-  withModelsCache,
 } from "@/lib/modelCatalog/modelsListCache.js";
 
 // URL slug → service kind(s). `web` covers both webSearch and webFetch.
@@ -63,34 +62,27 @@ export async function GET(request, { params }) {
     const kindFilter = path.length === 1 ? KIND_SLUG_MAP[identifier] : null;
 
     if (kindFilter) {
-      // The cache id carries the key, but not the kind, so the kind is part of
-      // the identity too. Otherwise an image-model list would be served to
-      // someone asking for embeddings.
-      const cacheId = `${modelsCacheId(keyRecord)}|${identifier}`;
-      const { body, source } = await withModelsCache({
-        request,
-        cacheId,
-        skipCache: false,
-        build: async () => ({ object: "list", data: await buildModelsList(kindFilter, { allowedModels }) }),
+      // Built per request so the list is live. The coalescing key carries the
+      // key and the kind, so an image list is never handed to an embeddings
+      // caller and one caller's allow-list is never handed to another's.
+      const data = await coalesceModelsBuild(
+        `${identifier}:${keyRecord.id}:${allowedModels ? allowedModels.join(",") : "*"}`,
+        () => buildModelsList(kindFilter, { allowedModels })
+      );
+      return new Response(JSON.stringify({ object: "list", data }), {
+        headers: modelsListHeaders(),
       });
-      return new Response(body, { headers: modelsListHeaders({ "x-models-cache": source }) });
     }
 
-    // A single-model lookup is answered from the cached LLM list rather than a
-    // cached per-model verdict. Caching the verdict would keep answering 404
-    // for up to 10 minutes after the model is added, and would rebuild the
-    // whole list for every distinct model name asked for.
-    const { body } = await withModelsCache({
-      request,
-      cacheId: `${modelsCacheId(keyRecord)}|llm`,
-      skipCache: false,
-      build: async () => ({
-        object: "list",
-        data: await buildModelsList([LLM_KIND], { allowedModels }),
-      }),
-    });
+    // A single-model lookup builds the LLM list for this caller and reads the one
+    // entry, rather than a cached per-model verdict: caching the verdict would
+    // keep answering 404 for up to the TTL after a model is added.
+    const data = await coalesceModelsBuild(
+      `llm:${keyRecord.id}:${allowedModels ? allowedModels.join(",") : "*"}`,
+      () => buildModelsList([LLM_KIND], { allowedModels })
+    );
 
-    const matchedModel = JSON.parse(body).data.find((candidate) => candidate.id === identifier);
+    const matchedModel = data.find((candidate) => candidate.id === identifier);
     if (!matchedModel) {
       return json(
         {
