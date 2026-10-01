@@ -156,6 +156,39 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
+// How many consecutive timeouts before a scope is treated as down, and how long
+// before one probe is allowed through to test it again.
+const BREAKER_FAILURES = 3;
+const BREAKER_COOLDOWN_MS = 30_000;
+
+const breaker = {
+  state: new Map(), // scope -> { failures, openUntil }
+  shouldSkip(scope) {
+    const entry = this.state.get(scope);
+    if (!entry) return false;
+    if (!entry.openUntil) return false;
+    if (Date.now() < entry.openUntil) return true;
+    // Cooldown elapsed: let one probe through to find out if it recovered.
+    entry.openUntil = 0;
+    return false;
+  },
+  recordFailure(scope, error) {
+    const entry = this.state.get(scope) || { failures: 0, openUntil: 0 };
+    entry.failures += 1;
+    // Only timeouts open the breaker. A rejected call usually means the method is
+    // genuinely unsupported, which the in-process fallback handles immediately
+    // and cheaply.
+    if (/timed out/i.test(error?.message || "") && entry.failures >= BREAKER_FAILURES) {
+      entry.openUntil = Date.now() + BREAKER_COOLDOWN_MS;
+    }
+    this.state.set(scope, entry);
+  },
+  recordSuccess(scope) {
+    const entry = this.state.get(scope);
+    if (entry) entry.failures = 0;
+  },
+};
+
 export async function coordinatorCall(method, payload = {}, scope = "global", { failClosed = false } = {}) {
   const stub = await getStub(scope);
   if (!stub) {
@@ -167,6 +200,25 @@ export async function coordinatorCall(method, payload = {}, scope = "global", { 
     }
     return memoryCall(method, payload);
   }
+  // Circuit breaker. Once the coordinator has failed to answer within the
+  // timeout a few times in a row, stop paying the timeout on every call until a
+  // probe says otherwise.
+  //
+  // Without this, an unreachable coordinator costs its full timeout on every
+  // single request. getControlVersion polls every 2s from the API-key path, so a
+  // dead Durable Object added ~3s to every authenticated call — turning a
+  // degraded dependency into a uniformly slow endpoint. Here it costs nothing
+  // after the first few failures.
+  if (breaker.shouldSkip(scope)) {
+    if (failClosed && process.env.NINEROUTER_RUNTIME === "cloudflare") {
+      if (method === "checkRateLimit") return { allowed: false, resetAt: (Number(payload.now) || Date.now()) + 1000 };
+      if (method === "beginRequest") return { allowed: false, unavailable: true };
+      if (method === "reserveBudget") return { reserved: false, unavailable: true };
+      throw new Error("Gateway coordinator is unavailable");
+    }
+    return memoryCall(method, payload);
+  }
+
   try {
     if (typeof stub[method] !== "function") throw new Error("Gateway coordinator method is unavailable");
     // Bounded. A Durable Object that is wedged, hibernating badly, or unreachable
@@ -179,8 +231,11 @@ export async function coordinatorCall(method, payload = {}, scope = "global", { 
     // a cheap endpoint stayed fast. A coordinator that cannot answer in time is
     // degraded, not authoritative, so the in-process fallback is the right answer
     // for everything except the callers that explicitly demand fail-closed.
-    return await withTimeout(stub[method](payload), COORDINATOR_TIMEOUT_MS, method);
+    const result = await withTimeout(stub[method](payload), COORDINATOR_TIMEOUT_MS, method);
+    breaker.recordSuccess(scope);
+    return result;
   } catch (error) {
+    breaker.recordFailure(scope, error);
     if (failClosed) throw error;
     return memoryCall(method, payload);
   }
