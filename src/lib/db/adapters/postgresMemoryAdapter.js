@@ -340,9 +340,24 @@ export async function createPostgresMemoryAdapter(options = {}) {
 
   /** Re-read a table from Postgres, keeping uncommitted local rows. */
   async function resync(force = false, scoped) {
+    // Wait for any in-flight write before reading anything back.
+    //
+    // resync replaces the in-memory table with whatever the database returns, so
+    // a write that has not committed yet is lost afterwards.
+    //
+    // The queue is the wrong thing to check. drainOnce clears it synchronously
+    // and then commits asynchronously, so `queue.size` is zero precisely while a
+    // write is in flight — guarding on it skipped the wait in exactly the case
+    // that matters. flush() chains onto the existing chain, so awaiting it waits
+    // for the in-flight drain whether or not the queue still has rows.
+    //
+    // That race is why two consecutive partial updates to one api key lost the
+    // first update's field: the second call's resync read the pre-write row and
+    // overwrote the newer value, so the write silently did nothing.
+    await flush().catch(() => {});
     const wanted = scoped || [...loadedTables];
     for (const table of wanted) {
-      // Never clobber a table with uncommitted writes in flight.
+      // Never clobber a table with writes that are not durable yet.
       if (ops.hasDirty(table)) continue;
       try {
         const rows = await loadTable(table);
