@@ -11,7 +11,24 @@ import { getProviderConnections, getCombos, getCustomModels, getModelAliases, ge
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
 import { mapWithConcurrency } from "@/lib/async/mapWithConcurrency.js";
-import { resolveProviderModelList, INTERNAL_MODELS_FETCH_HEADER } from "@/lib/modelCatalog/providerModelResolver.js";
+import { resolveProviderModelList, fetchCompatibleModelIds, INTERNAL_MODELS_FETCH_HEADER } from "@/lib/modelCatalog/providerModelResolver.js";
+
+// Combo seats use UI aliases; the model registry also has transport aliases.
+// Capability overrides and catalog limits are keyed by provider id, so map a
+// seat's alias back to its provider id before asking for capabilities.
+const ALIAS_TO_PROVIDER_ID = {
+  ...Object.fromEntries(
+    Object.entries(PROVIDER_ID_TO_ALIAS).map(([id, alias]) => [alias, id])
+  ),
+  ...ALIAS_TO_ID,
+};
+
+function comboSeatCapabilities(seat) {
+  const slash = seat.indexOf("/");
+  if (slash <= 0) return null;
+  const alias = seat.slice(0, slash);
+  return getCapabilitiesForModel(ALIAS_TO_PROVIDER_ID[alias] || alias, seat.slice(slash + 1));
+}
 import { getSettings } from "@/lib/localDb";
 import { normalizeModelsListSource } from "@/lib/db/repos/settingsRepo.js";
 import {

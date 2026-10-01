@@ -122,6 +122,10 @@ export async function handleFetchCore({ url, format, maxCharacters, provider, pr
  * must not be read as an empty success — hence the explicit errors[] check.
  */
 async function runTinyfish({ url, fmt, timeoutMs, apiKey, maxCharacters, costPerQuery, startedAt }) {
+  // Reject unsupported formats before spending a query on them.
+  if (!["markdown", "html"].includes(fmt)) {
+    return { success: false, status: 400, error: `Unsupported TinyFish format: ${fmt}` };
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -139,14 +143,18 @@ async function runTinyfish({ url, fmt, timeoutMs, apiKey, maxCharacters, costPer
       return { success: false, status: response.status, error: `TinyFish fetch failed: ${response.status}` };
     }
     const data = await response.json();
-    const page = Array.isArray(data.results) ? data.results[0] : null;
-    if (!page) {
-      const detail = Array.isArray(data.errors) && data.errors[0];
+    // A per-URL failure entry is a fetch failure, distinct from an empty result.
+    const failure = Array.isArray(data.errors) && data.errors[0];
+    if (failure) {
       return {
         success: false,
-        status: 502,
-        error: detail ? `TinyFish could not fetch the page: ${detail.error || "unknown"}` : "TinyFish returned no content",
+        status: failure.status || 502,
+        error: `TinyFish fetch failed: ${failure.error || "unknown"}`,
       };
+    }
+    const page = Array.isArray(data.results) ? data.results[0] : null;
+    if (!page || typeof page.text !== "string") {
+      return { success: false, status: 502, error: "TinyFish returned no content" };
     }
     let text = typeof page.text === "string" ? page.text : JSON.stringify(page.text ?? "");
     if (maxCharacters && text.length > maxCharacters) text = text.slice(0, maxCharacters);

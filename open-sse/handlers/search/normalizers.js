@@ -110,19 +110,6 @@ function normalizeTavily(data, _query, _searchType) {
   return { results, totalResults: results.length };
 }
 
-function normalizeTinyfish(data) {
-  const now = new Date().toISOString();
-  const items = Array.isArray(data?.results) ? data.results : [];
-  return {
-    results: items.map((item, idx) => makeResult("tinyfish", {
-      title: item.title, url: item.url, snippet: item.snippet,
-      published_at: item.date, source_type: item.publisher || null,
-      author: Array.isArray(item.authors) ? item.authors.join(", ") : null,
-    }, idx, now)),
-    totalResults: data?.total_results ?? null,
-  };
-}
-
 function normalizeGooglePse(data, _query, _searchType) {
   const now = new Date().toISOString();
   const items = Array.isArray(data.items) ? data.items : [];
@@ -306,13 +293,16 @@ function normalizeGlmSearch(data, _query, _searchType) {
  */
 function normalizeTinyfish(data, _query, _searchType) {
   const now = new Date().toISOString();
-  const items = data.results;
+  const items = data?.results;
   if (!Array.isArray(items)) return { results: [], totalResults: null };
   const results = items.map((item, idx) =>
     makeResult("tinyfish", {
       title: item.title,
       url: item.url,
       snippet: item.snippet,
+      published_at: item.date,
+      source_type: item.publisher || null,
+      author: Array.isArray(item.authors) ? item.authors.join(", ") : null,
       // The upstream already ranks; carry its position rather than our index so
       // the two agree when a page is requested.
       position: item.position,
@@ -339,7 +329,6 @@ const NORMALIZERS = {
   "tinyfish": normalizeTinyfish,
   "ollama-search": normalizeOllamaSearch,
   "glm": normalizeGlmSearch,
-  "tinyfish": normalizeTinyfish,
 };
 
 /**
