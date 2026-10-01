@@ -82,6 +82,41 @@ export function createSSEStream(options = {}) {
   let openAIResponsesTerminalSeen = false;
   let openAIResponsesDoneSent = false;
   let streamDoneSent = false;  // track duplicate [DONE] across transform + flush
+
+  /**
+   * The one place a terminal sentinel may be written.
+   *
+   * Passthrough forwards provider bytes verbatim, so the provider's own
+   * `data: [DONE]` reaches the client straight from a forwarded buffer — and a
+   * separate site then appended ours as well. Clients terminate on the first
+   * sentinel, so the duplicate is a malformed tail, and a client counting
+   * terminators sees the stream end twice.
+   *
+   * Routing every chunk through here makes the invariant hold regardless of which
+   * path produced the bytes: a sentinel that has already gone out is stripped
+   * from anything forwarded later, and any chunk carrying one records that the
+   * stream is done. Checking at the individual write sites was not enough — the
+   * forwarded provider bytes never passed through those checks.
+   */
+  const DONE_PATTERN = /data:\s*\[DONE\]\s*/g;
+
+  function enqueueSse(controller, text) {
+    if (!text) return;
+    if (DONE_PATTERN.test(text)) {
+      DONE_PATTERN.lastIndex = 0;
+      if (streamDoneSent) {
+        // Already terminated. Drop this sentinel and forward only the rest.
+        const cleaned = text.replace(DONE_PATTERN, "").trimEnd();
+        if (!cleaned) return;
+        controller.enqueue(sharedEncoder.encode(cleaned));
+        return;
+      }
+      streamDoneSent = true;
+      DONE_PATTERN.lastIndex = 0;
+    }
+    controller.enqueue(sharedEncoder.encode(text));
+  }
+
   let finalized = false;
 
   // Usage/logging tail, callable from transform() as well as flush(): a client that
@@ -240,7 +275,7 @@ export function createSSEStream(options = {}) {
           }
 
           reqLogger?.appendConvertedChunk?.(output);
-          controller.enqueue(sharedEncoder.encode(output));
+          enqueueSse(controller, output);
           // Responses clients (codex CLI) close on response.completed instead of [DONE]
           if (responsesTerminal) finalizeStream();
           continue;
@@ -270,7 +305,7 @@ export function createSSEStream(options = {}) {
           if (keepsOpenAIResponsesFormat && !openAIResponsesTerminalSeen) {
             const failedOutput = formatIncompleteOpenAIResponsesStreamFailure();
             reqLogger?.appendConvertedChunk?.(failedOutput);
-            controller.enqueue(sharedEncoder.encode(failedOutput));
+            enqueueSse(controller, failedOutput);
             openAIResponsesTerminalSeen = true;
             sseEmittedCount++;
           }
@@ -278,7 +313,7 @@ export function createSSEStream(options = {}) {
           if (keepsOpenAIResponsesFormat && !streamDoneSent) {
             const doneOutput = "data: [DONE]\n\n";
             reqLogger?.appendConvertedChunk?.(doneOutput);
-            controller.enqueue(sharedEncoder.encode(doneOutput));
+            enqueueSse(controller, doneOutput);
           }
           streamDoneSent = true;
           if (keepsOpenAIResponsesFormat) openAIResponsesDoneSent = true;
@@ -330,7 +365,7 @@ export function createSSEStream(options = {}) {
         if (keepsOpenAIResponsesFormat && openAIResponsesEventName) {
           const output = formatSSE({ event: openAIResponsesEventName, data: parsed }, sourceFormat);
           reqLogger?.appendConvertedChunk?.(output);
-          controller.enqueue(sharedEncoder.encode(output));
+          enqueueSse(controller, output);
           currentOpenAIResponsesEvent = null;
           sseEmittedCount++;
           // Responses clients (codex) close on response.completed instead of [DONE]
@@ -373,7 +408,7 @@ export function createSSEStream(options = {}) {
 
             const output = formatSSE(item, sourceFormat);
             reqLogger?.appendConvertedChunk?.(output);
-            controller.enqueue(sharedEncoder.encode(output));
+            enqueueSse(controller, output);
             sseEmittedCount++;
           }
         }
@@ -395,7 +430,7 @@ export function createSSEStream(options = {}) {
               output = "data: " + buffer.slice(5);
             }
             reqLogger?.appendConvertedChunk?.(output);
-            controller.enqueue(sharedEncoder.encode(output));
+            enqueueSse(controller, output);
             // Passthrough forwards the provider's bytes verbatim, and an
             // OpenAI-shaped provider ends its stream with its own sentinel. When
             // that has already gone out, appending ours produced two [DONE]s —
@@ -412,7 +447,7 @@ export function createSSEStream(options = {}) {
           if (!streamDoneSent && !isGeminiFamily) {
             const doneOutput = "data: [DONE]\n\n";
             reqLogger?.appendConvertedChunk?.(doneOutput);
-            controller.enqueue(sharedEncoder.encode(doneOutput));
+            enqueueSse(controller, doneOutput);
           }
           // Record that the sentinel went out. Without this, a stream that ends
           // here and also reaches the flush/finalize path emits [DONE] twice:
@@ -454,7 +489,7 @@ export function createSSEStream(options = {}) {
                 if (item === null || item === undefined) continue;
                 const output = formatSSE(item, sourceFormat);
                 reqLogger?.appendConvertedChunk?.(output);
-                controller.enqueue(sharedEncoder.encode(output));
+                enqueueSse(controller, output);
               }
             }
           }
@@ -474,7 +509,7 @@ export function createSSEStream(options = {}) {
             if (item === null || item === undefined) continue;
             const output = formatSSE(item, sourceFormat);
             reqLogger?.appendConvertedChunk?.(output);
-            controller.enqueue(sharedEncoder.encode(output));
+            enqueueSse(controller, output);
           }
         }
 
@@ -483,14 +518,14 @@ export function createSSEStream(options = {}) {
         if (keepsOpenAIResponsesFormat && !openAIResponsesTerminalSeen) {
           const failedOutput = formatIncompleteOpenAIResponsesStreamFailure();
           reqLogger?.appendConvertedChunk?.(failedOutput);
-          controller.enqueue(sharedEncoder.encode(failedOutput));
+          enqueueSse(controller, failedOutput);
           openAIResponsesTerminalSeen = true;
         }
 
         if (keepsOpenAIResponsesFormat && !openAIResponsesDoneSent && !streamDoneSent) {
           const doneOutput = "data: [DONE]\n\n";
           reqLogger?.appendConvertedChunk?.(doneOutput);
-          controller.enqueue(sharedEncoder.encode(doneOutput));
+          enqueueSse(controller, doneOutput);
           openAIResponsesDoneSent = true;
           streamDoneSent = true;
         }
