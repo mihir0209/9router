@@ -143,9 +143,14 @@ function memoryCall(method, payload = {}) {
 }
 
 // A coordinator call that takes longer than this is treated as unavailable.
-// Long enough for a cold Durable Object to boot and answer, short enough that a
-// wedged one cannot hold a user request open.
-const COORDINATOR_TIMEOUT_MS = Number(process.env.COORDINATOR_TIMEOUT_MS || 3000);
+//
+// 1.5s, not something generous. A healthy Durable Object answers in single-digit
+// milliseconds; even a cold one boots well inside a second. The ceiling is only
+// there to catch one that never answers, and every millisecond of it is paid on
+// the request path — getControlVersion runs on the API-key check of every
+// authenticated call, so a dead coordinator was adding its full timeout to
+// catalogue latency on every fresh isolate.
+const COORDINATOR_TIMEOUT_MS = Number(process.env.COORDINATOR_TIMEOUT_MS || 1500);
 
 function withTimeout(promise, ms, label) {
   let timer;
