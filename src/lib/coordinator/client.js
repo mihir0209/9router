@@ -142,6 +142,20 @@ function memoryCall(method, payload = {}) {
   throw new Error(`Unsupported coordinator method: ${method}`);
 }
 
+// A coordinator call that takes longer than this is treated as unavailable.
+// Long enough for a cold Durable Object to boot and answer, short enough that a
+// wedged one cannot hold a user request open.
+const COORDINATOR_TIMEOUT_MS = Number(process.env.COORDINATOR_TIMEOUT_MS || 3000);
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`coordinator ${label} timed out after ${ms}ms`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
 export async function coordinatorCall(method, payload = {}, scope = "global", { failClosed = false } = {}) {
   const stub = await getStub(scope);
   if (!stub) {
@@ -155,7 +169,17 @@ export async function coordinatorCall(method, payload = {}, scope = "global", { 
   }
   try {
     if (typeof stub[method] !== "function") throw new Error("Gateway coordinator method is unavailable");
-    return await stub[method](payload);
+    // Bounded. A Durable Object that is wedged, hibernating badly, or unreachable
+    // would otherwise hang the caller forever: there is no timeout on an RPC, and
+    // nothing above this catches a promise that never settles.
+    //
+    // That is not hypothetical here. getControlVersion sits on the API-key check
+    // that every authenticated /v1/models request performs, polling every 2s, so
+    // one stuck coordinator turned the catalogue endpoint into 60s timeouts while
+    // a cheap endpoint stayed fast. A coordinator that cannot answer in time is
+    // degraded, not authoritative, so the in-process fallback is the right answer
+    // for everything except the callers that explicitly demand fail-closed.
+    return await withTimeout(stub[method](payload), COORDINATOR_TIMEOUT_MS, method);
   } catch (error) {
     if (failClosed) throw error;
     return memoryCall(method, payload);
