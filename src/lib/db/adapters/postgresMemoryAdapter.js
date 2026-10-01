@@ -71,16 +71,6 @@ export async function createPostgresMemoryAdapter(options = {}) {
   // if we insist. DB_SSL=true forces it for a TLS-terminating proxy that does
   // not advertise sslmode in its URL.
   const forceSsl = process.env.DB_SSL === "true";
-  const pool = new Pool({
-    connectionString,
-    max: Number(process.env.DB_POOL_MAX || 5),
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
-    ...(forceSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-  });
-
-  const state = createState();
-  const loadedTables = new Set(ALL_TABLES.filter((t) => !LAZY_TABLES.has(t)));
 
   // DATA_DIR selects the Postgres schema, as well as the SQLite file.
   //
@@ -100,10 +90,50 @@ export async function createPostgresMemoryAdapter(options = {}) {
     } finally {
       await bootstrap.end();
     }
-    pool.on("connect", (client) => {
-      client.query(`SET search_path TO ${pgIdent(schema)}`).catch(() => {});
-    });
   }
+
+  // Pin the schema on the connection string, so the server applies search_path
+  // while connecting rather than us issuing a statement afterwards.
+  //
+  // It used to be set from a `pool.on("connect")` handler:
+  //
+  //     client.query(`SET search_path TO ...`).catch(() => {})
+  //
+  // which is not awaited, so the next statement on that client was issued while
+  // this one was still in flight — pg warns about exactly that ("Calling
+  // client.query() when the client is already executing a query") — and a query
+  // could run against a connection whose search_path was not yet set, landing in
+  // the public schema and reporting the table missing.
+  //
+  // The DATA_DIR-derived schema overrides any `options` already in the
+  // connection string. That is deliberate and it is what per-test isolation
+  // depends on: the test harness pins one schema per test *file* in DATABASE_URL,
+  // while DATA_DIR changes per *test*, so the DATA_DIR schema is the finer
+  // grain. Yielding to the URL instead makes every test in a file share one
+  // schema and their rows leak into each other.
+  const effectiveConnectionString = (() => {
+    if (!schema) return connectionString;
+    try {
+      const url = new URL(connectionString);
+      url.searchParams.set("options", `-c search_path=${schema}`);
+      return url.toString();
+    } catch {
+      // Not a URL (a unix-socket or key=value DSN). Leave it alone rather than
+      // guess; the schema then comes from PGOPTIONS or the default.
+      return connectionString;
+    }
+  })();
+
+  const pool = new Pool({
+    connectionString: effectiveConnectionString,
+    max: Number(process.env.DB_POOL_MAX || 5),
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 10_000,
+    ...(forceSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+  });
+
+  const state = createState();
+  const loadedTables = new Set(ALL_TABLES.filter((t) => !LAZY_TABLES.has(t)));
 
   // ── write-behind queue ────────────────────────────────────────────────────
   // Keyed by row identity so a row written several times before a flush costs
