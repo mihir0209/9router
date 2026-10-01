@@ -409,6 +409,11 @@ export function createSSEStream(options = {}) {
             reqLogger?.appendConvertedChunk?.(doneOutput);
             controller.enqueue(sharedEncoder.encode(doneOutput));
           }
+          // Record that the sentinel went out. Without this, a stream that ends
+          // here and also reaches the flush/finalize path emits [DONE] twice:
+          // clients that terminate on the first one were already done, and the
+          // duplicate is a malformed SSE tail.
+          streamDoneSent = true;
 
           finalizeStream();
           return;
