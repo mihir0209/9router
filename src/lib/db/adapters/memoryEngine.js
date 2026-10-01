@@ -265,37 +265,204 @@ export function compare(a, op, b) {
   return false;
 }
 
+/**
+ * Split on a boolean operator at paren depth 0.
+ *
+ * "a OR b AND c" must split on OR first, because AND binds tighter; splitting on
+ * whichever came first would get that wrong.
+ */
+function splitBoolean(src, operator) {
+  const re = new RegExp("\\s+" + operator + "\\s+", "i");
+  const parts = [];
+  let depth = 0;
+  let current = "";
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (depth === 0) {
+      const m = src.slice(i).match(re);
+      if (m && m.index === 0 && current.trim()) {
+        parts.push(current);
+        current = "";
+        i += m[0].length - 1;
+        continue;
+      }
+    }
+    current += ch;
+  }
+  if (!parts.length) return null;
+  parts.push(current);
+  return parts;
+}
+
+/** True when every paren in the fragment is balanced, so it can be unwrapped. */
+function balancedParens(fragment) {
+  let depth = 0;
+  for (const ch of fragment) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (depth < 0) return false;
+  }
+  return depth === 0;
+}
+
+const COMPARE_OPS = ["<>", "!=", ">=", "<=", "=", ">", "<"];
+
+/**
+ * One side of a comparison: a column, a parameter, a literal, or COALESCE over
+ * those.
+ *
+ * Returning a closure rather than a value is what lets a parameter be read once,
+ * in the right order, from the shared cursor.
+ */
+function parseOperand(text, params, cursor) {
+  const src = String(text || "").trim();
+
+  // COALESCE(col, 'x') / COALESCE(?, 'x') — used by the usage upsert so that a
+  // NULL column is compared as its fallback rather than never matching.
+  const fn = src.match(/^(\w+)\s*\(([\s\S]*)\)$/);
+  if (fn && balancedParens(fn[2])) {
+    const name = fn[1].toUpperCase();
+    const args = splitCsv(fn[2]);
+    if (name === "COALESCE") {
+      const parts = args.map((a) => parseOperand(a, params, cursor));
+      return (row) => {
+        for (const part of parts) {
+          const v = part(row);
+          if (v !== null && v !== undefined) return v;
+        }
+        return null;
+      };
+    }
+    if (name === "LOWER") {
+      const inner = parseOperand(args[0], params, cursor);
+      return (row) => (inner(row) == null ? null : String(inner(row)).toLowerCase());
+    }
+    return null; // unknown function
+  }
+
+  // A placeholder, quoted literal or number is a constant. Detect it before the
+  // bare-identifier case so the string "1" is a number and not a column named 1.
+  if (src === "?" || /^-?\d+(\.\d+)?$/.test(src) || /^'[^']*'$/.test(src) || /^(null|true|false)$/i.test(src)) {
+    const { value } = literalValue(src, params, cursor);
+    return () => value;
+  }
+
+  if (/^\w+$/.test(src)) {
+    const column = src;
+    return (row) => row[column];
+  }
+
+  return null;
+}
+
+/** Compile one comparison, or return null if it is not one we understand. */
+function buildWhereCondition(text, params, cursor) {
+  let m = text.match(/^(.+?)\s+IS\s+NOT\s+NULL$/i);
+  if (m) {
+    const column = m[1].trim();
+    if (!/^\w+$/.test(column)) return null;
+    return (row) => row[column] !== null && row[column] !== undefined;
+  }
+
+  m = text.match(/^(.+?)\s+IS\s+NULL$/i);
+  if (m) {
+    const column = m[1].trim();
+    if (!/^\w+$/.test(column)) return null;
+    return (row) => row[column] === null || row[column] === undefined;
+  }
+
+  m = text.match(/^(\w+)\s+IN\s*\(([\s\S]*)\)$/i);
+  if (m) {
+    const values = splitCsv(m[2]).map((token) => literalValue(token, params, cursor).value);
+    return (row) => values.includes(row[m[1]]);
+  }
+
+  // Comparison: find the operator, skipping anything inside parentheses so a
+  // function call on the left is not mistaken for one.
+  for (const op of COMPARE_OPS) {
+    const at = indexOfOperatorOutsideParens(text, op);
+    if (at === -1) continue;
+    const left = parseOperand(text.slice(0, at), params, cursor);
+    const right = parseOperand(text.slice(at + op.length), params, cursor);
+    if (!left || !right) return null;
+    return (row) => compare(left(row), op, right(row));
+  }
+
+  return null;
+}
+
+/** Index of `op` in `text` at paren depth 0, or -1. */
+function indexOfOperatorOutsideParens(text, op) {
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (depth === 0 && text.startsWith(op, i)) {
+      // Do not mistake ">=" for ">", or "=" inside ">=".
+      const isComposite = op === "=" && text.startsWith("==", i);
+      if (op === ">" && text.startsWith(">=", i)) return -1;
+      if (op === "<" && text.startsWith("<=", i)) return -1;
+      if (op === ">" && text.startsWith(">>", i)) return -1;
+      if (isComposite) return -1;
+      // A bare "=" must not be part of "<=" or ">=".
+      if (op === "=" && (text[i - 1] === "<" || text[i - 1] === ">" || text[i - 1] === "!")) return -1;
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Compile a WHERE clause, honouring AND binding tighter than OR, plus
+ * parentheses.
+ *
+ * OR used to be unsupported: the clause was split on AND alone, so
+ * "WHERE (apiKey = ? OR apiKeyId = ?)" compiled to a single condition that
+ * matched nothing and the statement silently changed zero rows. No error, no
+ * warning — rotating an API key left its usage history keyed to the old value
+ * and nothing said so. This engine serves Cloudflare D1 and Postgres, so the
+ * same silent no-op applied there.
+ *
+ * An unrecognised condition throws rather than defaulting to a match. A silently
+ * wrong predicate is worse than a loud one: it corrupts data while reporting
+ * success. The clause set is pinned by a test built from every WHERE the suite
+ * actually executes, so a new shape shows up there first.
+ */
+function buildWhereTree(expr, params, cursor) {
+  const text = String(expr || "").trim();
+
+  const wrapped = text.match(/^\(([\s\S]*)\)$/);
+  if (wrapped && balancedParens(wrapped[1])) return buildWhereTree(wrapped[1], params, cursor);
+
+  for (const operator of ["OR", "AND"]) {
+    const parts = splitBoolean(text, operator);
+    if (!parts) continue;
+    const tests = parts.map((part) => buildWhereTree(part, params, cursor));
+    return operator === "OR"
+      ? (row) => tests.some((test) => test(row))
+      : (row) => tests.every((test) => test(row));
+  }
+
+  const condition = buildWhereCondition(text, params, cursor);
+  if (condition) return condition;
+  throw new Error(
+    `memory engine cannot evaluate WHERE condition: ${JSON.stringify(text)}. An ` +
+    `unrecognised condition used to be treated as "match everything", which ` +
+    `silently corrupted data.`
+  );
+}
+
 export function buildWhere(whereSql, params, sharedCursor) {
   if (!whereSql) return () => true;
-  const parts = whereSql.split(/\s+AND\s+/i).map((p) => p.trim()).filter(Boolean);
   // The cursor is shared with the caller so that placeholders after the WHERE
   // clause — LIMIT ?, OFFSET ? — read the parameters that belong to them. With a
   // private cursor, "WHERE provider = ? LIMIT ?" bound the limit to the provider
   // value instead.
   const cursor = sharedCursor || { value: 0 };
-  const tests = parts.map((part) => {
-    let m = part.match(/^(\w+)\s+IS\s+NOT\s+NULL$/i);
-    if (m) return (row) => row[m[1]] !== null && row[m[1]] !== undefined;
-
-    m = part.match(/^(\w+)\s+IS\s+NULL$/i);
-    if (m) return (row) => row[m[1]] === null || row[m[1]] === undefined;
-
-    m = part.match(/^(\w+)\s+IN\s*\((.+)\)$/i);
-    if (m) {
-      const values = splitCsv(m[2]).map((token) => literalValue(token, params, cursor).value);
-      return (row) => values.includes(row[m[1]]);
-    }
-
-    m = part.match(/^(\w+)\s*(=|!=|<>|>=|<=|>|<)\s*(.+)$/i);
-    if (m) {
-      const [, field, op, rhs] = m;
-      const { value } = literalValue(rhs, params, cursor);
-      return (row) => compare(row[field], op, value);
-    }
-
-    return () => true;
-  });
-  return (row) => tests.every((test) => test(row));
+  return buildWhereTree(whereSql, params, cursor);
 }
 
 export function parseSelect(sql) {
