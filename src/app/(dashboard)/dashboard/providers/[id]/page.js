@@ -25,6 +25,8 @@ import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
 import CustomHeadersModal from "./CustomHeadersModal";
 
+import CustomConfigCard from "./CustomConfigCard";
+
 const ONE_BY_ONE_DELAY_MS = 1000;
 
 const AUTO_PING_SETTINGS_KEYS = {
@@ -1940,6 +1942,9 @@ export default function ProviderDetailPage() {
           </div>
         </Card>
       )}
+
+      {/* Per-provider user overrides (custom headers / connect timeout) */}
+      <CustomConfigCard providerId={providerId} />
 
       {/* Models */}
       <Card>

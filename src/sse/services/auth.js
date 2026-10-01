@@ -105,6 +105,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     ? excludeConnectionIds
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
+  const requestedModel = options?.requestedModel || model;
   const keyRecord = options?.keyRecord || (options?.apiKey ? await getApiKeyByKey(options.apiKey) : null);
 
   if (keyRecord?.billingMode === "byok") {
@@ -227,6 +228,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       if (excludeSet.has(c.id)) return false;
       if (connLocked(c)) return false;
       if (coordinatorLockMap.has(c.id)) return false;
+      const enabled = c.providerSpecificData?.enabledModels;
+      if (providerId === "codex" && Array.isArray(enabled) && enabled.length && requestedModel && !enabled.includes(requestedModel)) return false;
       // Antigravity: skip if live quota exhausted for this model
       if (isAntigravity && model && antigravityQuotaCache) {
         const quota = antigravityQuotaCache.get(c.id)?.[model];
@@ -489,17 +492,6 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
       : Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
     newBackoffLevel = 0;
   } else {
-    let settingsOverride = null;
-    try {
-      const settings = await getSettings();
-      settingsOverride = (settings.providerStrategies || {})[provider || conn?.provider]?.retry || null;
-    } catch { /* ignore */ }
-    const credentials = conn?.providerSpecificData
-      ? { providerSpecificData: conn.providerSpecificData }
-      : null;
-    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(
-      status, errorText, backoffLevel, provider || conn?.provider, credentials, settingsOverride
-    ));
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
   if (provider && model) {

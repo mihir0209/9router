@@ -139,7 +139,7 @@ export class BaseExecutor {
     return next;
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, providerOverrides = null }) {
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
     let lastStatus = 0;
@@ -183,6 +183,8 @@ export class BaseExecutor {
       let url = priorRemediation?.url || this.buildUrl(model, stream, urlIndex, credentials);
       let transformedBody = priorRemediation?.transformedBody || this.transformRequest(model, body, stream, credentials);
       let headers = priorRemediation?.headers || this.buildHeaders(credentials, stream, url, model, transformedBody);
+        // User per-provider override wins over registry headers (blocked names filtered at the API)
+        if (providerOverrides?.headers) Object.assign(headers, providerOverrides.headers);
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 

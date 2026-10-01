@@ -140,6 +140,8 @@ const DEFAULT_SETTINGS = {
   // Where /v1/models gets its model list: "live" (query providers) or "cached"
   // (serve the DB copy). Default comes from MODELS_LIST_SOURCE; see above.
   modelsListSource: DEFAULT_MODELS_LIST_SOURCE,
+  // Per-provider user header overrides applied at dispatch: { [providerId]: { headers: {..} } }
+  providerOverrides: {},
 };
 
 const SETTINGS_CACHE_TTL_MS = 5 * 60 * 1000;

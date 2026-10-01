@@ -341,7 +341,6 @@ export default function Sidebar({ onClose, collapsed = false, onToggleCollapse }
 
             {/* Media Providers accordion */}
             <MediaProvidersToggle collapsed={collapsed} mediaOpen={mediaOpen} onToggle={() => setMediaOpen((v) => !v)} active={pathname.startsWith("/dashboard/media-providers")} />
-
             {mediaOpen && (
               <div className={collapsed ? "" : "pl-4"}>
                 {MEDIA_PROVIDER_KINDS.filter((k) => VISIBLE_MEDIA_KINDS.includes(k.id)).map((kind) => (
@@ -357,6 +356,7 @@ export default function Sidebar({ onClose, collapsed = false, onToggleCollapse }
                     iconClass="text-[16px]"
                     badge={kind.isNew ? "NEW" : undefined}
                   />
+
                 ))}
                 <SidebarLink
                   href={COMBINED_WEB_ITEM.href}
@@ -398,6 +398,41 @@ export default function Sidebar({ onClose, collapsed = false, onToggleCollapse }
                 />
               ) : null;
             })}
+
+
+            {/* Remote */}
+            <button
+              onClick={() => setShowRemoteModal(true)}
+              className={cn(
+                "flex items-center gap-3 px-3 py-1 rounded-lg transition-all group w-full",
+                "text-text-muted hover:bg-surface-2 hover:text-text-main"
+              )}
+            >
+              <span className="material-symbols-outlined text-[18px] group-hover:text-primary transition-colors">
+                computer
+              </span>
+              <span className="text-[13px] font-medium">9Remote</span>
+              <span className="ml-auto text-[10px] font-semibold px-1.5 py-0.5 rounded-[3px] bg-orange-500/15 text-orange-400">
+                HOT
+              </span>
+            </button>
+
+            {/* 9English */}
+            <a
+              href="https://9english.net/"
+              target="_blank"
+              rel="noreferrer"
+              onClick={onClose}
+              className={cn(
+                "flex items-center gap-3 px-3 py-1 rounded-lg transition-all group w-full",
+                "text-text-muted hover:bg-surface-2 hover:text-text-main"
+              )}
+            >
+              <span className="material-symbols-outlined text-[18px] group-hover:text-primary transition-colors">
+                translate
+              </span>
+              <span className="text-[13px] font-medium">9English</span>
+            </a>
 
             {/* Settings */}
             <SidebarLink

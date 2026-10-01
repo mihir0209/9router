@@ -191,7 +191,14 @@ export async function handleChat(request, clientRawRequest = null) {
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, keyContext);
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, {
+    ...keyContext,
+    // Upstream: a context marker gets its own model-lock key, so the cached and
+    // uncached variants cool down independently.
+    requestedModel: contextMarker
+      ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]`
+      : keyContext.requestedModel,
+  });
 }
 
 /**
@@ -355,6 +362,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       pxpipeTransform: chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
       onPxpipeEvent: appendPxpipeEvent,
       providerThinking,
+      // Per-provider user overrides (custom headers / connect timeout) from settings
+      providerOverrides: (chatSettings.providerOverrides || {})[provider] || null,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
       onCredentialsRefreshed: async (newCreds) => {

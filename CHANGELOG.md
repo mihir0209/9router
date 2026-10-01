@@ -1,103 +1,37 @@
-# v0.5.92 (2026-09-28)
+# v0.5.95 (2026-10-01)
 
-Release baseline for the Postgres adapter work. 89 commits since v0.5.91, spanning
-Cloudflare Workers support, gateway durability, the proxy-pool system, and the
-model-list rework. Test suite: 3333 passed / 0 failed, no-regression gate clean.
+## Features
+- **Providers**: add Meta Muse provider with OAuth login and model catalog; add v1m System One provider
+- **GLM**: add Z.ai OAuth login to GLM Coding (dual-auth)
+- **Codex**: add GPT-6.1 Sol; expose 1M context variants for GPT-6 and GPT-5.6; add gpt-daybreak/reserve models and route bare `gpt-5.x`/`gpt-6.x` slugs to codex
+- **Claude**: add Claude Sonnet 5.5 (plus `claude-opus-5.5` models in the Kiro registry)
+- **CLI**: add `connect` command for remote 9Router servers
+- **Providers**: per-provider custom header overrides from the registry
+- **Agnes**: seed the 2.5/3.0 model ids in the registry
+- **Usage**: sync `?provider=` URL param with provider filter for bookmarkable deep links (#4395)
+- **Dashboard**: drop NEW badges in sidebar, mark 9Remote as HOT
 
-## Cloudflare Workers support
-The first Workers deployment of the gateway, and the work to make it survivable.
-- **D1 persistence**: dashboard data, settings, API keys, provider connections,
-  usage aggregates and request details now persist to D1 and are re-read from it
-  before reads and writes that must not race another isolate
-- **Cold-start cost**: `kv` and `providerConnections` moved off the isolate-start
-  path to load on first touch. Cold start was fetching and JSON-parsing the whole
-  database — 1.28 MB / 3,631 rows, 95% of it `kv` — which is what exhausted the
-  free-plan CPU budget on endpoints that read neither
-- **Lazy analytics**: `usageHistory` and `requestDetails` were being excluded from
-  the eager load with nothing to load them, so usage and request-detail reads
-  returned silently empty; both now load on demand
-- **Resync safety**: a D1 resync no longer overwrites a table that was written to
-  mid-fetch, and the unscoped path no longer lists every eager table twice
-- **Build**: `node:fs` stopped leaking into the client bundle; Next 16.3.6 and
-  OpenNext 1.20.6 moved into a supported combination
-- **Extreme low-write mode**: zero analytics DB writes (usageDaily aggregates and
-  lifetime counters included) for tight D1 budgets
-- Settings updates protected; unconfigured provider models hidden; the
-  worker-incompatible chat imports avoided
-
-## Gateway durability and security
-- **Durable coordination**: cross-isolate cache invalidation, lease heartbeats and
-  durability for the gateway path
-- **Secured admin controls** behind an admin API token
-- **Credential hygiene**: in-body `api_key`/`apiKey` is stripped before anything is
-  forwarded upstream
-- **Retry**: deterministic 400s no longer rotate accounts; active request
-  remediation on upstream errors
-- **Antigravity**: provider prefix stripped before upstream mapping, 429 reset
-  timestamps parsed, long cooldowns handled in extreme mode, tiered model aliases
-  re-resolved at dispatch
-
-## Model list rework
-`/v1/models` asked every configured provider for its model list on every request —
-one upstream round trip per provider, 3.55 s cold, and on Workers that upstream
-work was the known cause of free-tier CPU exhaustion.
-- **`modelsListSource` setting** (`live` | `cached`), default from
-  `MODELS_LIST_SOURCE`, overridable in the dashboard. On Cloudflare the cached
-  path stays forced, because that upstream work is the known CPU cost
-- **Per-provider cache** written only by an explicit refresh. An empty refresh is
-  treated as a failure and never overwrites a good cache
-- **Refresh**: a Refresh button on each provider's page plus
-  `GET/POST /api/models/refresh`; re-resolves from the upstream, persists, and
-  reloads the page to show exactly what `/v1/models` will serve
-- Resolution moved to a single shared module so a refreshed cache cannot drift
-  from what a live pass produces. Verified: cached and live lists identical at
-  3,974 models. Cold `/v1/models` 3.55 s -> 1.20 s
-- Aliases are the model id in `/v1/models`; per-model display names; aliases
-  deduplicated and shown alongside original ids
-- **Fixed a crash**: a single corrupt `kv` row made `parseJson` return `null`,
-  which `kvStore.getAll` handed back as a value and `ModelSelectModal` then called
-  `.startsWith` on — taking down the model picker. Filtered at the kv boundary so
-  every consumer is safe, and the two render sites that lacked the existing
-  `typeof` guard were fixed
-
-## API keys and auth
-- Rate limiting, IP blocking, model restrictions, token limits and expiry
-- Custom API key values
-- `allowedModels` now authorises a combo by name, and one member no longer grants
-  the whole combo; cyclic combos are bounded
-- Local dashboard key secrets stay readable
-
-## Proxy pools
-A provider-agnostic pool system with a model selector: health monitor with dead
-proxy cleanup, performance metrics, ProxyScrape import and validation, quarantine
-of exhausted pools, and a client-side backup merge.
-
-## Observability, usage and pricing
-- Metrics and alerts scoped per tenant
-- Reasoning tokens no longer double-billed; unknown models priced via models.dev
-- Structured-output mode matrix for doc-verified base providers
-- Nested-combo capability traversal; concurrent models; custom media nodes
-- Low-write analytics mode
-
-## Tests and docs
-- The last 15 baseline failures cleared and the suite made deterministic
-- Live E2E suites made runnable, separating router bugs from model noise
-- Provider/golden snapshots re-baselined after the codex version bump
-- Upstream issue draft for test-suite DB pollution
-
-## Known limitations in this release
-- Cloudflare **Free** gives 10 ms of CPU per request. Warm requests are fine
-  (150/150 concurrent verified) but cold-isolate bursts can still exhaust it.
-  Workers Paid ($5) raises the ceiling to 30 s
-- 9router has **no Postgres adapter**; the database layer is SQLite plus a
-  Cloudflare D1/KV adapter. That is the blocker for any host with an ephemeral
-  filesystem (Fly.io, Antideploy, Render free) and is the next piece of work
-- Pre-existing `react-hooks/set-state-in-effect` lint errors remain in
-  `ModelSelectModal.js` and `profile/page.js`
+## Fixes
+- **Claude**: preserve intentional prefill from non-messages[] source formats; keep a trailing user turn so cleanup never yields assistant prefill
+- **Claude**: cache a tool loop's final tool results with the 4th breakpoint
+- **Claude**: resolve Sonnet 5.x to adaptive thinking so no forged thinking placeholders are sent; inject unsigned thinking placeholders for opencode-go DeepSeek `/messages` (#4436)
+- **Thinking**: add `xhigh` to claude-adaptive thinking levels
+- **Claude**: keep a user turn whose only block is `container_upload`
+- **Capabilities**: publish real GPT-6/GPT-5.4+ context windows and combo token limits
+- **Responses**: wait for real usage before emitting `response.completed`, bounded by a 3s watchdog
+- **Codex**: stop refresh-token reuse that logs accounts out on auto-ping; preserve hosted web search on GPT-6 Sol/Luna; remove ghost models
+- **Grok CLI**: send Grok CLI 1.0.44 so proxy stops returning HTTP 426
+- **Proxy**: auto-fallback to insecure TLS on self-signed cert errors; hold strictProxy when no proxy resolves
+- **Translator**: strip `errorMessage` and other non-standard schema keywords from Gemini tool schemas; dedupe same-name tools for DeepSeek models (#3333)
+- **Codebuddy**: parse the 6004 rate limit error and extract `resetsAtMs`; forward `recurring` for codebuddy-intl quota packs (#4422)
+- **CLI Tools**: replace `sk_9router` placeholder with first active dashboard API key
+- **Dashboard**: exclude hidden providers from usage stats provider list
+- **Capabilities**: add deepseek-v4-1-flash vision alias; add zed to live catalog providers
 
 # v0.5.91 (2026-09-26)
 
 ## Features
+- **Web Search & Fetch**: add TinyFish Search and Fetch with one API-key connection, normalized results, and official provider icon
 - **Providers**: add Token Harbor provider and four OpenAI-compatible aggregator providers (dahl, atria, agnes, bai)
 - **Claude**: forward `x-claude-code-session-id` on OAuth requests; merge client `anthropic-beta` flags and forward rate-limit headers; return thinking text to OpenAI-format clients
 - **Codex**: add GPT-6 Sol and Luna support
