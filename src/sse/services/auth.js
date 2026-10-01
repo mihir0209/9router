@@ -9,6 +9,7 @@ import { getAntigravityQuotaCache } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
 import { coordinatorCall, getAdaptiveScores, recordProviderOutcome, scoreProviderEntries } from "@/lib/coordinator/client.js";
 import { recordRequestOutcome } from "@/lib/observability/metrics.js";
+import { scopeConnectionsByDeployment } from "./azureDeploymentScope.js";
 
 // Mutex to prevent race conditions during account selection
 let selectionMutex = Promise.resolve();
@@ -286,10 +287,18 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Kiro-specific: agentic prompt injection mode (provider-level setting)
     const kiroAgenticPromptMode = providerOverride.kiroAgenticPromptMode || "always";
 
+    // Azure resolves each request to a per-connection deployment, so restrict
+    // candidates to connections that can serve this model before any strategy
+    // runs. Falls back to the full set when nothing matches.
+    const selectable = scopeConnectionsByDeployment(availableConnections, providerId, model);
+    if (selectable !== availableConnections) {
+      log.info(`AUTH`, `${provider} | scoped to ${selectable.length}/${availableConnections.length} connections that can serve ${model}`);
+    }
+
     let connection;
     // Pin to preferred connection if specified and available
     if (preferredConnectionId) {
-      connection = availableConnections.find((c) => c.id === preferredConnectionId);
+      connection = selectable.find((c) => c.id === preferredConnectionId);
       if (connection) {
         log.info("AUTH", `${provider} | pinned to ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"})`);
       }
@@ -297,16 +306,16 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     if (connection) {
       // skip strategy
     } else if (strategy === "adaptive") {
-      const scores = await getAdaptiveScores(providerId, model, availableConnections.map((entry) => entry.id));
-      const priorities = new Map(availableConnections.map((entry, index) => [entry.id, entry.priority || index + 1]));
+      const scores = await getAdaptiveScores(providerId, model, selectable.map((entry) => entry.id));
+      const priorities = new Map(selectable.map((entry, index) => [entry.id, entry.priority || index + 1]));
       const ranked = scoreProviderEntries(scores, priorities);
       const rank = new Map(ranked.map((entry, index) => [entry.connectionId, index]));
-      connection = [...availableConnections].sort((left, right) => (rank.get(left.id) ?? 999) - (rank.get(right.id) ?? 999))[0];
+      connection = [...selectable].sort((left, right) => (rank.get(left.id) ?? 999) - (rank.get(right.id) ?? 999))[0];
     } else if (strategy === "round-robin") {
       const stickyLimit = providerOverride.stickyRoundRobinLimit || settings.stickyRoundRobinLimit || 3;
 
       // Sort by lastUsed (most recent first) to find current candidate
-      const byRecency = [...availableConnections].sort((a, b) => {
+      const byRecency = [...selectable].sort((a, b) => {
         if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
         if (!a.lastUsedAt) return 1;
         if (!b.lastUsedAt) return -1;
@@ -332,7 +341,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         }
       } else {
         // Pick the least recently used (excluding current if possible)
-        const sortedByOldest = [...availableConnections].sort((a, b) => {
+        const sortedByOldest = [...selectable].sort((a, b) => {
           if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
           if (!a.lastUsedAt) return -1;
           if (!b.lastUsedAt) return 1;
@@ -355,7 +364,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       }
     } else {
       // Default: fill-first (already sorted by priority in getProviderConnections)
-      connection = availableConnections[0];
+      connection = selectable[0];
     }
 
     const resolvedProxy = await resolveConnectionProxyConfig(
