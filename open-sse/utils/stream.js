@@ -396,6 +396,11 @@ export function createSSEStream(options = {}) {
             }
             reqLogger?.appendConvertedChunk?.(output);
             controller.enqueue(sharedEncoder.encode(output));
+            // Passthrough forwards the provider's bytes verbatim, and an
+            // OpenAI-shaped provider ends its stream with its own sentinel. When
+            // that has already gone out, appending ours produced two [DONE]s —
+            // clients terminate on the first, so the duplicate is a malformed tail.
+            if (/\bdata:\s*\[DONE\]/.test(output)) streamDoneSent = true;
           }
 
           // IMPORTANT: In passthrough mode we still must terminate the SSE stream.
