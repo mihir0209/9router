@@ -13,12 +13,12 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // derivation (a pure function, so its memo cannot go stale), and by collapsing
 // concurrent builds.
 
-const state = { keys: new Map(), connections: [], buildDelayMs: 0 };
+const state = { keys: new Map(), connections: [], combos: [], buildDelayMs: 0 };
 
 vi.mock("@/lib/localDb", () => ({
   getApiKeyByKey: vi.fn(async (key) => state.keys.get(key) || null),
   getProviderConnections: vi.fn(async () => state.connections),
-  getCombos: vi.fn(async () => []),
+  getCombos: vi.fn(async () => state.combos),
   getCustomModels: vi.fn(async () => []),
   getModelAliases: vi.fn(async () => []),
   getSettings: vi.fn(async () => ({ modelsListSource: "cached" })),
@@ -40,13 +40,18 @@ function req(url = "http://localhost/v1/models", headers = {}) {
 const authed = (url, key = FULL_KEY) => req(url, { authorization: `Bearer ${key}` });
 
 function seed() {
+  // The catalogue cache is keyed by key id (it must be: the body depends on the
+  // caller's allow-list), so each test gets its own ids or it inherits the
+  // previous test's warm entry and cannot observe a first build.
+  const suffix = Math.random().toString(36).slice(2);
   state.keys = new Map([
-    [FULL_KEY, { id: "k-full", isActive: true, allowedModels: "", expiresAt: "" }],
-    [RESTRICTED_KEY, { id: "k-restricted", isActive: true, allowedModels: "gpt-4o,auto", expiresAt: "" }],
+    [FULL_KEY, { id: `k-full-${suffix}`, isActive: true, allowedModels: "", expiresAt: "" }],
+    [RESTRICTED_KEY, { id: `k-restricted-${suffix}`, isActive: true, allowedModels: "gpt-4o,auto", expiresAt: "" }],
   ]);
   state.connections = [];
+  state.combos = [];
   state.buildDelayMs = 0;
-  return `t${Math.random().toString(36).slice(2)}`;
+  return suffix;
 }
 
 describe("models API requires a key", () => {
@@ -87,50 +92,75 @@ describe("models API requires a key", () => {
   });
 });
 
-describe("the catalogue is always live", () => {
+describe("the catalogue is live, and cheap when nothing changed", () => {
   let id;
   beforeEach(() => { id = seed(); });
 
-  it("rebuilds on every call rather than serving a cached body", async () => {
+  it("reuses the body while the inputs are unchanged, and rebuilds when they move", async () => {
     const url = `http://localhost/v1/models?live=${id}-a`;
     const first = await GET(authed(url));
-    const second = await GET(authed(url));
     expect(first.status).toBe(200);
+    expect(first.headers.get("x-models-build")).toBe("project");
+    const firstBody = await first.text();
+
+    // Nothing changed, so the projection is not repeated. The inputs are still
+    // read on every request, which is what keeps this live rather than a TTL.
+    const second = await GET(authed(url));
     expect(second.status).toBe(200);
-    // No x-models-cache header any more: there is nothing to report, because
-    // nothing is being reused.
-    expect(second.headers.get("x-models-cache")).toBeNull();
+    expect(second.headers.get("x-models-build")).toBe("hash");
+    expect(await second.text()).toBe(firstBody);
+    expect(second.headers.get("etag")).toBe(first.headers.get("etag"));
+
+    // A connection appears: the very next request must reflect it. A TTL would
+    // have hidden this for the remainder of its window.
+    state.connections = [{ provider: "openai", isActive: true, authType: "api_key", apiKey: "x" }];
+    const third = await GET(authed(url));
+    expect(third.headers.get("x-models-build")).toBe("project");
+    expect(await third.text()).not.toBe(firstBody);
   });
 
-  it("reflects a config change on the very next request", async () => {
-    const url = `http://localhost/v1/models?live=${id}-b`;
-    const before = await (await GET(authed(url))).json();
-    expect(Array.isArray(before.data)).toBe(true);
+  it("answers 304 with no body when the caller already holds this ETag", async () => {
+    const url = `http://localhost/v1/models?etag=${id}-b`;
+    const first = await GET(authed(url));
+    const etag = first.headers.get("etag");
+    expect(etag).toBeTruthy();
+    const body = await first.text();
+    expect(body.length).toBeGreaterThan(10);
 
-    // A connection appears. With a TTL this would not be visible for minutes.
-    state.connections = [{ provider: "openai", isActive: true, authType: "api_key", apiKey: "x" }];
-    const after = await (await GET(authed(url))).json();
-    expect(JSON.stringify(after)).not.toBe(JSON.stringify(before));
+    const revalidated = await GET(req(url, {
+      authorization: `Bearer ${FULL_KEY}`,
+      "if-none-match": etag,
+    }));
+    expect(revalidated.status).toBe(304);
+    expect(await revalidated.text()).toBe("");
+
+    // A different ETag gets the body.
+    const changed = await GET(req(url, { authorization: `Bearer ${FULL_KEY}`, "if-none-match": '"stale"' }));
+    expect(changed.status).toBe(200);
+  });
+
+  it("moves the ETag when a combo changes", async () => {
+    const url = `http://localhost/v1/models?etagc=${id}-c`;
+    const before = (await GET(authed(url))).headers.get("etag");
+    state.combos = [{ name: "newcombo", models: ["gpt-4o"] }];
+    const after = (await GET(authed(url))).headers.get("etag");
+    expect(after).not.toBe(before);
   });
 
   it("tells the client the body is per-caller and must be revalidated", async () => {
-    const res = await GET(authed(`http://localhost/v1/models?live=${id}-c`));
+    const res = await GET(authed(`http://localhost/v1/models?hdr=${id}-c`));
     const cc = res.headers.get("cache-control");
-    // private: a restricted key's allow-list must not be stored by a shared cache.
     expect(cc).toMatch(/private/);
-    // no-cache: storable by the client, but revalidated before reuse, so the
-    // endpoint stays authoritative and the caching decision is the caller's.
-    expect(cc).toMatch(/no-cache/);
     expect(res.headers.get("vary")).toMatch(/authorization/i);
   });
 
-  it("still gives a restricted key only its allow-list, on every call", async () => {
-    const url = `http://localhost/v1/models?live=${id}-d`;
-    const first = await (await GET(authed(url, RESTRICTED_KEY))).json();
-    const second = await (await GET(authed(url, RESTRICTED_KEY))).json();
+  it("never serves one key's allow-list to another", async () => {
+    const url = `http://localhost/v1/models?sep=${id}-d`;
     const full = await (await GET(authed(url, FULL_KEY))).json();
-    expect(JSON.stringify(first)).toBe(JSON.stringify(second));
-    expect(JSON.stringify(first)).not.toBe(JSON.stringify(full));
+    const restricted = await (await GET(authed(url, RESTRICTED_KEY))).json();
+    const restrictedAgain = await (await GET(authed(url, RESTRICTED_KEY))).json();
+    expect(JSON.stringify(restricted)).toBe(JSON.stringify(restrictedAgain));
+    expect(JSON.stringify(restricted)).not.toBe(JSON.stringify(full));
   });
 });
 
@@ -138,30 +168,29 @@ describe("concurrent builds are collapsed", () => {
   let id;
   beforeEach(() => { id = seed(); });
 
-  it("coalesces simultaneous requests into one build, without ever going stale", async () => {
+  it("does one read and one projection for a burst of identical callers", async () => {
     const { getProviderConnections } = await import("@/lib/localDb");
-    let calls = 0;
+    let reads = 0;
     getProviderConnections.mockImplementation(async () => {
-      calls += 1;
+      reads += 1;
       await new Promise((r) => setTimeout(r, 25));
       return state.connections;
     });
 
     const url = `http://localhost/v1/models?burst=${id}`;
     const responses = await Promise.all([GET(authed(url)), GET(authed(url)), GET(authed(url))]);
-    for (const res of responses) expect(res.status).toBe(200);
-    // Three concurrent callers, one build. Afterwards the count rises again,
-    // because nothing is retained: the next request is a fresh build.
-    expect(calls).toBe(1);
-    // With no response cache, this header is the only way to tell a shared build
-    // from a fresh one, so it has to be right.
-    const reports = responses.map((r) => r.headers.get("x-models-build"));
-    expect(reports.filter((v) => v === "fresh")).toHaveLength(1);
-    expect(reports.filter((v) => v === "coalesced")).toHaveLength(2);
+    for (const res of responses) {
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-models-build")).toBe("project");
+    }
+    // Three concurrent callers, one read and one projection. Coalescing only the
+    // projection would still leave each caller re-reading the database.
+    expect(reads).toBe(1);
 
+    // The next request re-reads to check the fingerprint, then reuses the body.
     const after = await GET(authed(url));
-    expect(calls).toBe(2);
-    expect(after.headers.get("x-models-build")).toBe("fresh");
+    expect(reads).toBe(2);
+    expect(after.headers.get("x-models-build")).toBe("hash");
   });
 });
 

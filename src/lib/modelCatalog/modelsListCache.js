@@ -137,3 +137,84 @@ export async function coalesceModelsBuild(cacheId, build) {
     if (inflight.get(cacheId) === pending) inflight.delete(cacheId);
   }
 }
+
+// ── hash-gated catalogue ──────────────────────────────────────────────────────
+//
+// The catalogue is served live: every request reads current state. What is reused
+// is the projection, and only when a fingerprint of that state says it would
+// produce the identical bytes.
+//
+// This is not a time-based cache, so it does not trade liveness for speed the way
+// a TTL does — an admin edit changes the fingerprint on the very next request. It
+// avoids the expensive half only: turning thousands of provider rows into model
+// objects, which on Workers is what pushed this endpoint into the CPU ceiling and
+// into 120s timeouts.
+//
+// A short TTL remains as a backstop so a pathological input change cannot pin a
+// large body in memory indefinitely.
+
+const CATALOG_TTL_MS = 60_000;
+const CATALOG_MAX_ENTRIES = 64;
+
+if (!global._modelsCatalogCache) global._modelsCatalogCache = new Map();
+
+function catalogSlot(cacheKey) {
+  const cache = global._modelsCatalogCache;
+  let slot = cache.get(cacheKey);
+  if (!slot) {
+    slot = { etag: null, body: null, ts: 0 };
+    cache.set(cacheKey, slot);
+    while (cache.size > CATALOG_MAX_ENTRIES) cache.delete(cache.keys().next().value);
+  }
+  return slot;
+}
+
+/** Coincidence-guard: two different fingerprints must not produce the same ETag. */
+function etagOf(fingerprint) {
+  return `"${fingerprint}"`;
+}
+
+/**
+ * Serve the catalogue, rebuilding only when its inputs actually changed.
+ *
+ * `resolve` reads current state and returns `{ inputs, fingerprint }`.
+ * `project` turns those inputs into the response body, and only runs on a miss.
+ */
+export async function withCatalog({ request, cacheKey, resolve, project }) {
+  // The read and the projection are shared: concurrent callers for the same
+  // identity do one of each. Coalescing only the projection would still leave
+  // every caller re-reading the database, which is most of the work.
+  let pending = inflight.get(cacheKey);
+  if (!pending) {
+    pending = (async () => {
+      const { inputs, fingerprint } = await resolve();
+      const etag = etagOf(fingerprint);
+      const slot = catalogSlot(cacheKey);
+      if (slot.etag === fingerprint && Date.now() - slot.ts < CATALOG_TTL_MS && slot.body) {
+        return { body: slot.body, etag, source: "hash" };
+      }
+      const body = await project(inputs);
+      slot.etag = fingerprint;
+      slot.body = body;
+      slot.ts = Date.now();
+      return { body, etag, source: "project" };
+    })();
+    inflight.set(cacheKey, pending);
+    // Detach the cleanup from the returned promise so a rejected build does not
+    // surface as an unhandled rejection, while still clearing the slot.
+    pending.then(clear, clear);
+    function clear() {
+      if (inflight.get(cacheKey) === pending) inflight.delete(cacheKey);
+    }
+  }
+
+  const result = await pending;
+
+  // Whether to answer 304 is per-request: two callers can share a build and only
+  // one of them hold the body.
+  const inm = request?.headers?.get("if-none-match");
+  if (inm && inm.split(",").some((tag) => tag.trim() === result.etag)) {
+    return { body: "", etag: result.etag, notModified: true, source: "not-modified" };
+  }
+  return { ...result, notModified: false };
+}

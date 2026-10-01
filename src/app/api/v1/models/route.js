@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS, getModelKind } from "@/shared/constants/models";
 import {
   AI_PROVIDERS,
@@ -18,6 +19,7 @@ import {
   modelsListHeaders,
   parseModelList,
   unauthorizedModelsResponse,
+  withCatalog,
 } from "@/lib/modelCatalog/modelsListCache.js";
 
 
@@ -110,6 +112,61 @@ function comboMatchesKinds(combo, kindFilter) {
  * Build OpenAI-format models list filtered by service kinds.
  * @param {string[]} kindFilter - List of service kinds to include (e.g. ["llm"], ["webSearch","webFetch"]).
  */
+/**
+ * Read everything the catalogue is derived from.
+ *
+ * Split out from the projection so a caller can read current state, hash it, and
+ * skip the expensive half when nothing changed. A failed read degrades that one
+ * input rather than failing the request.
+ */
+export async function resolveModelsInputs() {
+  const dbReads = await Promise.allSettled([
+    getProviderConnections(),
+    getCombos(),
+    getCustomModels(),
+    getModelAliases(),
+    getDisabledModels(),
+  ]);
+  const [connectionsResult, combosResult, customModelsResult, aliasesResult, disabledResult] = dbReads;
+  if (connectionsResult.status === "rejected") console.log("Could not fetch providers, returning static fallback models");
+  if (combosResult.status === "rejected") console.log("Could not fetch combos");
+  if (customModelsResult.status === "rejected") console.log("Could not fetch custom models");
+  if (aliasesResult.status === "rejected") console.log("Could not fetch model aliases");
+  if (disabledResult.status === "rejected") console.log("Could not fetch disabled models");
+
+  return {
+    providerReadFailed: connectionsResult.status === "rejected",
+    connections: connectionsResult.status === "fulfilled"
+      ? connectionsResult.value.filter((connection) => connection.isActive !== false)
+      : [],
+    combos: combosResult.status === "fulfilled" ? combosResult.value : [],
+    customModels: customModelsResult.status === "fulfilled" ? customModelsResult.value : [],
+    modelAliases: aliasesResult.status === "fulfilled" ? aliasesResult.value : {},
+    disabledByAlias: disabledResult.status === "fulfilled" ? disabledResult.value : {},
+  };
+}
+
+/**
+ * A cheap fingerprint of the inputs, used as the catalogue's ETag.
+ *
+ * Only fields that can change the emitted list are included. Anything else would
+ * move the ETag for an edit that cannot alter the response, and every spurious
+ * move costs the caller a full rebuild.
+ */
+export function modelsInputsEtag(inputs, extra = "") {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      c: inputs.connections.map((x) => [x.id, x.provider, x.isActive, x.priority]),
+      b: inputs.combos.map((x) => [x.name, x.models, x.kind]),
+      m: inputs.customModels.map((x) => [x.providerAlias, x.id, x.name, x.kind]),
+      a: inputs.modelAliases,
+      d: inputs.disabledByAlias,
+      e: extra,
+    }))
+    .digest("hex")
+    .slice(0, 32);
+}
+
 export async function buildModelsList(kindFilter, options = {}) {
   // When this header is present, the /v1/models request came from another
   // 9router instance's fetchCompatibleModelIds — skip dynamic fetch to break
@@ -135,28 +192,14 @@ export async function buildModelsList(kindFilter, options = {}) {
   const restrictedModels = allowedList.length > 0 && !allowedList.includes("*") ? allowedList : null;
   const providerConcurrency = options.providerConcurrency || MODEL_PROVIDER_CONCURRENCY;
   const providerTimeoutMs = options.providerTimeoutMs || MODEL_PROVIDER_TIMEOUT_MS;
-  const dbReads = await Promise.allSettled([
-    getProviderConnections(),
-    getCombos(),
-    getCustomModels(),
-    getModelAliases(),
-    getDisabledModels(),
-  ]);
-  const [connectionsResult, combosResult, customModelsResult, aliasesResult, disabledResult] = dbReads;
-  const providerReadFailed = connectionsResult.status === "rejected";
-  if (providerReadFailed) console.log("Could not fetch providers, returning static fallback models");
-  if (combosResult.status === "rejected") console.log("Could not fetch combos");
-  if (customModelsResult.status === "rejected") console.log("Could not fetch custom models");
-  if (aliasesResult.status === "rejected") console.log("Could not fetch model aliases");
-  if (disabledResult.status === "rejected") console.log("Could not fetch disabled models");
-
-  const connections = connectionsResult.status === "fulfilled"
-    ? connectionsResult.value.filter((connection) => connection.isActive !== false)
-    : [];
-  const combos = combosResult.status === "fulfilled" ? combosResult.value : [];
-  const customModels = customModelsResult.status === "fulfilled" ? customModelsResult.value : [];
-  const modelAliases = aliasesResult.status === "fulfilled" ? aliasesResult.value : {};
-  const disabledByAlias = disabledResult.status === "fulfilled" ? disabledResult.value : {};
+  // Pre-resolved inputs, when the caller already has them. This is what lets
+  // /v1/models read current state, hash it, and skip the expensive half when the
+  // hash has not moved: the reads are cheap, projecting thousands of provider
+  // rows into model objects is not, and it yields the same bytes for the same
+  // inputs.
+  const inputs = options.inputs || (await resolveModelsInputs());
+  const { connections, combos, customModels, modelAliases, disabledByAlias } = inputs;
+  const providerReadFailed = inputs.providerReadFailed;
   const isDisabled = (alias, modelId) => Array.isArray(disabledByAlias[alias]) && disabledByAlias[alias].includes(modelId);
 
   const activeConnectionByProvider = new Map();
@@ -536,19 +579,34 @@ export async function GET(request) {
     const keyRecord = auth.keyRecord;
     const allowedModels = parseModelList(keyRecord.allowedModels);
 
-    // Built fresh on every request. The response is per-caller and must reflect
-    // the connections, combos and disabled-models as they are now, so there is no
-    // read-side cache. Concurrency is still collapsed, so a burst pays once.
-    const { value: data, coalesced } = await coalesceModelsBuild(
-      `llm:${keyRecord.id}:${allowedModels ? allowedModels.join(",") : "*"}`,
-      () => buildModelsList([LLM_KIND], { skipDynamicFetch, allowedModels })
-    );
-    const body = JSON.stringify({ object: "list", data });
+    // Read current state, fingerprint it, and rebuild only if the projection
+    // would differ. A polling client that sends If-None-Match gets a 304 with no
+    // body at all.
+    const allowTag = allowedModels ? allowedModels.join(",") : "*";
+    // The source (live vs cached) changes which models are emitted, so it is part
+    // of the fingerprint. A settings change from live to cached must rebuild.
+    const modelsListSource = await resolveModelsListSource();
+    const { body, etag, notModified, source } = await withCatalog({
+      request,
+      cacheKey: `llm:${keyRecord.id}:${allowTag}:${skipDynamicFetch ? "nodyn" : "dyn"}`,
+      resolve: async () => {
+        const inputs = await resolveModelsInputs();
+        return {
+          inputs,
+          fingerprint: modelsInputsEtag(inputs, `${allowTag}|${skipDynamicFetch ? "nodyn" : "dyn"}|${modelsListSource}`),
+        };
+      },
+      project: async (inputs) => {
+        const data = await buildModelsList([LLM_KIND], { skipDynamicFetch, allowedModels, inputs });
+        return JSON.stringify({ object: "list", data });
+      },
+    });
 
+    if (notModified) {
+      return new Response(null, { status: 304, headers: modelsListHeaders({ ETag: etag }) });
+    }
     return new Response(body, {
-      headers: modelsListHeaders({
-        "x-models-build": coalesced ? "coalesced" : "fresh",
-      }),
+      headers: modelsListHeaders({ "x-models-build": source, ETag: etag }),
     });
   } catch (error) {
     console.log("Error fetching models:", error);
