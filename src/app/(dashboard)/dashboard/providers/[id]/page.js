@@ -1628,10 +1628,11 @@ export default function ProviderDetailPage() {
                 size="sm"
                 variant="secondary"
                 icon="http"
-                onClick={() => setShowCustomHeadersModal(true)}
+                  onClick={() => setShowCustomHeadersModal(true)}
+                  title="Headers for this connection only"
                 className="w-full sm:w-auto"
               >
-                Custom Headers
+                Connection Headers
               </Button>
               <Button
                 size="sm"
