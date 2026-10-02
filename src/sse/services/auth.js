@@ -492,6 +492,17 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
       : Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
     newBackoffLevel = 0;
   } else {
+    let settingsOverride = null;
+    try {
+      const settings = await getSettings();
+      settingsOverride = (settings.providerStrategies || {})[provider || conn?.provider]?.retry || null;
+    } catch { /* ignore */ }
+    const credentials = conn?.providerSpecificData
+      ? { providerSpecificData: conn.providerSpecificData }
+      : null;
+    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(
+      status, errorText, backoffLevel, provider || conn?.provider, credentials, settingsOverride
+    ));
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
   if (provider && model) {
