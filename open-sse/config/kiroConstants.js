@@ -187,15 +187,19 @@ function kiroModelLacksXhigh(model) {
 }
 
 export function extractKiroEffortLevel(body, model) {
-  const effort =
-    body?.output_config?.effort ??
+  // Kiro's own output_config vocabulary is richer than OpenAI's reasoning_effort.
+  // "max" is a real Kiro wire value, but an OpenAI client asking for "max" means
+  // the top of a different scale, whose Kiro equivalent is "high". Track the
+  // source so the two spellings are not conflated.
+  const native = body?.output_config?.effort;
+  const effort = native ??
     body?.reasoning_effort ??
     (typeof body?.reasoning === "object" ? body.reasoning?.effort : null);
   if (typeof effort !== "string") return null;
   const normalized = effort.toLowerCase();
   if (normalized === "none" || normalized === "off" || normalized === "disabled") return null;
   if (normalized === "xhigh") return kiroModelLacksXhigh(model) ? "high" : "xhigh";
-  if (normalized === "max") return "max";
+  if (normalized === "max") return native === undefined ? "high" : "max";
   if (["low", "medium", "high"].includes(normalized)) return normalized;
   return null;
 }
