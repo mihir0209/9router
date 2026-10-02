@@ -1,14 +1,23 @@
 import { platform, arch, hostname } from "os";
 import { PROVIDERS, PROVIDER_OAUTH } from "./providers.js";
+// Import the registry entries these CLI identity constants come from directly,
+// rather than reading them off the aggregated PROVIDERS map. The aggregate pulls
+// in every provider file, and some of those reach back into this module, so a
+// value read from PROVIDERS during module evaluation depends on which entry
+// point loaded first: importing this file directly gave "0.159.0" while
+// importing it via the image handler gave undefined. Reading the leaf registry
+// entry removes the ordering dependency.
+import CODEX_REGISTRY from "../providers/registry/codex.js";
+import GEMINI_CLI_REGISTRY from "../providers/registry/gemini-cli.js";
 import { ANTIGRAVITY_IDE_USER_AGENT } from "../providers/shared.js";
 import { createRequire } from "module";
 
 // === Gemini CLI === derive từ registry gemini-cli.transport
-export const GEMINI_CLI_VERSION = PROVIDERS["gemini-cli"]?.cliVersion;
-export const GEMINI_CLI_API_CLIENT = PROVIDERS["gemini-cli"]?.apiClient;
+export const GEMINI_CLI_VERSION = GEMINI_CLI_REGISTRY?.transport?.cliVersion;
+export const GEMINI_CLI_API_CLIENT = GEMINI_CLI_REGISTRY?.transport?.apiClient;
 
 // === Codex CLI === derive từ registry codex.transport
-export const CODEX_CLI_VERSION = PROVIDERS["codex"]?.cliVersion;
+export const CODEX_CLI_VERSION = CODEX_REGISTRY?.transport?.cliVersion;
 
 // Map Node arch to Gemini CLI arch string (x64/x86/arm64/...)
 function geminiCLIArch() {
