@@ -226,6 +226,12 @@ const _shutdownHandler = async () => {
 };
 
 function ensureShutdownHandler() {
+  // Edge runtime has no process emitter. This module is DB-side and is not in the
+  // Worker bundle today, but it is reachable from anything that imports the repos,
+  // so an unguarded module-scope call here breaks the whole graph at import time
+  // rather than degrading one feature.
+  if (typeof process === "undefined" || typeof process.on !== "function") return;
+
   process.off("beforeExit", _shutdownHandler);
   process.off("SIGINT", _shutdownHandler);
   process.off("SIGTERM", _shutdownHandler);
