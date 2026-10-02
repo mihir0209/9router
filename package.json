@@ -14,7 +14,12 @@
     "build:bun": "bun --bun next build --webpack",
     "start:bun": "bun ./.next/standalone/custom-server.js",
     "cli:pack": "npm --prefix cli run pack:cli",
-    "cli:publish": "npm --prefix cli run publish:cli"
+    "cli:publish": "npm --prefix cli run publish:cli",
+    "preview:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare preview",
+    "build:cloudflare": "node scripts/build-cloudflare.mjs",
+    "deploy:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare deploy",
+    "upload:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare upload",
+    "db:init:cloudflare": "wrangler d1 create 9router-db"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
