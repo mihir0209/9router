@@ -42,7 +42,11 @@ const CONTENTFUL_BLOCKS = new Set([
 function isContentfulBlock(block) {
   if (!block) return false;
   if (block.type === CLAUDE_BLOCK.TEXT) return !!block.text?.trim();
-  return CONTENTFUL_BLOCKS.has(block.type);
+  if (CONTENTFUL_BLOCKS.has(block.type)) return true;
+  // Pass-through any block type not in the known list (e.g. container_upload, file).
+  // Unknown blocks are non-empty content by definition; dropping the whole message
+  // would send messages:[] to the provider with no indication to the caller.
+  return !!(block.type && block.type !== CLAUDE_BLOCK.TEXT);
 }
 
 export function hasValidContent(msg) {
