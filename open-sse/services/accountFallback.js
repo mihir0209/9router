@@ -52,7 +52,10 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
   // text rule matched: the credential is healthy, only this slug is unusable
   // for it. Without this, one unentitled slug would cool down an account whose
   // other slugs still work.
-  if (isModelScopedError(status, errorText)) {
+  // Exception: structured-output rejections (response_format/json_schema) carry
+  // an explicit shouldFallback:true so combos skip schema-rejecting members.
+  // Some of those texts overlap the model-scoped phrases; the explicit rule wins.
+  if (isModelScopedError(status, errorText) && !isSchemaRejection(errorText)) {
     return { shouldFallback: false, cooldownMs: 0 };
   }
     return decision;
@@ -69,6 +72,19 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
  * down a healthy *account* — that reasoning is right for account rotation but
  * wrong for model rotation, so combo rotation checks this first. #4271
  */
+/**
+ * Whether this error is a structured-output rejection that carries an explicit
+ * shouldFallback:true (see the response_format/json_schema rules). These texts
+ * can overlap MODEL_SCOPED_ERROR_TEXTS, but the explicit rule wins so combos
+ * skip schema-rejecting members.
+ */
+function isSchemaRejection(errorText) {
+  const lower = String(errorText || "").toLowerCase();
+  return lower.includes("response_format") || lower.includes("json_schema")
+    || lower.includes("response.schema") || lower.includes("unknown_parameter")
+    || lower.includes("unknown parameter") || lower.includes("unrecognized request argument");
+}
+
 export function isModelScopedError(status, errorText) {
   // Only 4xx: a 5xx is a server fault and already falls back everywhere.
   if (!(status >= 400 && status < 500)) return false;
