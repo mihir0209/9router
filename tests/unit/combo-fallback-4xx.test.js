@@ -21,18 +21,21 @@ describe("checkFallbackError — combo fallback for model-scoped 4xx (#4271 / #4
     expect(r.cooldownMs).toBeGreaterThan(0);
   });
 
-  it("410 with EOL body triggers fallback", () => {
+  it("410 with EOL body does NOT cool the account (model-scoped, combo advances)", () => {
     const msg = "The model 'gpt-5.6-sol' has reached its end of life on 2026-09-01 and is no longer available.";
     const r = checkFallbackError(410, msg);
-    expect(r.shouldFallback).toBe(true);
+    expect(r.shouldFallback).toBe(false);
   });
 
   // ── HTTP 400 — Codex ChatGPT account entitlement ──────────────────────────
-  it("400 'not supported when using codex with a chatgpt account' triggers fallback", () => {
+  // NOTE (fork, #4340 over #4381): this text IS model-scoped — the account is
+  // healthy, only this slug is unusable for it. The account path must NOT cool
+  // down; combo member rotation advances via isModelScopedError instead.
+  it("400 'not supported when using codex with a chatgpt account' does NOT cool the account", () => {
     const msg = "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.";
     const r = checkFallbackError(400, msg);
-    expect(r.shouldFallback).toBe(true);
-    expect(r.cooldownMs).toBeGreaterThan(0);
+    expect(r.shouldFallback).toBe(false);
+    expect(r.cooldownMs).toBe(0);
   });
 
   it("400 'model_entitlement' triggers fallback", () => {
@@ -40,9 +43,9 @@ describe("checkFallbackError — combo fallback for model-scoped 4xx (#4271 / #4
     expect(r.shouldFallback).toBe(true);
   });
 
-  it("400 'end of life' text triggers fallback", () => {
+  it("400 'end of life' text does NOT cool the account (model-scoped, combo advances)", () => {
     const r = checkFallbackError(400, "This model has reached its end of life.");
-    expect(r.shouldFallback).toBe(true);
+    expect(r.shouldFallback).toBe(false);
   });
 
   // ── Generic 400 — request-scoped errors still do NOT fallback ─────────────

@@ -1,4 +1,5 @@
 import { BACKOFF_CONFIG } from "../config/errorConfig.js";
+import { MODEL_SCOPED_ERROR_TEXTS } from "../config/errorConfig.js";
 import { resolveFallbackDecision, resolveRetryPlugin } from "../retry/index.js";
 import { buildRuleList, matchErrorRule } from "../retry/schema.js";
 
@@ -46,12 +47,45 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
       }
     }
   }
-  return decision;
-}
+  // Model-scoped failures (#4271/#4340) are handled by combo member rotation
+  // via isModelScopedError, not by cooling the account. Suppress even when a
+  // text rule matched: the credential is healthy, only this slug is unusable
+  // for it. Without this, one unentitled slug would cool down an account whose
+  // other slugs still work.
+  if (isModelScopedError(status, errorText)) {
+    return { shouldFallback: false, cooldownMs: 0 };
+  }
+    return decision;
+  }
 
 /**
  * Check if account is currently unavailable (cooldown not expired)
  */
+/**
+ * Whether this failure is scoped to ONE MODEL rather than the credential.
+ * A combo member that the account cannot serve (unentitled slug, retired model)
+ * should not end the whole combo. checkFallbackError() deliberately returns
+ * shouldFallback:false for generic 4xx so a request-scoped fault does not cool
+ * down a healthy *account* — that reasoning is right for account rotation but
+ * wrong for model rotation, so combo rotation checks this first. #4271
+ */
+export function isModelScopedError(status, errorText) {
+  // Only 4xx: a 5xx is a server fault and already falls back everywhere.
+  if (!(status >= 400 && status < 500)) return false;
+
+  // Explicit account-scoped statuses stay account-scoped even if the wording
+  // happens to mention a model (e.g. a 403 on a specific slug is a permission
+  // problem, and cooling/rotating the account is the right response).
+  if (status === 401 || status === 402 || status === 403 || status === 429) return false;
+
+  const lower = errorText
+    ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
+    : "";
+  if (!lower) return false;
+
+  return MODEL_SCOPED_ERROR_TEXTS.some((text) => lower.includes(text));
+};
+
 export function isAccountUnavailable(unavailableUntil) {
   if (!unavailableUntil) return false;
   return new Date(unavailableUntil).getTime() > Date.now();
