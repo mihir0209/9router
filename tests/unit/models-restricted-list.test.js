@@ -85,3 +85,27 @@ describe("/v1/models — allow-listed key", () => {
     expect(list.every((m) => m.id.startsWith("openai/gpt-4o"))).toBe(true);
   });
 });
+
+describe("/v1/models — forced pins narrow the catalogue", () => {
+  it("forceModel shows only the pinned target", async () => {
+    const { buildModelsList } = await import("@/app/api/v1/models/route.js");
+    const ids = (await buildModelsList(["llm"], { forceModel: "openai/gpt-4o" })).map((m) => m.id);
+    expect(ids).toContain("openai/gpt-4o");
+    expect(ids).not.toContain("anthropic/claude-3-5-sonnet-20241022");
+  });
+
+  it("forceProvider keeps only that provider's entries", async () => {
+    const { buildModelsList } = await import("@/app/api/v1/models/route.js");
+    const ids = (await buildModelsList(["llm"], { allowedModels: ["auto"], forceProvider: "openai" })).map((m) => m.id);
+    expect(ids).toContain("openai/gpt-4o");
+    for (const id of ids) expect(id.split("/")[0]).toBe("openai");
+  });
+
+  it("keyCatalogueScope fingerprints pins for cache keys", async () => {
+    const { keyCatalogueScope } = await import("@/app/api/v1/models/route.js");
+    const a = keyCatalogueScope({ allowedModels: "", forceModel: "openai/gpt-4o", forceProvider: "" });
+    const b = keyCatalogueScope({ allowedModels: "", forceModel: "", forceProvider: "" });
+    expect(a.forceModel).toBe("openai/gpt-4o");
+    expect(a.tag).not.toBe(b.tag);
+  });
+});

@@ -3,6 +3,7 @@
  */
 
 import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
+import { scanChunk, isNoRetryFinish } from "./emptyFailover.js";
 import { unavailableResponse } from "../utils/error.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { resolveHttpTextRetry } from "../retry/index.js";
@@ -63,7 +64,7 @@ function extractStreamErrorText(buffer) {
 
 async function probeInitialStreamError(response) {
   const contentType = (response.headers.get("content-type") || "").toLowerCase();
-  if (!response.body || !contentType.includes("text/event-stream")) return { response, errorText: null };
+  if (!response.body || !contentType.includes("text/event-stream")) return { response, errorText: null, empty: false, finishReason: null };
 
   const [probeBody, clientBody] = response.body.tee();
   const reader = probeBody.getReader();
@@ -71,19 +72,26 @@ async function probeInitialStreamError(response) {
   let buffer = "";
   let bytes = 0;
   let timedOut = false;
+  let streamDone = false;
+  // Empty-stream signal (#4364): latch content/finish across complete lines.
+  // sawContent short-circuits the probe just like the error path does.
+  let contentState = { sawContent: false, finishReason: null, pending: "" };
   const timeout = setTimeout(() => { timedOut = true; reader.cancel().catch(() => {}); }, STREAM_PROBE_TIMEOUT_MS);
 
   try {
     while (!timedOut && bytes < STREAM_PROBE_MAX_BYTES) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) { streamDone = true; break; }
       bytes += value?.byteLength || 0;
       buffer += decoder.decode(value, { stream: true });
       const detected = extractStreamErrorText(buffer);
       if (detected !== undefined) {
-        if (detected) return { response: responseFromTee(response, clientBody), errorText: detected };
+        if (detected) return { response: responseFromTee(response, clientBody), errorText: detected, empty: false, finishReason: contentState.finishReason };
         break;
       }
+      contentState = scanChunk(buffer, { ...contentState, pending: "" });
+      buffer = contentState.pending;
+      if (contentState.sawContent) break;
     }
   } catch {
     // Probe is best-effort; return the unconsumed tee to the client.
@@ -92,7 +100,11 @@ async function probeInitialStreamError(response) {
     reader.cancel().catch(() => {});
   }
 
-  return { response: responseFromTee(response, clientBody), errorText: null };
+  // A 200 whose stream ENDED with no content frame is an aborted generation,
+  // not a success — unless the finish says content_filter (legitimately empty).
+  // Caps hit (timeout/bytes) without DONE fail open: commit the candidate.
+  const empty = streamDone && !contentState.sawContent && !isNoRetryFinish(contentState.finishReason);
+  return { response: responseFromTee(response, clientBody), errorText: null, empty, finishReason: contentState.finishReason };
 }
 
 // Flatten tool turns into prose so panel models keep the context but can't loop
@@ -456,6 +468,20 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
               : HTTP_STATUS.SERVICE_UNAVAILABLE;
           }
           log.warn("COMBO", `Model ${modelStr} stream failed, trying next`, { error: probed.errorText });
+          break;
+        }
+        if (probed.empty) {
+          // 200 with an ended-but-contentless stream: an aborted generation,
+          // not a success. Fall through like any other member failure — but
+          // without cooling the account (the credential is healthy). The last
+          // candidate returns as-is rather than a synthetic error.
+          lastError = `Model ${modelStr} streamed an empty response`;
+          lastStatus = HTTP_STATUS.BAD_GATEWAY;
+          if (i === rotatedModels.length - 1) {
+            log.warn("COMBO", `Model ${modelStr} streamed empty (last candidate), returning as-is`);
+            return probed.response;
+          }
+          log.warn("COMBO", `Model ${modelStr} streamed empty, trying next`);
           break;
         }
         log.info("COMBO", `Model ${modelStr} succeeded`);

@@ -1,9 +1,8 @@
-import { buildModelsList } from "../route.js";
+import { buildModelsList, keyCatalogueScope } from "../route.js";
 import {
   authenticateModelsRequest,
   coalesceModelsBuild,
   modelsListHeaders,
-  parseModelList,
   unauthorizedModelsResponse,
 } from "@/lib/modelCatalog/modelsListCache.js";
 
@@ -54,7 +53,9 @@ export async function GET(request, { params }) {
       return unauthorizedModelsResponse(auth.error, auth.status);
     }
     const keyRecord = auth.keyRecord;
-    const allowedModels = parseModelList(keyRecord.allowedModels);
+    const scope = keyCatalogueScope(keyRecord);
+    const allowedModels = scope.allowedModels;
+    const forceOpts = { forceModel: scope.forceModel, forceProvider: scope.forceProvider };
 
     const { model } = await params;
     const path = Array.isArray(model) ? model : [model];
@@ -66,8 +67,8 @@ export async function GET(request, { params }) {
       // key and the kind, so an image list is never handed to an embeddings
       // caller and one caller's allow-list is never handed to another's.
       const { value: data, coalesced } = await coalesceModelsBuild(
-        `${identifier}:${keyRecord.id}:${allowedModels ? allowedModels.join(",") : "*"}`,
-        () => buildModelsList(kindFilter, { allowedModels })
+        `${identifier}:${keyRecord.id}:${scope.tag}`,
+        () => buildModelsList(kindFilter, { allowedModels, ...forceOpts })
       );
       return new Response(JSON.stringify({ object: "list", data }), {
         headers: modelsListHeaders({ "x-models-build": coalesced ? "coalesced" : "fresh" }),
@@ -78,8 +79,8 @@ export async function GET(request, { params }) {
     // entry, rather than a cached per-model verdict: caching the verdict would
     // keep answering 404 for up to the TTL after a model is added.
     const { value: data } = await coalesceModelsBuild(
-      `llm:${keyRecord.id}:${allowedModels ? allowedModels.join(",") : "*"}`,
-      () => buildModelsList([LLM_KIND], { allowedModels })
+      `llm:${keyRecord.id}:${scope.tag}`,
+      () => buildModelsList([LLM_KIND], { allowedModels, ...forceOpts })
     );
 
     const matchedModel = data.find((candidate) => candidate.id === identifier);

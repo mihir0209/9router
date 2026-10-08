@@ -43,6 +43,20 @@ import {
 
 // LLM kind sentinel — combos/models with no explicit kind default to LLM
 const LLM_KIND = "llm";
+
+/**
+ * Catalogue scope for a key: allow-list plus forced pins (upstream #4541,
+ * adapted). The tag fingerprints the scope for cache keys so an admin change
+ * to pins rebuilds instead of serving a stale list.
+ */
+export function keyCatalogueScope(keyRecord) {
+  const allowedModels = parseModelList(keyRecord.allowedModels);
+  const forceModel = String(keyRecord?.forceModel || "").trim();
+  const forceProvider = String(keyRecord?.forceProvider || "").trim();
+  const allowTag = allowedModels ? allowedModels.join(",") : "*";
+  const tag = `${allowTag}|force:${forceModel || "-"}@${forceProvider || "-"}`;
+  return { allowedModels, forceModel, forceProvider, tag };
+}
 const CLOUDFLARE_STATIC_PROVIDER_BLOCKLIST = new Set(["opencode"]);
 // Live provider fan-out is never allowed on Workers: it cannot complete inside
 // the CPU budget, so `live` degrades to the cached catalogue there.
@@ -243,12 +257,17 @@ export async function buildModelsList(kindFilter, options = {}) {
   const allowLive = modelsListSource === "live" && options.skipDynamicFetch !== true && !isCloudflareRuntime();
 
   // An allow-list on the caller's key narrows the list. Empty or "*" means
-  // unrestricted, and then the full catalog is correct.
+  // unrestricted, and then the full catalog is correct. A forced
+  // provider/model pin (options.force*) narrows independently of the
+  // allow-list: a key pinned to one target sees only that target.
   const rawAllowed = options.allowedModels;
   const allowedList = typeof rawAllowed === "string"
     ? rawAllowed.split(",").map((s) => s.trim()).filter(Boolean)
     : Array.isArray(rawAllowed) ? rawAllowed.map((s) => String(s).trim()).filter(Boolean) : [];
   const restrictedModels = allowedList.length > 0 && !allowedList.includes("*") ? allowedList : null;
+  const forceModel = String(options.forceModel || "").trim();
+  const forceProvider = String(options.forceProvider || "").trim();
+  const forceRestricted = !restrictedModels && (forceModel || forceProvider);
   const providerConcurrency = options.providerConcurrency || MODEL_PROVIDER_CONCURRENCY;
   const providerTimeoutMs = options.providerTimeoutMs || MODEL_PROVIDER_TIMEOUT_MS;
   // Pre-resolved inputs, when the caller already has them. This is what lets
@@ -297,7 +316,7 @@ export async function buildModelsList(kindFilter, options = {}) {
   //   client seeing a model it cannot usefully call; the cost of hiding is a
   //   client unable to see one it can. The admin made the claim, so the claim
   //   is surfaced.
-  if (restrictedModels) {
+  if (restrictedModels || forceRestricted) {
     const emitted = new Set();
     // "providerAlias/modelId" -> service kind, from the static catalogue. Built
     // here rather than globally so the restricted path stays independent of how
@@ -317,7 +336,7 @@ export async function buildModelsList(kindFilter, options = {}) {
     // Flatten each allowed entry. A combo is authorised by name (see
     // enforceApiKeyRestrictions), so listing one means listing what it can
     // actually reach — a client that can call `auto` should see its members.
-      const wanted = [];
+    let wanted = [];
       const seenCombo = new Set();
       const expandCombo = (name) => {
         if (seenCombo.has(name)) return;   // bounded: a cyclic combo stops here
@@ -329,7 +348,7 @@ export async function buildModelsList(kindFilter, options = {}) {
           else wanted.push(member);
         }
       };
-      for (const entry of restrictedModels) {
+      for (const entry of (restrictedModels || [])) {
         // A combo is only in scope for the kind being asked about. Without this
         // /v1/models/image answered a restricted key with its chat models: the
         // branch built the allow-list expansion and returned, never consulting
@@ -342,6 +361,22 @@ export async function buildModelsList(kindFilter, options = {}) {
           wanted.push(entry);
         }
       }
+
+    // Forced pins narrow the already-computed want list. A forceModel names
+    // the single visible target (combo expansion above still applies, so a
+    // pinned combo lists what it can reach — mirroring enforcement, which
+    // authorises combos by name). A forceProvider keeps only entries whose
+    // alias prefix is the pinned provider; combos prove no provider and drop
+    // out, exactly like enforcement's fail-closed pin.
+    if (forceModel) {
+      wanted = [forceModel];
+      if (comboByName[forceModel]) {
+        wanted = [];
+        expandCombo(forceModel);
+      }
+    } else if (forceProvider) {
+      wanted = wanted.filter((id) => String(id).split("/")[0] === forceProvider);
+    }
 
     // alias -> full id, so an allow-list entry written as an alias still resolves
     const aliasToFull = {};
@@ -646,12 +681,13 @@ export async function GET(request) {
       return unauthorizedModelsResponse(auth.error, auth.status);
     }
     const keyRecord = auth.keyRecord;
-    const allowedModels = parseModelList(keyRecord.allowedModels);
+    const scope = keyCatalogueScope(keyRecord);
+    const allowedModels = scope.allowedModels;
 
     // Read current state, fingerprint it, and rebuild only if the projection
     // would differ. A polling client that sends If-None-Match gets a 304 with no
     // body at all.
-    const allowTag = allowedModels ? allowedModels.join(",") : "*";
+    const allowTag = scope.tag;
     // The source (live vs cached) changes which models are emitted, so it is part
     // of the fingerprint. A settings change from live to cached must rebuild.
     const modelsListSource = await resolveModelsListSource();
@@ -666,7 +702,7 @@ export async function GET(request) {
         };
       },
       project: async (inputs) => {
-        const data = await buildModelsList([LLM_KIND], { skipDynamicFetch, allowedModels, inputs });
+        const data = await buildModelsList([LLM_KIND], { skipDynamicFetch, allowedModels, forceModel: scope.forceModel, forceProvider: scope.forceProvider, inputs });
         return JSON.stringify({ object: "list", data });
       },
     });
