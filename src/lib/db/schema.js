@@ -105,6 +105,8 @@ export const TABLES = {
       maxConcurrentRequests: "INTEGER DEFAULT 0",
       allowedProviders: "TEXT DEFAULT ''",
       blockedProviders: "TEXT DEFAULT ''",
+      forceProvider: "TEXT DEFAULT ''",
+      forceModel: "TEXT DEFAULT ''",
       allowedEndpoints: "TEXT DEFAULT ''",
       blockedEndpoints: "TEXT DEFAULT ''",
       metadata: "TEXT DEFAULT '{}'",

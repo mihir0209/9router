@@ -13,6 +13,7 @@ const API_KEY_FIELDS = [
   "billingMode", "byokProvider", "byokCredentialsCiphertext",
   "byokCredsEncVersion", "regenerateVersion",
   "maxConcurrentRequests", "allowedProviders", "blockedProviders",
+  "forceProvider", "forceModel",
   "allowedEndpoints", "blockedEndpoints", "metadata", "updatedAt",
 ];
 
@@ -47,6 +48,8 @@ function rowToKey(row) {
     maxConcurrentRequests: row.maxConcurrentRequests || 0,
     allowedProviders: row.allowedProviders || "",
     blockedProviders: row.blockedProviders || "",
+    forceProvider: row.forceProvider || "",
+    forceModel: row.forceModel || "",
     allowedEndpoints: row.allowedEndpoints || "",
     blockedEndpoints: row.blockedEndpoints || "",
     metadata: (() => { try { return JSON.parse(row.metadata || "{}"); } catch { return {}; } })(),
@@ -241,6 +244,8 @@ export async function createApiKey(name, machineId, options = {}) {
     maxConcurrentRequests: options.maxConcurrentRequests || 0,
     allowedProviders: options.allowedProviders || "",
     blockedProviders: options.blockedProviders || "",
+    forceProvider: typeof options.forceProvider === "string" ? options.forceProvider.trim() : (options.forceProvider || ""),
+    forceModel: typeof options.forceModel === "string" ? options.forceModel.trim() : (options.forceModel || ""),
     allowedEndpoints: options.allowedEndpoints || "",
     blockedEndpoints: options.blockedEndpoints || "",
     metadata: typeof options.metadata === "string" ? options.metadata : JSON.stringify(options.metadata || {}),

@@ -173,5 +173,5 @@ export async function validateAndEnforceApiKey(request, body, handlerName = "AUT
   }
 
   recordMetric("api_key_allowed_total", 1, { model: requestModel || "unknown" });
-  return { allowed: true, apiKey, keyRecord, release: restrictionCheck.release || null };
+  return { allowed: true, apiKey, keyRecord, release: restrictionCheck.release || null, routedModel: restrictionCheck.routedModel || null };
 }

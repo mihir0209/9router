@@ -97,12 +97,26 @@ export async function enforceApiKeyRestrictions(apiKey, request, body) {
     if (Number.isFinite(expiresAt.getTime()) && expiresAt <= new Date()) return { allowed: false, error: "API key has expired", status: 401 };
   }
 
+  // Forced routing (upstream #4541, adapted): pin the key to one model and/or
+  // provider. A forceModel rewrites the request before any other check, so all
+  // downstream logic (combos, catalogue, upstream routing) sees the pinned
+  // target. The pin itself is the authorization: the allowedModels gate is
+  // skipped for a rewritten request, while blockedModels still applies.
+  const forceProvider = String(keyRecord.forceProvider || "").trim();
+  const forceModel = String(keyRecord.forceModel || "").trim();
+  let routedModel = null;
+  if (forceModel && body && typeof body === "object" && String(body.model || "").trim() !== forceModel) {
+    console.log(`[apiKey] force routing: asked="${body.model}" -> "${forceModel}"`);
+    body.model = forceModel;
+    routedModel = forceModel;
+  }
+
   const model = body?.model;
   const resolvedRequest = await resolveRequestedModels(model, body);
   const requestedModels = new Set(resolvedRequest.models);
   if (model) {
     const allowedModels = parseList(keyRecord.allowedModels);
-    if (allowedModels.length > 0 && !allowedModels.includes("*")) {
+    if (!routedModel && allowedModels.length > 0 && !allowedModels.includes("*")) {
       // 1. The id the client actually asked for wins. A key that lists a combo
       //    name may call that combo, which is the intuitive admin semantic and
       //    the only thing that makes such a key usable at all.
@@ -131,6 +145,9 @@ export async function enforceApiKeyRestrictions(apiKey, request, body) {
   const providers = resolvedRequest.providers;
   const allowedProviders = parseList(keyRecord.allowedProviders);
   const blockedProviders = parseList(keyRecord.blockedProviders);
+  // A forced provider is fail-closed: every resolved leaf must belong to it,
+  // and an unresolvable request (no provider) cannot prove it does.
+  if (forceProvider && (!providers.length || providers.some((provider) => provider !== forceProvider))) return { allowed: false, error: `This API key is pinned to provider '${forceProvider}'`, status: 403 };
   if (allowedProviders.length > 0 && (!providers.length || providers.some((provider) => !allowedProviders.includes(provider) && !allowedProviders.includes("*")))) return { allowed: false, error: "Provider is not allowed for this API key", status: 403 };
   if (providers.some((provider) => blockedProviders.includes(provider))) return { allowed: false, error: "Provider is blocked for this API key", status: 403 };
 
@@ -188,5 +205,5 @@ export async function enforceApiKeyRestrictions(apiKey, request, body) {
     }
   }
 
-  return { allowed: true, lease: release ? true : null, release };
+  return { allowed: true, lease: release ? true : null, release, routedModel };
 }

@@ -73,6 +73,11 @@ function KeyCard({ entry }) {
           {entry.tokenLimitMonthly > 0 && <span>Monthly cap: {fmt(entry.tokenLimitMonthly)} tokens</span>}
         </div>
       )}
+      {(entry.forceModel || entry.forceProvider) && (
+        <div className="truncate text-[11px] font-semibold text-primary" title={`pinned to ${entry.forceModel || entry.forceProvider}`}>
+          Pinned: {entry.forceModel || entry.forceProvider}
+        </div>
+      )}
       {(entry.allowedModels || entry.blockedModels) && (
         <div className="truncate text-[11px] text-text-muted" title={`allow: ${entry.allowedModels || "—"} / block: ${entry.blockedModels || "—"}`}>
           Models: {entry.allowedModels ? `allow ${entry.allowedModels}` : "all"} {entry.blockedModels ? `· block ${entry.blockedModels}` : ""}

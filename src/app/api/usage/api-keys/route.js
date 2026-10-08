@@ -37,6 +37,8 @@ export async function GET(request) {
         rateLimitWindowSeconds: key.rateLimitWindowSeconds,
         tokenLimitDaily: key.tokenLimitDaily,
         tokenLimitMonthly: key.tokenLimitMonthly,
+        forceProvider: key.forceProvider || "",
+        forceModel: key.forceModel || "",
         allowedModels: key.allowedModels,
         blockedModels: key.blockedModels,
         allowedIPs: key.allowedIPs,
