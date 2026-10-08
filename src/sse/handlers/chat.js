@@ -84,7 +84,8 @@ export async function handleChat(request, clientRawRequest = null) {
   // Claude Code marks a 1M-context request as `<model>[1m]`; the marker matches
   // no combo, alias or provider/model pair, so it must not reach resolution.
   // The capability travels in the anthropic-beta header, forwarded as-is.
-  const { model: modelStr, contextMarker } = stripModelContextMarker(body.model);
+  const { model: inputModelStr, contextMarker } = stripModelContextMarker(body.model);
+  let modelStr = inputModelStr;
   if (contextMarker) body.model = modelStr;
 
   // Request summary is emitted as the unified "▶" line in chatCore (has fmt/thinking/account)
@@ -104,6 +105,15 @@ export async function handleChat(request, clientRawRequest = null) {
   const keyCheck = await validateAndEnforceApiKey(request, body, "CHAT");
   if (!keyCheck.allowed) {
     return keyCheck.response;
+  }
+  // Forced routing rewrote body.model inside enforcement, but modelStr was
+  // captured before it. Re-sync so every downstream route sees the pin.
+  // (forceModel is meaningful on model-bearing endpoints; forceProvider pins
+  // need no rewrite and apply in search/fetch untouched.)
+  if (keyCheck.routedModel) {
+    log.info("AUTH", `API key routing override: ${modelStr || "<omitted>"} -> ${keyCheck.routedModel}`);
+    modelStr = keyCheck.routedModel;
+    body.model = keyCheck.routedModel;
   }
   body = stripRequestUser(body, settings.stripRequestUser === true);
   const keyContext = { apiKey: keyCheck.apiKey, keyRecord: keyCheck.keyRecord, release: keyCheck.release };
