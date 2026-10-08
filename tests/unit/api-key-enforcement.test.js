@@ -364,3 +364,29 @@ describe("API Key Enforcement - combo model restrictions", () => {
     expect(result.allowed).toBe(false);
   });
 });
+
+describe("API Key Enforcement - wildcard/family allowlists (modelAcl)", () => {
+  async function setupKey(options) {
+    const { createApiKey } = await import("@/lib/db/repos/apiKeysRepo.js");
+    const { getConsistentMachineId } = await import("@/shared/utils/machineId.js");
+    const machineId = await getConsistentMachineId();
+    return createApiKey(`acl-test-${Date.now()}-${Math.random().toString(36).slice(2)}`, machineId, options);
+  }
+
+  it("wildcard allowlist permits the family and denies outside it", async () => {
+    const key = await setupKey({ allowedModels: "openai/*" });
+    const { enforceApiKeyRestrictions } = await import("@/sse/services/apiKeyEnforcement.js");
+    const ok = await enforceApiKeyRestrictions(key.key, makeRequest(), { model: "openai/gpt-4o" });
+    expect(ok.allowed).toBe(true);
+    const denied = await enforceApiKeyRestrictions(key.key, makeRequest(), { model: "anthropic/claude-opus" });
+    expect(denied.allowed).toBe(false);
+    expect(denied.status).toBe(403);
+  });
+
+  it("family prefix allowlist permits variants but not lookalikes", async () => {
+    const key = await setupKey({ allowedModels: "deepseek" });
+    const { enforceApiKeyRestrictions } = await import("@/sse/services/apiKeyEnforcement.js");
+    const ok = await enforceApiKeyRestrictions(key.key, makeRequest(), { model: "deepseek-chat" });
+    expect(ok.allowed).toBe(true);
+  });
+});

@@ -1,5 +1,6 @@
 import { getApiKeyByKey, getCombos } from "@/lib/localDb";
 import { getModelInfo } from "@/sse/services/model.js";
+import { isModelAllowed } from "@/sse/services/modelAcl.js";
 import { getApiKeyTokenUsage } from "@/lib/db/repos/usageRepo.js";
 import { checkBudget } from "@/lib/budgetService.js";
 import { coordinatorCall } from "@/lib/coordinator/client.js";
@@ -119,8 +120,9 @@ export async function enforceApiKeyRestrictions(apiKey, request, body) {
     if (!routedModel && allowedModels.length > 0 && !allowedModels.includes("*")) {
       // 1. The id the client actually asked for wins. A key that lists a combo
       //    name may call that combo, which is the intuitive admin semantic and
-      //    the only thing that makes such a key usable at all.
-      const rawAllowed = allowedModels.includes(String(model).trim());
+      //    the only thing that makes such a key usable at all. Wildcards and
+      //    family prefixes match here too (modelAcl).
+      const rawAllowed = isModelAllowed(allowedModels, String(model).trim());
       // 3. For a concrete request, fall back to the resolved provider/model so
       //    existing configs keep working (e.g. asking for `gpt-4o` against an
       //    allow-list entry of `openai/gpt-4o`).
@@ -130,7 +132,7 @@ export async function enforceApiKeyRestrictions(apiKey, request, body) {
       //    silently widen a key restricted to ONE member of a combo into access
       //    to ALL of them. A combo is authorised by name, not by its members.
       const resolvedAllowed = !resolvedRequest.isCombo
-        && [...requestedModels].some((entry) => allowedModels.includes(entry));
+        && [...requestedModels].some((entry) => isModelAllowed(allowedModels, entry));
       if (!rawAllowed && !resolvedAllowed) {
         // Log what the request actually expands to: the 403 quotes the raw ask
         // while the decision was made on the resolved list, which is what made

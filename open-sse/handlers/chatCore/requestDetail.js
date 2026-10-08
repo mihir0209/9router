@@ -14,7 +14,17 @@ const OPTIONAL_PARAMS = [
 ];
 
 export function extractRequestConfig(body, stream) {
-  const config = { messages: body.messages || [], model: body.model, stream };
+  // Claude-native (system/prompt) and Responses-style bodies carry the prompt
+  // outside messages[]; fold them in so request logs show the full prompt.
+  let messages = Array.isArray(body.messages) ? [...body.messages] : [];
+  if (body.system && !messages.some((m) => m?.role === "system")) {
+    const sysContent = typeof body.system === "string" ? body.system : JSON.stringify(body.system);
+    messages.unshift({ role: "system", content: sysContent });
+  }
+  if (messages.length === 0 && body.prompt) {
+    messages = [{ role: "user", content: typeof body.prompt === "string" ? body.prompt : JSON.stringify(body.prompt) }];
+  }
+  const config = { messages, model: body.model, stream };
   for (const param of OPTIONAL_PARAMS) {
     if (body[param] !== undefined) config[param] = body[param];
   }
