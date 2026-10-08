@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../src/app/api/v1/models/route.js", () => ({
   buildModelsList: mocks.buildModelsList,
+  keyCatalogueScope: (keyRecord) => ({ allowedModels: null, forceModel: "", forceProvider: "", tag: "*" }),
 }));
 
 // /v1/models is authenticated: every catalogue route requires a live key, so
@@ -47,7 +48,7 @@ describe("GET /v1/models/{id}", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(chatModel);
-    expect(mocks.buildModelsList).toHaveBeenCalledWith(["llm"], { allowedModels: null });
+    expect(mocks.buildModelsList).toHaveBeenCalledWith(["llm"], { allowedModels: null, forceModel: "", forceProvider: "" });
   });
 
   it("also handles a decoded slash in a single catch-all segment", async () => {
@@ -67,7 +68,7 @@ describe("GET /v1/models/{id}", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ object: "list", data: [imageModel] });
-    expect(mocks.buildModelsList).toHaveBeenCalledWith(["image"], { allowedModels: null });
+    expect(mocks.buildModelsList).toHaveBeenCalledWith(["image"], { allowedModels: null, forceModel: "", forceProvider: "" });
   });
 
   it("returns an OpenAI-style model_not_found response for an unknown model", async () => {
