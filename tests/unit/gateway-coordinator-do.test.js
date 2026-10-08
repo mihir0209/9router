@@ -72,6 +72,20 @@ describe("GatewayCoordinator — rate limiting", () => {
     expect(await coordinator.checkRateLimit({ keyId: "k2", limit: 1, windowMs: 60_000, now: 1_000 }))
       .toMatchObject({ allowed: true, count: 1 });
   });
+
+  it("peekRateLimit reports state without consuming budget", async () => {
+    const { do: coordinator } = createCoordinator();
+    expect(await coordinator.peekRateLimit({ keyId: "k1", limit: 2, windowMs: 60_000, now: 1_000 }))
+      .toMatchObject({ count: 0, remaining: 2, resetAt: 61_000 });
+    await coordinator.checkRateLimit({ keyId: "k1", limit: 2, windowMs: 60_000, now: 2_000 });
+    // Peek twice: neither burns budget.
+    expect(await coordinator.peekRateLimit({ keyId: "k1", limit: 2, windowMs: 60_000, now: 3_000 }))
+      .toMatchObject({ count: 1, remaining: 1 });
+    expect(await coordinator.peekRateLimit({ keyId: "k1", limit: 2, windowMs: 60_000, now: 4_000 }))
+      .toMatchObject({ count: 1, remaining: 1 });
+    expect(await coordinator.checkRateLimit({ keyId: "k1", limit: 2, windowMs: 60_000, now: 5_000 }))
+      .toMatchObject({ allowed: true, count: 2, remaining: 0 });
+  });
 });
 
 describe("GatewayCoordinator — concurrency leases", () => {

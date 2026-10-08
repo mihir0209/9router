@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getUsageStats } from "@/lib/usageDb";
 import { getApiKeys } from "@/lib/localDb";
 import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
+import { coordinatorCall } from "@/lib/coordinator/client.js";
 
 export const dynamic = "force-dynamic";
 
@@ -108,6 +109,33 @@ export async function GET(request) {
 
     // Sort by total requests descending
     keys.sort((a, b) => b.usage.requests - a.usage.requests);
+
+    // Live rate-limit state per key (read-only peek: never burns budget).
+    // Fail-open per key so one coordinator hiccup doesn't blank the tab.
+    await Promise.all(keys.map(async (entry) => {
+      const full = allKeys.find((k) => k.id === entry.id);
+      const limit = Number(full?.rateLimitRequests) || 0;
+      if (!limit) {
+        entry.rateLimit = { limited: false };
+        return;
+      }
+      try {
+        const windowMs = (Number(full.rateLimitWindowSeconds) || 60) * 1000;
+        const state = await coordinatorCall("peekRateLimit",
+          { keyId: full.id, limit, windowMs, now: Date.now() },
+          `tenant:${full.ownerRef || full.id}`);
+        entry.rateLimit = {
+          limited: true,
+          limit,
+          windowSeconds: Number(full.rateLimitWindowSeconds) || 60,
+          remaining: state?.remaining ?? null,
+          used: state?.count ?? null,
+          resetAt: state?.resetAt ?? null,
+        };
+      } catch {
+        entry.rateLimit = { limited: true, limit, remaining: null };
+      }
+    }));
 
     // Summary totals
     const summary = {

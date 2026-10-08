@@ -22,6 +22,20 @@ export class GatewayCoordinator extends DurableObject {
     };
   }
 
+  // Read-only twin of checkRateLimit for dashboards: same window math, no
+  // increment, so polling "remaining" never burns budget.
+  async peekRateLimit({ keyId, limit, windowMs, now = Date.now() }) {
+    const key = `rate:${keyId}`;
+    const current = await this.ctx.storage.get(key);
+    const active = current && now - current.windowStart < windowMs ? current : { count: 0, windowStart: now };
+    const resetAt = active.windowStart + windowMs;
+    return {
+      count: active.count,
+      remaining: Math.max(limit - active.count, 0),
+      resetAt,
+    };
+  }
+
   async beginRequest({ keyId, maxConcurrent, now = Date.now() }) {
     const key = `active:${keyId}`;
     const current = await this.ctx.storage.get(key);

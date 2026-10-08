@@ -37,6 +37,15 @@ function memoryCall(method, payload = {}) {
     const resetAt = active.windowStart + payload.windowMs;
     return { allowed: active.count <= payload.limit, count: active.count, remaining: Math.max(payload.limit - active.count, 0), resetAt };
   }
+  // Read-only twin of checkRateLimit for dashboards: same window math, no
+  // increment, so polling "remaining" never burns budget.
+  if (method === "peekRateLimit") {
+    const key = `${payload.keyId}`;
+    const current = state.rate.get(key);
+    const active = current && now - current.windowStart < payload.windowMs ? current : { count: 0, windowStart: now };
+    const resetAt = active.windowStart + payload.windowMs;
+    return { count: active.count, remaining: Math.max(payload.limit - active.count, 0), resetAt };
+  }
   if (method === "beginRequest") {
     const current = state.active.get(payload.keyId) || [];
     const active = current.filter((lease) => lease.expiresAt > now);
