@@ -351,7 +351,10 @@ export default function PlaygroundClient() {
       .then((r) => r.json())
       .then((data) => {
         const keys = Array.isArray(data) ? data : data?.keys || [];
-        const active = keys.filter((k) => k.isActive !== false);
+        // Workspace keys (ownerRef) are serialized without their secret, which
+        // would crash the option label's k.key.slice below and send
+        // "Bearer undefined" upstream. Only usable secrets are selectable.
+        const active = keys.filter((k) => k.isActive !== false && typeof k.key === "string" && k.key);
         setApiKeys(active);
         setSelectedKey((prev) => prev || (active.length > 0 ? active[0].key : prev));
       })
@@ -768,10 +771,10 @@ export default function PlaygroundClient() {
             onChange={(e) => setSelectedKey(e.target.value)}
             className="w-full rounded-lg border border-border-subtle bg-surface px-3 py-2 text-xs font-mono text-text-main outline-none focus:border-primary"
           >
-            {apiKeys.length === 0 && <option value="">No local keys (local mode)</option>}
+            {apiKeys.length === 0 && <option value="">No usable local keys (local mode)</option>}
             {apiKeys.map((k) => (
               <option key={k.id} value={k.key}>
-                {k.name ? `${k.name} (${k.key.slice(0, 10)}...)` : k.key}
+                {k.name ? `${k.name} (${(k.key || "").slice(0, 10)}...)` : (k.key || k.maskedKey || k.id)}
               </option>
             ))}
           </select>
