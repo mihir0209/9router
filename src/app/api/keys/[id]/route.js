@@ -73,6 +73,7 @@ export async function PUT(request, { params }) {
       "expiresAt", "description",
       "budgetUsd", "budgetResetHours", "budgetWindowStartedAt", "billingMode",
       "maxConcurrentRequests", "allowedProviders", "blockedProviders",
+      "forceProvider", "forceModel",
       "allowedEndpoints", "blockedEndpoints", "metadata",
     ];
     for (const field of allowedFields) {

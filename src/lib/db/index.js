@@ -108,6 +108,7 @@ export async function exportDb() {
       byokCredsEncVersion: r.byokCredsEncVersion ?? null, regenerateVersion: r.regenerateVersion ?? 0,
       maxConcurrentRequests: r.maxConcurrentRequests || 0,
       allowedProviders: r.allowedProviders || "", blockedProviders: r.blockedProviders || "",
+      forceProvider: r.forceProvider || "", forceModel: r.forceModel || "",
       allowedEndpoints: r.allowedEndpoints || "", blockedEndpoints: r.blockedEndpoints || "",
       metadata: r.metadata || "{}", updatedAt: r.updatedAt || r.createdAt,
     })),
@@ -170,7 +171,7 @@ export async function importDb(payload) {
     }
     for (const k of payload.apiKeys || []) {
       db.run(
-        `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly, allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description, ownerRef, budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode, byokProvider, byokCredentialsCiphertext, byokCredsEncVersion, regenerateVersion, maxConcurrentRequests, allowedProviders, blockedProviders, allowedEndpoints, blockedEndpoints, metadata, updatedAt) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly, allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description, ownerRef, budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode, byokProvider, byokCredentialsCiphertext, byokCredsEncVersion, regenerateVersion, maxConcurrentRequests, allowedProviders, blockedProviders, forceProvider, forceModel, allowedEndpoints, blockedEndpoints, metadata, updatedAt) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [k.id, k.key, k.name || null, k.machineId || null, k.isActive === false ? 0 : 1, k.createdAt || new Date().toISOString(),
           k.rateLimitRequests || 0, k.rateLimitWindowSeconds || 60, k.tokenLimitDaily || 0, k.tokenLimitMonthly || 0,
          k.allowedModels || "", k.blockedModels || "", k.allowedIPs || "", k.blockedIPs || "", k.expiresAt || "", k.description || "",
@@ -178,6 +179,7 @@ export async function importDb(payload) {
          k.billingMode || "credits", k.byokProvider ?? null, k.byokCredentialsCiphertext ?? null,
           k.byokCredsEncVersion ?? null, k.regenerateVersion ?? 0,
           k.maxConcurrentRequests || 0, k.allowedProviders || "", k.blockedProviders || "",
+          k.forceProvider || "", k.forceModel || "",
           k.allowedEndpoints || "", k.blockedEndpoints || "", typeof k.metadata === "string" ? k.metadata : JSON.stringify(k.metadata || {}), k.updatedAt || k.createdAt || new Date().toISOString()]
       );
     }
