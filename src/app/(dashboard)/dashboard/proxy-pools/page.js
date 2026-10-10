@@ -1142,7 +1142,6 @@ export default function ProxyPoolsPage() {
                     {pool.type === "netlify" && (
                       <Badge variant="default" size="sm">netlify relay</Badge>
                     )}
-                    )}
                     <Badge variant="default" size="sm">
                       {pool.boundConnectionCount || 0} bound
                     </Badge>
