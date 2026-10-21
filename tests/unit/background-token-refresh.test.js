@@ -34,7 +34,7 @@ describe("selectConnectionsNeedingRefresh", () => {
 
   it("selects oauth grok-cli connection expiring in 10 minutes", async () => {
     const { selectConnectionsNeedingRefresh } = await import(
-      "../../src/sse/services/backgroundTokenRefresh.js"
+      "../../src/sse/services/backgroundTokenRefresh.mjs"
     );
     const list = selectConnectionsNeedingRefresh(
       [conn({ expiresAt: new Date(NOW + 10 * 60 * 1000).toISOString() })],
@@ -46,7 +46,7 @@ describe("selectConnectionsNeedingRefresh", () => {
 
   it("skips connection expiring in 2 hours", async () => {
     const { selectConnectionsNeedingRefresh } = await import(
-      "../../src/sse/services/backgroundTokenRefresh.js"
+      "../../src/sse/services/backgroundTokenRefresh.mjs"
     );
     const list = selectConnectionsNeedingRefresh(
       [conn({ expiresAt: new Date(NOW + 2 * 60 * 60 * 1000).toISOString() })],
@@ -57,7 +57,7 @@ describe("selectConnectionsNeedingRefresh", () => {
 
   it("never selects apikey connections", async () => {
     const { selectConnectionsNeedingRefresh } = await import(
-      "../../src/sse/services/backgroundTokenRefresh.js"
+      "../../src/sse/services/backgroundTokenRefresh.mjs"
     );
     const list = selectConnectionsNeedingRefresh(
       [
@@ -71,7 +71,7 @@ describe("selectConnectionsNeedingRefresh", () => {
 
   it("skips oauth connection without refreshToken", async () => {
     const { selectConnectionsNeedingRefresh } = await import(
-      "../../src/sse/services/backgroundTokenRefresh.js"
+      "../../src/sse/services/backgroundTokenRefresh.mjs"
     );
     const list = selectConnectionsNeedingRefresh(
       [conn({ refreshToken: null }), conn({ id: "c2", refreshToken: undefined })],
@@ -82,7 +82,7 @@ describe("selectConnectionsNeedingRefresh", () => {
 
   it("selects already-expired oauth connection", async () => {
     const { selectConnectionsNeedingRefresh } = await import(
-      "../../src/sse/services/backgroundTokenRefresh.js"
+      "../../src/sse/services/backgroundTokenRefresh.mjs"
     );
     const list = selectConnectionsNeedingRefresh(
       [conn({ expiresAt: new Date(NOW - 60 * 1000).toISOString() })],
@@ -126,7 +126,7 @@ describe("runBackgroundTokenRefreshTick", () => {
     const loadConnections = vi.fn(async () => [due, notDue, apikey]);
 
     const { runBackgroundTokenRefreshTick } = await import(
-      "../../src/sse/services/backgroundTokenRefresh.js"
+      "../../src/sse/services/backgroundTokenRefresh.mjs"
     );
 
     await expect(
@@ -147,7 +147,7 @@ describe("runBackgroundTokenRefreshTick", () => {
     ]);
 
     const { runBackgroundTokenRefreshTick } = await import(
-      "../../src/sse/services/backgroundTokenRefresh.js"
+      "../../src/sse/services/backgroundTokenRefresh.mjs"
     );
 
     await runBackgroundTokenRefreshTick({ loadConnections, refreshConnection });
@@ -162,7 +162,7 @@ describe("runBackgroundTokenRefreshTick", () => {
     });
 
     const { runBackgroundTokenRefreshTick } = await import(
-      "../../src/sse/services/backgroundTokenRefresh.js"
+      "../../src/sse/services/backgroundTokenRefresh.mjs"
     );
 
     await expect(
@@ -175,7 +175,7 @@ describe("runBackgroundTokenRefreshTick", () => {
 describe("start/stop guards", () => {
   afterEach(async () => {
     vi.unstubAllEnvs();
-    const mod = await import("../../src/sse/services/backgroundTokenRefresh.js");
+    const mod = await import("../../src/sse/services/backgroundTokenRefresh.mjs");
     mod.stopBackgroundTokenRefresh();
     vi.resetModules();
   });
@@ -183,7 +183,7 @@ describe("start/stop guards", () => {
   it("honors DISABLE_BACKGROUND_TOKEN_REFRESH kill-switch", async () => {
     vi.stubEnv("DISABLE_BACKGROUND_TOKEN_REFRESH", "1");
     const { startBackgroundTokenRefresh, stopBackgroundTokenRefresh } = await import(
-      "../../src/sse/services/backgroundTokenRefresh.js"
+      "../../src/sse/services/backgroundTokenRefresh.mjs"
     );
     expect(startBackgroundTokenRefresh()).toBe(false);
     stopBackgroundTokenRefresh();
@@ -192,7 +192,7 @@ describe("start/stop guards", () => {
   it("is idempotent: second start is no-op", async () => {
     vi.stubEnv("DISABLE_BACKGROUND_TOKEN_REFRESH", "");
     const { startBackgroundTokenRefresh, stopBackgroundTokenRefresh } = await import(
-      "../../src/sse/services/backgroundTokenRefresh.js"
+      "../../src/sse/services/backgroundTokenRefresh.mjs"
     );
     const first = startBackgroundTokenRefresh({ intervalMs: 60_000 });
     const second = startBackgroundTokenRefresh({ intervalMs: 60_000 });
