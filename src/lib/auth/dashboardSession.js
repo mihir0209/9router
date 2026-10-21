@@ -1,5 +1,6 @@
 import { SignJWT, jwtVerify } from "jose";
 import { getSettings } from "@/lib/localDb";
+import { ensureJwtSecretEnv } from "@/lib/auth/jwtSecret";
 
 const DEFAULT_PASSWORD = "123456";
 const SESSION_MAX_AGE_SEC = 24 * 60 * 60;
@@ -9,21 +10,12 @@ function loadJwtSecret() {
   if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
     throw new Error("JWT_SECRET is required when running on Cloudflare Workers");
   }
-  const fs = process.getBuiltinModule?.("node:fs");
-  const path = process.getBuiltinModule?.("node:path");
-  const os = process.getBuiltinModule?.("node:os");
-  const dataDir = process.env.DATA_DIR || (os ? os.homedir() + "/.9router" : null);
-  if (!fs || !path || !dataDir) return null;
-  const file = path.join(dataDir, "jwt-secret");
-  try {
-    return fs.readFileSync(file, "utf8").trim();
-  } catch {}
-  fs.mkdirSync(dataDir, { recursive: true });
-  const bytes = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(bytes);
-  const generated = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  fs.writeFileSync(file, generated, { mode: 0o600 });
-  return generated;
+  // Not set in the environment yet: take it from (or create) the data-dir file
+  // and publish it, so the Edge runtime — which cannot read files — verifies
+  // against the same key instead of a different one.
+  const published = ensureJwtSecretEnv();
+  if (published) return published;
+  return null;
 }
 
 let secretBytes = null;

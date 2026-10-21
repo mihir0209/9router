@@ -1,5 +1,13 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    // Publish the dashboard JWT secret into the environment before the first
+    // request. The proxy runs in the Edge runtime, which has no filesystem, so
+    // it can only verify the session token against process.env — without this
+    // the Edge side uses a different key and every dashboard request is
+    // bounced back to /login.
+    const { ensureJwtSecretEnv } = await import("@/lib/auth/jwtSecret");
+    ensureJwtSecretEnv();
+
     const { initConsoleLogCapture } = await import("@/lib/consoleLogBuffer");
     initConsoleLogCapture();
 

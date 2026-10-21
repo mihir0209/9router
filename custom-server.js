@@ -32,6 +32,35 @@ const origCreate = http.createServer.bind(http);
 const PEER_TOKEN = crypto.randomBytes(24).toString("hex");
 process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
 
+// Publish the dashboard JWT secret into the environment before the server
+// boots. The proxy runs in the Edge runtime and has no filesystem, so it can
+// only verify the session token against process.env; without this it uses a
+// different key than the route handler that signed it and every dashboard
+// request is bounced back to /login.
+function publishJwtSecret() {
+  if (process.env.JWT_SECRET) return;
+  try {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const os = require("node:os");
+    const dataDir = process.env.DATA_DIR || path.join(os.homedir(), ".9router");
+    const file = path.join(dataDir, "jwt-secret");
+    let secret = "";
+    try {
+      secret = fs.readFileSync(file, "utf8").trim();
+    } catch {
+      fs.mkdirSync(dataDir, { recursive: true });
+      secret = crypto.randomBytes(32).toString("hex");
+      fs.writeFileSync(file, secret, { mode: 0o600 });
+    }
+    if (secret) process.env.JWT_SECRET = secret;
+  } catch {
+    /* best effort — the app bootstraps the same secret on its own */
+  }
+}
+
+publishJwtSecret();
+
 let backgroundRefreshStarted = false;
 
 function startBackgroundTokenRefreshFromCustomServer() {
