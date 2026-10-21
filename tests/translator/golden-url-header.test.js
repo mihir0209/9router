@@ -27,14 +27,19 @@ const SPECIALIZED = new Set([
 function sanitize(headers) {
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
-    out[k] = typeof v === "string"
-      ? v.replace(/Bearer .+/, "Bearer <TOK>")
+    // The Node version is a machine fact, not a product fact: a golden
+    // snapshot must not change when the host upgrades Node.
+    const value = k === "X-PLATFORM-VERSION" && typeof v === "string"
+      ? v.replace(/v\d+\.\d+\.\d+.*/, "v<NODE>")
+      : v;
+    out[k] = typeof value === "string"
+      ? value.replace(/Bearer .+/, "Bearer <TOK>")
           .replace(/sk-test-APIKEY|tok-test-ACCESS/g, "<CRED>")
           .replace(/kimi-\d{10,}/g, "kimi-<TS>")
           .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<UUID>")
           .replace(/claude-cli\/2\.1\.\d+/g, "claude-cli/2.1.258")
           .replace(/0\.5\.\d+/g, "0.5.75")
-      : v;
+      : value;
   }
   return out;
 }

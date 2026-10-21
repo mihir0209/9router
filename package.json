@@ -59,15 +59,20 @@
   },
   "optionalDependencies": {
     "@aws-sdk/credential-providers": "^3.1149.0",
-    "better-sqlite3": "^12.6.2"
+    "better-sqlite3": "^12.6.2",
+    "pg": "^8.16.3"
   },
   "comment_better_sqlite3": "kept in optionalDependencies so npm install doesn't fail on systems without build tools — sql.js is used as fallback at runtime",
   "comment_aws_sdk_credential_providers": "kept in optionalDependencies (npm still installs these by default) and imported lazily in shared/awsCredentials.js — only AWS Bedrock connections using profile/SSO mode need it; static accessKeyId/secretAccessKey connections never load it",
+  "comment_pg": "kept in optionalDependencies and imported lazily in lib/db/adapters/postgresMemoryAdapter.js — only Postgres deployments (DATABASE_URL / POSTGRES_URL set) need it; SQLite is the default driver. It must be a declared dependency because the bundler resolves the dynamic import at build time even though the runtime path is opt-in",
   "devDependencies": {
+    "@opennextjs/cloudflare": "^1.20.5",
     "@tailwindcss/postcss": "^4.1.18",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "postcss": "^8.5.6",
-    "tailwindcss": "^4"
-  }
+    "tailwindcss": "^4",
+    "wrangler": "^4.125.0"
+  },
+  "comment_cloudflare_tooling": "the Cloudflare scripts (build/deploy/upload/preview) and wrangler.toml need these two binaries. They were only ever installed manually, so every npm install pruned them and broke build:cloudflare — declare them so a clean install is self-sufficient. opennextjs 1.20.5 is the newest whose peer range covers our next 16.3.6"
 }

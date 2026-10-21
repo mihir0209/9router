@@ -409,7 +409,7 @@ exports[`GOLDEN buildHeaders (default executor providers) > cline → headers (a
     "X-CORE-VERSION": "0.5.75",
     "X-IS-MULTIROOT": "false",
     "X-PLATFORM": "linux",
-    "X-PLATFORM-VERSION": "v26.4.0",
+    "X-PLATFORM-VERSION": "v<NODE>",
     "X-Title": "Cline",
   },
   "nonStream": {
@@ -422,7 +422,7 @@ exports[`GOLDEN buildHeaders (default executor providers) > cline → headers (a
     "X-CORE-VERSION": "0.5.75",
     "X-IS-MULTIROOT": "false",
     "X-PLATFORM": "linux",
-    "X-PLATFORM-VERSION": "v26.4.0",
+    "X-PLATFORM-VERSION": "v<NODE>",
     "X-Title": "Cline",
   },
   "oauth": {
@@ -436,7 +436,7 @@ exports[`GOLDEN buildHeaders (default executor providers) > cline → headers (a
     "X-CORE-VERSION": "0.5.75",
     "X-IS-MULTIROOT": "false",
     "X-PLATFORM": "linux",
-    "X-PLATFORM-VERSION": "v26.4.0",
+    "X-PLATFORM-VERSION": "v<NODE>",
     "X-Title": "Cline",
   },
 }
@@ -455,7 +455,7 @@ exports[`GOLDEN buildHeaders (default executor providers) > clinepass → header
     "X-CORE-VERSION": "0.5.75",
     "X-IS-MULTIROOT": "false",
     "X-PLATFORM": "linux",
-    "X-PLATFORM-VERSION": "v26.4.0",
+    "X-PLATFORM-VERSION": "v<NODE>",
     "X-Title": "Cline",
   },
   "nonStream": {
@@ -468,7 +468,7 @@ exports[`GOLDEN buildHeaders (default executor providers) > clinepass → header
     "X-CORE-VERSION": "0.5.75",
     "X-IS-MULTIROOT": "false",
     "X-PLATFORM": "linux",
-    "X-PLATFORM-VERSION": "v26.4.0",
+    "X-PLATFORM-VERSION": "v<NODE>",
     "X-Title": "Cline",
   },
   "oauth": {
@@ -482,7 +482,7 @@ exports[`GOLDEN buildHeaders (default executor providers) > clinepass → header
     "X-CORE-VERSION": "0.5.75",
     "X-IS-MULTIROOT": "false",
     "X-PLATFORM": "linux",
-    "X-PLATFORM-VERSION": "v26.4.0",
+    "X-PLATFORM-VERSION": "v<NODE>",
     "X-Title": "Cline",
   },
 }
