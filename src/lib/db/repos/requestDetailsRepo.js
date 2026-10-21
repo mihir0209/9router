@@ -225,12 +225,33 @@ const _shutdownHandler = async () => {
   if (writeBuffer.length > 0) await flushToDatabase();
 };
 
+/**
+ * True when this module is loaded outside a Node process.
+ *
+ * The Edge runtime ships a `process` polyfill whose members are *throwing
+ * stubs*: `typeof process.on === "function"` is true there, so a typeof check
+ * cannot detect it — calling it raises "A Node.js API is used (process.on)
+ * which is not supported in the Edge Runtime". The runtime markers are the
+ * only reliable signal, so check those first and treat any doubt as edge.
+ */
+function isEdgeRuntime() {
+  try {
+    if (typeof process === "undefined") return true;
+    if (process.env?.NEXT_RUNTIME === "edge") return true;
+    if (typeof EdgeRuntime !== "undefined") return true;
+  } catch {
+    return true;
+  }
+  return false;
+}
+
 function ensureShutdownHandler() {
   // Edge runtime has no process emitter. This module is DB-side and is not in the
   // Worker bundle today, but it is reachable from anything that imports the repos,
   // so an unguarded module-scope call here breaks the whole graph at import time
   // rather than degrading one feature.
-  if (typeof process === "undefined" || typeof process.on !== "function") return;
+  if (isEdgeRuntime()) return;
+  if (typeof process.on !== "function" || typeof process.off !== "function") return;
 
   process.off("beforeExit", _shutdownHandler);
   process.off("SIGINT", _shutdownHandler);

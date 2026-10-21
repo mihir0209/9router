@@ -105,11 +105,20 @@ export async function createSqlJsAdapter(filePath) {
     db.close();
   }
 
-  // Flush on shutdown
+  // Flush on shutdown. The Edge runtime's process polyfill throws on any
+  // process.on call, so guard on the runtime markers — a typeof check is not
+  // enough there, because the polyfill reports the members as functions.
   const flush = () => { if (dirty) try { persist(); } catch {} };
-  process.on("beforeExit", flush);
-  process.on("SIGINT", flush);
-  process.on("SIGTERM", flush);
+  if (
+    typeof process !== "undefined"
+    && typeof process.on === "function"
+    && process.env?.NEXT_RUNTIME !== "edge"
+    && typeof EdgeRuntime === "undefined"
+  ) {
+    process.on("beforeExit", flush);
+    process.on("SIGINT", flush);
+    process.on("SIGTERM", flush);
+  }
 
   return { driver: "sql.js", run, get, all, exec, transaction, close, raw: db };
 }

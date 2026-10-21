@@ -149,10 +149,21 @@ if (require.main === module) {
   if (fs.existsSync(standalone)) {
     require(standalone);
   } else {
-    // Repo checkout has no standalone build next to us. `next start` builds its HTTP
-    // server in-process, so the wrapper above still sanitizes every request.
-    const nextBin = require.resolve("next/dist/bin/next");
-    process.argv = [process.argv[0], nextBin, "start", ...process.argv.slice(2)];
-    require(nextBin);
+    // A standalone build lives under .next/standalone (next.config sets
+    // output: "standalone"). `next start` refuses to run against that output
+    // and exits, so prefer the built standalone server when it exists.
+    const standaloneBuild = path.join(__dirname, ".next", "standalone", "server.js");
+    if (fs.existsSync(standaloneBuild)) {
+      // Next's standalone server chdirs into its own directory and reads
+      // process.env.PORT, which the --port handling above already set.
+      require(standaloneBuild);
+    } else {
+      // No standalone build next to us (e.g. a source-only checkout).
+      // `next start` builds its HTTP server in-process, so the wrapper above
+      // still sanitizes every request.
+      const nextBin = require.resolve("next/dist/bin/next");
+      process.argv = [process.argv[0], nextBin, "start", ...process.argv.slice(2)];
+      require(nextBin);
+    }
   }
 }
