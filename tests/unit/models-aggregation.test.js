@@ -74,10 +74,22 @@ describe("model aggregation", () => {
     releases.reverse().forEach((release) => release());
 
     const result = await pending;
-    expect(result.map((model) => model.id)).toEqual([
+    const ids = result.map((model) => model.id);
+    // The live catalogs resolve in connection order (the subject of this test)…
+    expect(ids.slice(0, 3)).toEqual([
       "kr/kiro-live",
       "qd/qoder-live",
       "kimchi/kimchi-live",
+    ]);
+    // …then the no-auth free providers (upstream #3115) contribute their static
+    // models even though no connection exists for them. devin-cli is hidden and
+    // ships no static PROVIDER_MODELS entry, so only mmf/oc appear.
+    expect(ids.slice(3)).toEqual([
+      "mmf/mimo-auto",
+      "oc/muse-spark-1.2-contributor-free",
+      "oc/muse-spark-1.3-contributor-free",
+      "oc/union-alpha",
+      "oc/jev-1.13-free",
     ]);
   });
 
@@ -113,6 +125,11 @@ describe("model aggregation", () => {
     const llms = await buildModelsList(["llm"]);
 
     expect(images.map((model) => model.id)).toEqual(["art/image-alpha", "art/image-beta"]);
-    expect(llms).toEqual([]);
+    // The custom media models must not leak into the LLM list; only the
+    // no-auth free providers' own chat models (#3115) appear there.
+    const llmIds = llms.map((model) => model.id);
+    expect(llmIds).not.toContain("art/image-alpha");
+    expect(llmIds).not.toContain("art/image-beta");
+    expect(llmIds).toContain("mmf/mimo-auto");
   });
 });

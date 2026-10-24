@@ -183,6 +183,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           connectionNoProxy: resolvedProxy.connectionNoProxy,
           connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
           vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+          strictProxy: resolvedProxy.strictProxy === true,
         },
       };
     }
@@ -408,6 +409,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connectionNoProxy: resolvedProxy.connectionNoProxy,
       connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
       vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+      strictProxy: resolvedProxy.strictProxy === true,
     };
     if (effectiveRetry) providerSpecificData.retry = effectiveRetry;
     if (nodeCustomHeaders) providerSpecificData.customHeaders = nodeCustomHeaders;
@@ -503,8 +505,9 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     const credentials = conn?.providerSpecificData
       ? { providerSpecificData: conn.providerSpecificData }
       : null;
+    const canonicalProvider = resolveProviderId(provider || conn?.provider);
     ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(
-      status, errorText, backoffLevel, provider || conn?.provider, credentials, settingsOverride
+      status, errorText, backoffLevel, canonicalProvider, credentials, settingsOverride
     ));
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };

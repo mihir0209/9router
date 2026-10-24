@@ -1,6 +1,6 @@
 import {
   extractApiKey, isValidApiKey,
-  getProviderCredentials, markAccountUnavailable,
+  getProviderCredentials, markAccountUnavailable, clearAccountError,
 } from "../services/auth.js";
 import { validateAndEnforceApiKey } from "../services/validateApiKey.js";
 import { getSettings, getCustomModels } from "@/lib/localDb";
@@ -12,6 +12,8 @@ import { AI_PROVIDERS } from "@/shared/constants/providers";
 import * as log from "../utils/logger.js";
 import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
 import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
+import { checkAndRefreshToken } from "../services/tokenRefresh.js";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
 
 // Providers requiring credentials for STT
 const CREDENTIALED_PROVIDERS = new Set(
@@ -65,6 +67,7 @@ export async function handleStt(request) {
 
   const { provider, model } = modelInfo;
   const isCustom = provider.startsWith("custom-media-");
+  if (provider === "codex" && model !== "transcribe") return finish(errorResponse(400, "Use model cx/transcribe for Codex STT"));
   log.info("ROUTING", `Provider: ${provider}, Model: ${model}`);
 
   const modelTransport = await resolveCustomModelTransport(provider, model);
@@ -82,7 +85,7 @@ export async function handleStt(request) {
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, keyCheck);
+    let credentials = await getProviderCredentials(provider, excludeConnectionIds, model, keyCheck);
     const credentialsError = typeof credentialsErrorResponse === "function" ? credentialsErrorResponse(credentials) : null;
     if (credentialsError) return finish(credentialsError);
 
@@ -98,19 +101,43 @@ export async function handleStt(request) {
 
     log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
 
-    const customConfig = isCustom ? {
-      custom: true,
-      mediaKind: credentials.providerSpecificData.mediaKind,
-      format: "openai",
-      baseUrl: credentials.providerSpecificData.endpointUrl || credentials.providerSpecificData.baseUrl,
-      authType: credentials.providerSpecificData.authHeader === "none" ? "none" : "apikey",
-      authHeader: credentials.providerSpecificData.authHeader,
-      customHeaders: credentials.providerSpecificData.customHeaders,
-      isFullEndpoint: !!credentials.providerSpecificData.endpointUrl,
-    } : null;
-    const result = await handleSttCore({ provider, model, formData, credentials, sttConfig: customConfig || AI_PROVIDERS[provider]?.sttConfig, transport: modelTransport });
+    let result;
+    try {
+      const isCodex = provider === "codex";
+      if (isCodex) credentials = await checkAndRefreshToken(provider, credentials);
+      const proxyOptions = isCodex
+        ? await resolveConnectionProxyConfig(credentials._connection?.providerSpecificData || credentials.providerSpecificData)
+        : undefined;
+      const customConfig = isCustom ? {
+        custom: true,
+        mediaKind: credentials.providerSpecificData.mediaKind,
+        format: "openai",
+        baseUrl: credentials.providerSpecificData.endpointUrl || credentials.providerSpecificData.baseUrl,
+        authType: credentials.providerSpecificData.authHeader === "none" ? "none" : "apikey",
+        authHeader: credentials.providerSpecificData.authHeader,
+        customHeaders: credentials.providerSpecificData.customHeaders,
+        isFullEndpoint: !!credentials.providerSpecificData.endpointUrl,
+      } : null;
+      const args = { provider, model, formData, credentials, sttConfig: customConfig || AI_PROVIDERS[provider]?.sttConfig, transport: modelTransport, signal: request.signal, proxyOptions };
+      result = await handleSttCore(args);
+      if (isCodex && result.status === 401 && credentials.refreshToken && !request.signal.aborted) {
+        const previous = credentials.accessToken;
+        credentials = await checkAndRefreshToken(provider, credentials, { force: true });
+        if (credentials.accessToken !== previous) result = await handleSttCore({ ...args, credentials });
+      }
+      if (result.success) {
+        if (isCodex) await clearAccountError(credentials.connectionId, credentials, model);
+        return finish(result.response);
+      }
+    } catch {
+      return finish(errorResponse(HTTP_STATUS.BAD_GATEWAY, "STT credential or transport failure"));
+    }
 
-    if (result.success) return finish(result.response);
+    if (request.signal.aborted) return finish(errorResponse(504, "Transcription cancelled"));
+    // Bad audio / unsupported parameters are client errors, not broken accounts.
+    if (provider === "codex" && [400, 413, 504].includes(result.status)) {
+      return finish(result.response || errorResponse(result.status, result.error));
+    }
 
     const byokError = byokUpstreamErrorResponse(credentials, result.status);
     if (byokError) return finish(byokError);

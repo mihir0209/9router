@@ -69,6 +69,7 @@ export function findMatchingErrorText(errorText, needles) {
 export function normalizeErrorRule(rule) {
   if (!rule || typeof rule !== "object") return null;
   const out = {};
+  if (rule.provider) out.provider = rule.provider;
   if (typeof rule.text === "string" && rule.text.trim()) {
     out.text = rule.text.trim().toLowerCase();
   }
@@ -192,15 +193,19 @@ export function mergeRetryPlugins(...plugins) {
  * Text first via errorTextIncludes (lower.includes), then status.
  * @returns {object|null} matched rule
  */
-export function matchErrorRule(rules, status, errorText) {
+export function matchErrorRule(rules, status, errorText, provider = null) {
   if (!Array.isArray(rules) || rules.length === 0) return null;
 
   // Pass 1: plain-text lower.includes(rule.text) — order = priority
   for (const rule of rules) {
+    if (rule.provider && provider && rule.provider !== provider) continue;
+    if (rule.provider && !provider) continue;
     if (rule.text && errorTextIncludes(errorText, rule.text)) return rule;
   }
   // Pass 2: HTTP status
   for (const rule of rules) {
+    if (rule.provider && provider && rule.provider !== provider) continue;
+    if (rule.provider && !provider) continue;
     if (rule.status != null && rule.status === status) return rule;
   }
   return null;

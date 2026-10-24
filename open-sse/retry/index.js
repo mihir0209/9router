@@ -152,7 +152,7 @@ export function resolveFallbackDecision(status, errorText, backoffLevel = 0, pro
     ? resolveRetryPlugin(providerId, credentials, settingsOverride)
     : { errorRules: [] };
   const rules = buildRuleList(plugin);
-  const matched = matchErrorRule(rules, status, errorText);
+  const matched = matchErrorRule(rules, status, errorText, providerId);
   return decisionFromRule(matched, backoffLevel);
 }
 
@@ -161,7 +161,7 @@ export function resolveFallbackDecision(status, errorText, backoffLevel = 0, pro
  */
 export function resolveHttpTextRetry(providerId, status, errorText, credentials = null, settingsOverride = null) {
   const plugin = resolveRetryPlugin(providerId, credentials, settingsOverride);
-  return matchHttpTextRetry(plugin, status, errorText);
+  return matchHttpTextRetry(plugin, status, errorText, providerId);
 }
 
 export function getRetryComputeDelayHook(providerId, credentials = null, settingsOverride = null) {

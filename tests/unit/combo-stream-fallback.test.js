@@ -26,14 +26,8 @@ describe("combo streaming fallback", () => {
     });
   });
 
-  it("retries the same model, then falls through when a streaming model emits an error before content", async () => {
+  it("falls through when a streaming model emits an error before content", async () => {
     const handleSingleModel = vi.fn()
-      .mockResolvedValueOnce(sseResponse([
-        'data: {"error":{"message":"Upstream service temporarily unavailable"}}\n\n',
-      ]))
-      .mockResolvedValueOnce(sseResponse([
-        'data: {"error":{"message":"Upstream service temporarily unavailable"}}\n\n',
-      ]))
       .mockResolvedValueOnce(sseResponse([
         'data: {"error":{"message":"Upstream service temporarily unavailable"}}\n\n',
       ]))
@@ -49,11 +43,9 @@ describe("combo streaming fallback", () => {
       log: { info: vi.fn(), warn: vi.fn() },
     });
 
-    expect(handleSingleModel).toHaveBeenCalledTimes(4);
+    expect(handleSingleModel).toHaveBeenCalledTimes(2);
     expect(handleSingleModel.mock.calls[0][1]).toBe("webapi/model-a");
-    expect(handleSingleModel.mock.calls[1][1]).toBe("webapi/model-a");
-    expect(handleSingleModel.mock.calls[2][1]).toBe("webapi/model-a");
-    expect(handleSingleModel.mock.calls[3][1]).toBe("backup/model-b");
+    expect(handleSingleModel.mock.calls[1][1]).toBe("backup/model-b");
     expect(result.ok).toBe(true);
     expect(await result.json()).toEqual({ ok: true });
   });
@@ -78,14 +70,8 @@ describe("combo streaming fallback", () => {
     expect(await result.text()).toContain("hello");
   });
 
-  it("returns 429 when retryable early stream errors exhaust every combo model", async () => {
+  it("returns the response when all combo models stream an error before content", async () => {
     const handleSingleModel = vi.fn()
-      .mockResolvedValueOnce(sseResponse([
-        'data: {"error":{"message":"Upstream service temporarily unavailable"}}\n\n',
-      ]))
-      .mockResolvedValueOnce(sseResponse([
-        'data: {"error":{"message":"Upstream service temporarily unavailable"}}\n\n',
-      ]))
       .mockResolvedValueOnce(sseResponse([
         'data: {"error":{"message":"Upstream service temporarily unavailable"}}\n\n',
       ]));
@@ -97,8 +83,7 @@ describe("combo streaming fallback", () => {
       log: { info: vi.fn(), warn: vi.fn() },
     });
 
-    expect(handleSingleModel).toHaveBeenCalledTimes(3);
-    expect(result.status).toBe(429);
-    expect(await result.json()).toEqual({ error: { message: "Upstream service temporarily unavailable" } });
+    expect(handleSingleModel).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
   });
 });

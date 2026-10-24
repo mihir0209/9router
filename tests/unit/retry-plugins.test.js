@@ -58,7 +58,7 @@ describe("normalizeErrorText + errorTextIncludes (central lower.includes)", () =
 
 describe("checkFallbackError always uses central matcher", () => {
   it("does not rotate accounts for a generic bad request", () => {
-    expect(checkFallbackErrorFromService(400, "Request contains an invalid argument.", 0)).toEqual({
+    expect(checkFallbackErrorFromService(400, "Request contains an invalid argument.", 0)).toMatchObject({
       shouldFallback: false,
       cooldownMs: 0,
     });

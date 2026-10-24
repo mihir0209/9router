@@ -27,7 +27,13 @@ export function getQuotaCooldown(backoffLevel = 0) {
  * @param {string|null} [providerId] - Provider id for plugin resolution
  * @param {object|null} [credentials] - Credentials (node retry in providerSpecificData.retry)
  * @param {object|null} [settingsOverride] - providerStrategies[id].retry
- * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
+ * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number, requestScoped?: boolean }}
+ *
+ * `shouldFallback` answers "is the CREDENTIAL at fault?" (account rotation).
+ * `requestScoped` answers "is the REQUEST itself what this member rejected?"
+ * (combo rotation). They are different questions: a context overflow or a
+ * validation 400 means the credential is healthy but this member cannot serve
+ * this request, so combo rotation must still try the next member.
  */
 export function checkFallbackError(status, errorText, backoffLevel = 0, providerId = null, credentials = null, settingsOverride = null) {
   const decision = resolveFallbackDecision(status, errorText, backoffLevel, providerId, credentials, settingsOverride);
@@ -35,18 +41,21 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
   // that matched no account rule — keeps healthy credentials in rotation for
   // context-overflow / validation errors. The central matcher returns a transient
   // fallback for any unmatched error; suppress it when no rule actually matched.
-  if (decision.shouldFallback && decision.cooldownMs > 0) {
-    const s = Number(status);
-    const isRequestScoped4xx = s >= 400 && s < 500 && s !== 401 && s !== 402 && s !== 403 && s !== 429;
-    if (isRequestScoped4xx) {
+  const s = Number(status);
+  const isRequestScoped4xx = s >= 400 && s < 500 && s !== 401 && s !== 402 && s !== 403 && s !== 429;
+  if (isRequestScoped4xx) {
+    if (decision.shouldFallback && decision.cooldownMs > 0) {
       // Text/status rules already won if they matched; only suppress the default.
       const plugin = providerId ? resolveRetryPlugin(providerId, credentials, settingsOverride) : { errorRules: [] };
       const rules = buildRuleList(plugin);
-      if (!matchErrorRule(rules, status, errorText)) {
-        return { shouldFallback: false, cooldownMs: 0 };
+      if (!matchErrorRule(rules, status, errorText, providerId)) {
+        return { shouldFallback: false, cooldownMs: 0, requestScoped: true };
       }
+    } else if (!decision.shouldFallback) {
+      return { ...decision, requestScoped: true };
     }
   }
+
   // Model-scoped failures (#4271/#4340) are handled by combo member rotation
   // via isModelScopedError, not by cooling the account. Suppress even when a
   // text rule matched: the credential is healthy, only this slug is unusable
@@ -56,10 +65,11 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
   // an explicit shouldFallback:true so combos skip schema-rejecting members.
   // Some of those texts overlap the model-scoped phrases; the explicit rule wins.
   if (isModelScopedError(status, errorText) && !isSchemaRejection(errorText)) {
-    return { shouldFallback: false, cooldownMs: 0 };
+    return { shouldFallback: false, cooldownMs: 0, requestScoped: true };
   }
-    return decision;
-  }
+
+  return decision;
+}
 
 /**
  * Check if account is currently unavailable (cooldown not expired)
