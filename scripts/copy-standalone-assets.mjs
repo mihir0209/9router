@@ -1,6 +1,14 @@
-import { cpSync, existsSync } from "node:fs";
+import { cpSync, existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+
+// Marks the standalone build with the driver variant it was produced from.
+// The Node and Cloudflare builds share this directory (both run `next build`
+// with output: "standalone"), and the two artefacts are NOT interchangeable:
+// the Cloudflare variant serves an ephemeral in-memory database and ignores
+// local SQLite data. custom-server.js reads this marker to refuse booting the
+// wrong one silently — see custom-server.js and scripts/build-cloudflare.mjs.
+const BUILD_VARIANT_FILE = ".9router-build-variant";
 
 export function copyStandaloneAssets({ projectRoot = process.cwd(), distDir = process.env.NEXT_DIST_DIR || ".next" } = {}) {
   if (process.env.NEXT_TRACING_ROOT_MODE === "workspace") {
@@ -15,6 +23,8 @@ export function copyStandaloneAssets({ projectRoot = process.cwd(), distDir = pr
     console.log(`[standalone-assets] No standalone build found at ${standaloneDir}`);
     return;
   }
+
+  writeFileSync(resolve(standaloneDir, BUILD_VARIANT_FILE), "node", "utf8");
 
   const staticSource = resolve(buildDir, "static");
   const staticDestination = resolve(standaloneDir, distDir, "static");

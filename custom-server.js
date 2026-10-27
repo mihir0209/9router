@@ -174,8 +174,36 @@ http.createServer = (...args) => {
 };
 
 if (require.main === module) {
+  // Refuse the Cloudflare worker build variant. Both builds write a
+  // standalone directory; the Cloudflare one (scripts/build-cloudflare.mjs)
+  // compiles in the D1-backed driver, so booted locally it serves an
+  // ephemeral in-memory database: the local SQLite file is ignored and
+  // every import or edit vanishes on restart. Failing here beats silently
+  // running a server that appears to lose data.
+  const assertNotCloudflareBuild = (serverDir) => {
+    try {
+      const variant = fs.readFileSync(path.join(serverDir, ".9router-build-variant"), "utf8").trim();
+      if (variant === "cloudflare" && process.env.NINEROUTER_ALLOW_CLOUDFLARE_STANDALONE !== "1") {
+        console.error([
+          "[custom-server] This standalone build is the CLOUDFLARE WORKER variant (from `npm run build:cloudflare`).",
+          "Booted locally it uses an ephemeral in-memory database and ignores the local SQLite data:",
+          "imports and edits disappear on restart.",
+          "",
+          "Run `npm run build` first to produce the Node standalone variant, then `npm start`.",
+          "(Set NINEROUTER_ALLOW_CLOUDFLARE_STANDALONE=1 to override, at your own risk.)",
+        ].join("\n"));
+        process.exit(1);
+      }
+    } catch {
+      /* No marker (older build) — assume the Node variant and boot. */
+    }
+  };
+
   const standalone = path.join(__dirname, "server.js");
   if (fs.existsSync(standalone)) {
+    // Running from inside a standalone directory (the wrapper is copied next
+    // to server.js). The marker, if any, sits beside it.
+    assertNotCloudflareBuild(__dirname);
     require(standalone);
   } else {
     // A standalone build lives under .next/standalone (next.config sets
@@ -183,6 +211,7 @@ if (require.main === module) {
     // and exits, so prefer the built standalone server when it exists.
     const standaloneBuild = path.join(__dirname, ".next", "standalone", "server.js");
     if (fs.existsSync(standaloneBuild)) {
+      assertNotCloudflareBuild(path.dirname(standaloneBuild));
       // Next's standalone server chdirs into its own directory and reads
       // process.env.PORT, which the --port handling above already set.
       require(standaloneBuild);

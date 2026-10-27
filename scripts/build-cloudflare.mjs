@@ -331,6 +331,18 @@ try {
 
   run("npx", ["opennextjs-cloudflare", "build"]);
   injectWorkerGuard();
+
+  // The OpenNext build also produced .next/standalone (the Node layout), but
+  // with the Cloudflare driver/middleware compiled in. Left unmarked, that
+  // directory silently boots as a local server with an EPHEMERAL in-memory
+  // database — imports and edits vanish on restart and the local SQLite file
+  // is ignored. Mark the variant so custom-server.js can refuse it loudly.
+  // (copy-standalone-assets.mjs overwrites the marker with "node" on the next
+  // regular `npm run build`.)
+  const standaloneDir = join(root, ".next", "standalone");
+  if (existsSync(standaloneDir)) {
+    writeFileSync(join(standaloneDir, ".9router-build-variant"), "cloudflare", "utf8");
+  }
   process.exitCode = 0;
 } catch (error) {
   console.error(error.message || error);
