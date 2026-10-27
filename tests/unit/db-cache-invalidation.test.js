@@ -9,6 +9,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
  * resolution calls it once per candidate. They are only safe if every write path
  * invalidates them — including the bulk paths that write tables directly.
  */
+
+// Each test builds a fresh adapter (global._dbAdapter is dropped between
+// tests), and every adapter registers a process.once("SIGINT") shutdown hook.
+// With one adapter per test this file crosses Node's 10-listener warning
+// threshold; a production process creates exactly one adapter, so raise the
+// limit here rather than "fixing" the driver.
+process.setMaxListeners(50);
+
 let tempDir;
 const originalDataDir = process.env.DATA_DIR;
 
@@ -62,6 +70,70 @@ describe("read caches survive every write path", () => {
     await db.importDb({ pricing: { openai: { "gpt-4o": { input: 1, output: 2 } } } });
     const pricing = await getPricingForModel("openai", "gpt-4o");
     expect(pricing).toMatchObject({ input: 1, output: 2 });
+  });
+
+  it("importDb is visible to getProviderConnections immediately", async () => {
+    // Regression: the import used to reset only combos/kv/pricing caches, so a
+    // successful restore kept serving the pre-import connections list for up
+    // to CREDENTIALS_CACHE_TTL_MS (5 min) — which looked like a rejected import.
+    const db = await import("@/lib/db/index.js");
+    const { getProviderConnections } = await import("@/lib/db/repos/connectionsRepo.js");
+
+    expect(await getProviderConnections()).toEqual([]); // warm the cache
+    const now = new Date().toISOString();
+    await db.importDb({
+      providerConnections: [{ id: "c1", provider: "openai", authType: "apikey", name: "imported", isActive: true, createdAt: now, updatedAt: now }],
+    });
+    const conns = await getProviderConnections();
+    expect(conns.map((c) => c.name)).toContain("imported");
+  });
+
+  it("importDb is visible to getApiKeys immediately", async () => {
+    const db = await import("@/lib/db/index.js");
+    const { getApiKeys } = await import("@/lib/db/repos/apiKeysRepo.js");
+
+    expect(await getApiKeys()).toEqual([]); // warm the cache
+    const now = new Date().toISOString();
+    await db.importDb({
+      apiKeys: [{ id: "k1", key: "sk-imported", name: "imported", isActive: true, createdAt: now, updatedAt: now }],
+    });
+    const keys = await getApiKeys();
+    expect(keys.map((k) => k.name)).toContain("imported");
+  });
+
+  it("importDb is visible to the enforcement path (getApiKeyByKey) immediately", async () => {
+    const db = await import("@/lib/db/index.js");
+    const { getApiKeyByKey } = await import("@/lib/db/repos/apiKeysRepo.js");
+
+    expect(await getApiKeyByKey("sk-imported")).toBeNull(); // warm the cache
+    const now = new Date().toISOString();
+    await db.importDb({
+      apiKeys: [{ id: "k1", key: "sk-imported", name: "imported", isActive: true, createdAt: now, updatedAt: now }],
+    });
+    expect((await getApiKeyByKey("sk-imported"))?.id).toBe("k1");
+  });
+
+  it("importDb is visible to getProviderNodes immediately", async () => {
+    const db = await import("@/lib/db/index.js");
+    const { getProviderNodes } = await import("@/lib/db/repos/nodesRepo.js");
+
+    expect(await getProviderNodes()).toEqual([]); // warm the cache
+    const now = new Date().toISOString();
+    await db.importDb({
+      providerNodes: [{ id: "n1", type: "openai-compatible", name: "imported-node", createdAt: now, updatedAt: now, data: {} }],
+    });
+    const nodes = await getProviderNodes();
+    expect(nodes.map((n) => n.name)).toContain("imported-node");
+  });
+
+  it("importDb is visible to getSettings immediately", async () => {
+    const db = await import("@/lib/db/index.js");
+    const { getSettings } = await import("@/lib/db/repos/settingsRepo.js");
+
+    const before = await getSettings(); // warm the cache with defaults
+    expect(before.comboStrategy).not.toBe("fusion");
+    await db.importDb({ settings: { comboStrategy: "fusion" } });
+    expect((await getSettings()).comboStrategy).toBe("fusion");
   });
 
   it("resetPricingCache drops the cache without deleting stored rates", async () => {

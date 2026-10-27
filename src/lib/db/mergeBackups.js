@@ -32,28 +32,50 @@ function isTableRow(obj) {
 }
 
 /**
+ * Row identity for array-table merges.
+ *
+ * customModels are stored in the DB under the composite key
+ * `${providerAlias}|${id}|${type}` (see importDb). Keying them by `row.id`
+ * alone collided across providers — a real 5k-model backup carried 798
+ * model ids shared by different providers, and the merge silently collapsed
+ * those distinct rows into one. The composite key matches what the importer
+ * writes, so a merge produces exactly what a replace would.
+ */
+function tableKeyFn(table) {
+  if (table === "customModels") {
+    return (row) => `${row?.providerAlias}|${row?.id}|${row?.type || "llm"}`;
+  }
+  return (row) => row?.id || row?.key || row?.name || JSON.stringify(row);
+}
+
+/**
  * Merge an array table (multi-row).
  */
 function mergeArrayTable(base = [], incoming = [], strategy, keyFn) {
   const stats = { added: 0, updated: 0, unchanged: 0, conflict: 0 };
-  const baseMap = new Map();
-  for (const row of base) {
-    const k = keyFn(row);
-    if (k) baseMap.set(k, row);
-  }
-
   const result = [...base];
+  // First-occurrence index for O(1) row lookup. The previous findIndex made
+  // the merge O(n²); on a real 5k-custom-models backup that is ~28M scans per
+  // table and froze the import tab for minutes.
+  const indexByKey = new Map();
+  for (let i = 0; i < result.length; i++) {
+    const k = keyFn(result[i]);
+    if (k && !indexByKey.has(k)) indexByKey.set(k, i);
+  }
 
   for (const incRow of incoming) {
     const k = keyFn(incRow);
     if (!k) continue;
 
-    const baseRow = baseMap.get(k);
-    if (!baseRow) {
+    const idx = indexByKey.get(k);
+    if (idx === undefined) {
+      indexByKey.set(k, result.length);
       result.push(incRow);
       stats.added++;
       continue;
     }
+
+    const baseRow = result[idx];
 
     const baseTs = pickTimestamp(baseRow);
     const incTs = pickTimestamp(incRow);
@@ -81,11 +103,8 @@ function mergeArrayTable(base = [], incoming = [], strategy, keyFn) {
         break;
     }
 
-    const idx = result.findIndex(r => keyFn(r) === k);
-    if (idx >= 0) {
-      result[idx] = winner;
-      stats.updated++;
-    }
+    result[idx] = winner;
+    stats.updated++;
   }
 
   return { result, stats };
@@ -178,9 +197,7 @@ export function previewMerge(base, incoming, strategy = "newer-wins") {
     }
 
     const isArray = Array.isArray(incVal);
-    const keyFn = isArray
-      ? (row) => row?.id || row?.key || row?.name || JSON.stringify(row)
-      : null;
+    const keyFn = isArray ? tableKeyFn(key) : null;
 
     const { stats: ts } = isArray
       ? mergeArrayTable(baseVal, incVal, strategy, keyFn)
@@ -230,9 +247,7 @@ export function mergeBackups(base, incoming, strategy = "newer-wins") {
     }
 
     const isArray = Array.isArray(incVal);
-    const keyFn = isArray
-      ? (row) => row?.id || row?.key || row?.name || JSON.stringify(row)
-      : null;
+    const keyFn = isArray ? tableKeyFn(key) : null;
 
     const { result, stats: ts } = isArray
       ? mergeArrayTable(baseVal, incVal, strategy, keyFn)

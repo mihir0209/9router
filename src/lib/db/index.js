@@ -1,6 +1,10 @@
 // Public API barrel — all DB functions
 import { getAdapter } from "./driver.js";
 import { resetCombosCache } from "./repos/combosRepo.js";
+import { resetConnectionsCache } from "./repos/connectionsRepo.js";
+import { resetNodesCache } from "./repos/nodesRepo.js";
+import { resetApiKeysCache } from "./repos/apiKeysRepo.js";
+import { resetSettingsCache } from "./repos/settingsRepo.js";
 import { resetKvCache } from "./repos/aliasRepo.js";
 import { resetPricingCache } from "./repos/pricingRepo.js";
 import { stringifyJson, parseJson } from "./helpers/jsonCol.js";
@@ -204,12 +208,40 @@ export async function importDb(payload) {
     }
   });
 
-  // The import writes combos, model aliases, custom models and pricing straight
-  // into the tables, bypassing the repos, so the per-isolate read caches have
-  // to be dropped here or readers keep serving pre-import data.
+  // The import writes settings, connections, nodes, api keys, combos, model
+  // aliases, custom models and pricing straight into the tables, bypassing
+  // the repos, so the per-isolate read caches have to be dropped here or
+  // readers keep serving pre-import data. Every one of these caches holds for
+  // up to 5 minutes; resetting only some of them made a successful restore
+  // *look* rejected — the dashboard went on serving the old connections and
+  // keys list while the import had actually landed.
+  resetSettingsCache();
+  resetConnectionsCache();
+  resetNodesCache();
+  resetApiKeysCache();
   resetCombosCache();
   resetKvCache();
   resetPricingCache();
+
+  // Cross-isolate invalidation. Settings and API keys are also cached in
+  // other Workers isolates, each guarded by a control-version poll; the bump
+  // makes those isolates drop their copies now instead of at TTL expiry.
+  // Locally bumpControlVersion is a no-op — the resets above already cover
+  // the single process.
+  try {
+    const { bumpControlVersion } = await import("@/lib/coordinator/controlVersion.js");
+    await bumpControlVersion("settings");
+    await bumpControlVersion("apiKeys");
+  } catch { /* coordinator unavailable — TTL invalidation still applies */ }
+
+  // The standalone MITM server reads aliases from a JSON replica, not from
+  // SQLite; an import bypasses the UI writes that keep it in sync.
+  if (process.env.NINEROUTER_RUNTIME !== "cloudflare") {
+    try {
+      const { syncToJson } = await import("@/lib/mitmAliasCache.js");
+      await syncToJson();
+    } catch { /* replica sync is best-effort; DB stays authoritative */ }
+  }
 
   if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
     return { success: true };
