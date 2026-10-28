@@ -1,6 +1,7 @@
 import { saveRequestUsage, appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { COLORS } from "../../utils/stream.js";
 import { canonicalizeUsage } from "../../utils/usageTracking.js";
+import { hhmmss } from "../../utils/timeString.js";
 
 const OPTIONAL_PARAMS = [
   "temperature", "top_p", "top_k",
@@ -134,7 +135,7 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
   if (inTokens === 0 && outTokens === 0) return;
 
   if (!silent) {
-    const time = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const time = hhmmss();
     const accountSuffix = connectionId ? ` | account=${connectionId.slice(0, 8)}...` : "";
     console.log(`${COLORS.green}[${time}] 📊 [${label}] ${provider.toUpperCase()} | in=${inTokens} | out=${outTokens}${accountSuffix}${COLORS.reset}`);
   }

@@ -3,6 +3,7 @@
  */
 
 import { FORMATS } from "../translator/formats.js";
+import { hhmmss } from "./timeString.js";
 
 // Legacy per-chunk usage console line; off by default (superseded by "📊 done")
 const DEBUG_USAGE = process.env.LOG_USAGE_VERBOSE === "1";
@@ -56,7 +57,7 @@ export function getBufferTokens() {
 
 // Get HH:MM:SS timestamp
 function getTimeString() {
-  return new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return hhmmss();
 }
 
 /**

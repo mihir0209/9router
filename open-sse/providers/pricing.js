@@ -410,8 +410,21 @@ export const PATTERN_PRICING = [
  * registry ids mix casing (e.g. "MiniMax-M2.5" vs "minimax-m2.5").
  */
 export function matchPattern(pattern, model) {
-  const regex = new RegExp("^" + pattern.split("*").map(s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "i");
-  return regex.test(model);
+  return compilePattern(pattern).test(model);
+}
+
+// Compiled glob regexes, keyed by pattern string. matchPattern runs per request for the pricing,
+// capability and thinking-level lookups (dozens of patterns each); rebuilding the RegExp every
+// call was ~16% of server CPU in a load profile. The regex has no g/y flag, so .test() is
+// stateless and safe to share. The key space is the fixed pattern tables, so the cache is bounded.
+const patternCache = new Map();
+function compilePattern(pattern) {
+  let regex = patternCache.get(pattern);
+  if (!regex) {
+    regex = new RegExp("^" + pattern.split("*").map(s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "i");
+    patternCache.set(pattern, regex);
+  }
+  return regex;
 }
 
 /**

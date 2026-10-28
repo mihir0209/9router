@@ -22,6 +22,12 @@ export const CATALOG_VERSION = 3;
 const EMPTY = { models: {}, providers: {}, pricing: {} };
 let cache = EMPTY;
 let cachedMtime = -1;
+// The stat that detects out-of-band edits is rate limited: capability, pricing and modality
+// lookups call load() several times per request, and the per-call statSync was ~3.7% of server CPU
+// in a load profile. A sync in this process calls invalidateCatalog(), so only an external edit can
+// be seen up to STAT_INTERVAL_MS late.
+const STAT_INTERVAL_MS = 1000;
+let lastStatAt = 0;
 
 // "zai-org/GLM-4.6V:free" -> "glm-4.6v"
 function baseId(model) {
@@ -31,6 +37,9 @@ function baseId(model) {
 }
 
 function load() {
+  const now = Date.now();
+  if (now - lastStatAt < STAT_INTERVAL_MS) return cache; // also covers "file absent": a failing stat throws
+  lastStatAt = now;
   let mtime;
   try {
     mtime = fs.statSync(CATALOG_FILE).mtimeMs;
@@ -85,6 +94,7 @@ export function getCatalogPricing(provider, model) {
 // Force a re-read on the next lookup (called right after a sync writes the file).
 export function invalidateCatalog() {
   cachedMtime = -1;
+  lastStatAt = 0;
 }
 
 // Hand the reader to capabilities.js. That module is bundled into the browser
