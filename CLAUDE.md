@@ -22,7 +22,7 @@ PORT=20128 NEXT_PUBLIC_BASE_URL=http://localhost:20128 npm run dev   # dev (webp
 npm run build && PORT=20128 HOSTNAME=0.0.0.0 npm run start           # production
 ```
 - Bun variants: `npm run dev:bun` / `build:bun` / `start:bun`.
-- Default runtime port is **20128** (dashboard at `/dashboard`, API at `/v1`).
+- `npm run dev` and `npm start` (`custom-server.js`) both bind **20127** in this fork; the 20128 above is only the `.env.example`/docs convention. Dashboard at `/dashboard`, API at `/v1`.
 - Lint: `npx eslint .` (config `eslint.config.mjs`, extends `eslint-config-next`).
 
 CLI package (`cli/`):
@@ -40,7 +40,9 @@ npx vitest run unit/capabilities.test.js   # single file (path relative to tests
 ```
 > The committed `tests/package.json` `test` script hardcodes Unix paths (`NODE_PATH=/tmp/node_modules …`) — a shared-install workaround from upstream. On Windows (or anywhere), ignore it and use the `npx vitest` form above; `vitest.config.js` resolves the `open-sse`/`@/` aliases from the repo root regardless of where vitest lives.
 >
-> **The suite is NOT expected to be all-green on a plain checkout.** ~938 pass, ~64 fail. Judge regressions with `tests/__baseline__/verify-no-regression.mjs`, not a raw run. Expected red:
+> **Fork status (v0.5.111 merge): ~4862 pass / 0 fail**, plus 2 environmental load-failures to ignore: `unit/db-benchmark.test.js` (needs removed `lowdb`) and `unit/embeddings.cloud.test.js` (imports absent `/cloud/`). Run vitest from `tests/`.
+>
+> The notes below describe the older upstream baseline (~938 pass, ~64 fail) and may be stale; judge regressions with `tests/__baseline__/verify-no-regression.mjs` if in doubt. Historically red:
 > - 26 catalogued in `tests/__baseline__/known-fails.txt` (rtk, oauth-cursor-auto-import, translator-request-normalization, …).
 > - `unit/embeddings.cloud.test.js` imports `cloud/src/handlers/embeddings.js` — the `cloud/` worker dir is **not in this repo**, so it always fails here.
 > - `unit/xai-oauth-service.test.js` times out (5s) when the xAI endpoint-discovery fetch isn't reachable/mocked.
@@ -86,6 +88,15 @@ State is **no longer `db.json`**. It's a SQLite layer under `src/lib/db/` with a
 
 ### RTK token saver (`open-sse/rtk/`)
 Pre-translate hooks that compress `tool_result` content in-place to cut tokens. **Fail-open**: any error returns null and leaves the body untouched — never throw out of them. Skips `is_error`/`status:"error"` results to preserve traces.
+
+## Fork rules (this repo is a fork of decolua/9router, remote `upstream`)
+
+- Preserve the fork's key-access architecture across upstream merges: `validateAndEnforceApiKey` / `apiKeyEnforcement` / `modelAcl` / force pins (`forceProvider`/`forceModel`) / BYOK / Usage Keys analytics. Upstream's `keyAccess.js` system stays **pruned** (0 references expected).
+- Never push to GitLab, deploy the Cloudflare Worker, or run Antideploy without explicit user approval.
+- **Build variants:** `npm run build:cloudflare` wipes `.next`/`.open-next` and leaves a Cloudflare-flavoured standalone (ephemeral in-memory DB). `.next/standalone/.9router-build-variant` (`node` | `cloudflare`) is checked by `custom-server.js`, which refuses to boot the cloudflare variant (override: `NINEROUTER_ALLOW_CLOUDFLARE_STANDALONE=1`). Always re-run `npm run build` before serving locally.
+- Node ≥ 24 skips `better-sqlite3` by design (SIGSEGV guard in `driver.js`); `[DB] Driver: node:sqlite` is the expected boot line.
+- `importDb` must reset every repo read cache (settings/connections/nodes/apiKeys cache 5 min); regression tests in `tests/unit/db-cache-invalidation.test.js`.
+- Edge detection: use `process.env.NEXT_RUNTIME === "edge"`, never `typeof process.on === "function"`.
 
 ## Conventions & gotchas
 
