@@ -1,4 +1,5 @@
 import { isValidIpRule } from "@/lib/auth/clientIp.js";
+import { modelPinConflicts } from "@/lib/apiKeys/forcePins.js";
 
 const MAX_SAFE_VALUE = Number.MAX_SAFE_INTEGER;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -134,7 +135,7 @@ export function validatePolicy(input, { partial = false } = {}) {
   const ipConflict = data.allowedIPs && data.blockedIPs && data.allowedIPs.split(",").some((item) => data.blockedIPs.split(",").includes(item));
   if (ipConflict) return { data, error: "allowedIPs and blockedIPs must not overlap" };
   // A forced target that is also blocked can never succeed — reject at write time.
-  if (data.forceModel && data.blockedModels && data.blockedModels.split(",").includes(data.forceModel)) return { data, error: "forceModel must not be in blockedModels" };
+  if (data.forceModel && data.blockedModels && modelPinConflicts(data.forceModel, data.blockedModels.split(",")).length > 0) return { data, error: "forceModel must not be in blockedModels" };
   if (data.forceProvider && data.blockedProviders && data.blockedProviders.split(",").includes(data.forceProvider)) return { data, error: "forceProvider must not be in blockedProviders" };
 
   return { data };

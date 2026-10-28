@@ -6,6 +6,8 @@ import {
   getStageLabel,
   formatProgressMessage,
   withDuration,
+  formatImportCounts,
+  describeImportResult,
 } from "@/lib/importProgress.js";
 
 describe("formatBytes", () => {
@@ -54,9 +56,9 @@ describe("getStageLabel", () => {
     expect(getStageLabel(IMPORT_STAGES.validating)).toBe("Validating backup");
     expect(getStageLabel(IMPORT_STAGES.loadingCurrent)).toBe("Loading current database");
     expect(getStageLabel(IMPORT_STAGES.merging)).toBe("Merging");
-    expect(getStageLabel(IMPORT_STAGES.uploading)).toBe("Uploading to server");
+    expect(getStageLabel(IMPORT_STAGES.uploading)).toBe("Preparing upload");
     expect(getStageLabel(IMPORT_STAGES.restoring)).toBe(
-      "Restoring database (this can take a while for large backups)"
+      "Uploading and restoring on the server (this can take a while for large backups)"
     );
     expect(getStageLabel(IMPORT_STAGES.refreshing)).toBe("Refreshing settings");
   });
@@ -71,12 +73,12 @@ describe("formatProgressMessage", () => {
 
   it("omits the ticker during the first second", () => {
     const msg = formatProgressMessage({ stage: IMPORT_STAGES.uploading, startedAt }, startedAt + 400);
-    expect(msg).toBe("Uploading to server");
+    expect(msg).toBe("Preparing upload");
   });
 
   it("appends elapsed time after a second", () => {
     const msg = formatProgressMessage({ stage: IMPORT_STAGES.restoring, startedAt }, startedAt + 7200);
-    expect(msg).toBe("Restoring database (this can take a while for large backups) - 7s elapsed");
+    expect(msg).toBe("Uploading and restoring on the server (this can take a while for large backups) - 7s elapsed");
   });
 
   it("passes the detail through to the reading label", () => {
@@ -103,5 +105,20 @@ describe("withDuration", () => {
   it("appends the total duration", () => {
     expect(withDuration("Done", 4200)).toBe("Done (took 4s)");
     expect(withDuration("Done", 125000)).toBe("Done (took 2m 05s)");
+  });
+});
+
+describe("formatImportCounts / describeImportResult", () => {
+  it("lists non-empty tables only", () => {
+    expect(formatImportCounts({ providerConnections: 42, apiKeys: 5, combos: 0, pricing: 3 })).toBe("42 connections, 5 API keys, 3 pricing entries");
+  });
+  it("tolerates missing or malformed counts", () => {
+    expect(formatImportCounts(undefined)).toBe("");
+    expect(formatImportCounts({ apiKeys: "x" })).toBe("");
+  });
+  it("appends counts and server duration to a success message", () => {
+    expect(describeImportResult({ counts: { apiKeys: 5 }, durationMs: 850 })).toBe(" [wrote 5 API keys; server 850ms]");
+    expect(describeImportResult({ durationMs: 4200 })).toBe(" [server 4s]");
+    expect(describeImportResult({})).toBe("");
   });
 });

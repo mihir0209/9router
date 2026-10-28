@@ -46,9 +46,9 @@ export function getStageLabel(stage, detail) {
     case IMPORT_STAGES.merging:
       return "Merging";
     case IMPORT_STAGES.uploading:
-      return "Uploading to server";
+      return "Preparing upload";
     case IMPORT_STAGES.restoring:
-      return "Restoring database (this can take a while for large backups)";
+      return "Uploading and restoring on the server (this can take a while for large backups)";
     case IMPORT_STAGES.refreshing:
       return "Refreshing settings";
     default:
@@ -56,7 +56,7 @@ export function getStageLabel(stage, detail) {
   }
 }
 
-/** Full progress line, e.g. "Uploading to server (3s)". The ticker only shows once a second has passed. */
+/** Full progress line, e.g. "Preparing upload (3s)". The ticker only shows once a second has passed. */
 export function formatProgressMessage(progress, now = Date.now()) {
   if (!progress || !progress.stage) return "";
   const label = getStageLabel(progress.stage, progress.detail);
@@ -70,4 +70,37 @@ export function formatProgressMessage(progress, now = Date.now()) {
 /** Append the total duration to a success message, e.g. "Done (took 4s)". */
 export function withDuration(message, ms) {
   return `${message} (took ${formatElapsed(ms)})`;
+}
+
+const COUNT_LABELS = [
+  ["providerConnections", "connections"],
+  ["apiKeys", "API keys"],
+  ["combos", "combos"],
+  ["proxyPools", "proxy pools"],
+  ["providerNodes", "provider nodes"],
+  ["modelAliases", "aliases"],
+  ["customModels", "custom models"],
+  ["mitmAlias", "MITM aliases"],
+  ["pricing", "pricing entries"],
+];
+
+/** Summarise the server's per-table row counts, e.g. "42 connections, 5 API keys". Empty tables are omitted. */
+export function formatImportCounts(counts) {
+  if (!counts || typeof counts !== "object") return "";
+  const parts = [];
+  for (const [key, label] of COUNT_LABELS) {
+    const n = Number(counts[key]);
+    if (Number.isFinite(n) && n > 0) parts.push(`${n} ${label}`);
+  }
+  return parts.join(", ");
+}
+
+/** Success text for an import response: counts plus the server-side duration when reported. */
+export function describeImportResult(data) {
+  const counts = formatImportCounts(data?.counts);
+  const server = Number(data?.durationMs);
+  const parts = [];
+  if (counts) parts.push(`wrote ${counts}`);
+  if (Number.isFinite(server) && server >= 0) parts.push(`server ${server < 1000 ? `${Math.round(server)}ms` : formatElapsed(server)}`);
+  return parts.length ? ` [${parts.join("; ")}]` : "";
 }

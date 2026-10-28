@@ -31,6 +31,25 @@ function normalizePin(value, field) {
   return { value: pin };
 }
 
+// A bare pin such as `gpt-4o` resolves to `<provider>/gpt-4o` at request time
+// and enforcement checks BOTH the requested id and the resolved one against
+// blockedModels. So a blocked entry `openai/gpt-4o` also covers the bare pin.
+// The reverse does not hold (a prefixed pin never matches a bare blocked entry).
+export function modelPinConflicts(pin, blocked) {
+  if (!pin) return [];
+  const bare = !pin.includes("/");
+  return blocked.filter((entry) => entry === pin || (bare && entry.endsWith(`/${pin}`)));
+}
+
+function conflictKeys(state) {
+  const forceModel = String(state?.forceModel || "").trim();
+  const forceProvider = String(state?.forceProvider || "").trim();
+  const keys = new Set();
+  for (const entry of modelPinConflicts(forceModel, toList(state?.blockedModels))) keys.add(`model|${forceModel}|${entry}`);
+  if (forceProvider && toList(state?.blockedProviders).includes(forceProvider)) keys.add(`provider|${forceProvider}`);
+  return keys;
+}
+
 /**
  * Validate and normalise the pins in a create/update body.
  *
@@ -39,10 +58,14 @@ function normalizePin(value, field) {
  *   conflict check: { forceProvider, forceModel, blockedModels, blockedProviders }.
  *   For a create these equal the supplied values; for an update the caller
  *   merges the existing key with the supplied fields.
+ * @param {object|null} [stored] Pre-update state (same shape) for an update.
+ *   A pin/blocked-list conflict that already exists in the stored key does not
+ *   block the edit, so a user can still fix or clear it, but a conflict the
+ *   update newly introduces is rejected.
  * @returns {{ values: object, error: string|null }} `values` holds only the pin
  *   fields that were supplied, trimmed ("" clears a pin).
  */
-export function validateForcePins(input = {}, effective = input) {
+export function validateForcePins(input = {}, effective = input, stored = null) {
   const values = {};
   for (const field of FORCE_PIN_FIELDS) {
     if (input[field] === undefined) continue;
@@ -51,13 +74,29 @@ export function validateForcePins(input = {}, effective = input) {
     values[field] = result.value;
   }
 
-  const forceModel = values.forceModel !== undefined ? values.forceModel : String(effective.forceModel || "").trim();
-  const forceProvider = values.forceProvider !== undefined ? values.forceProvider : String(effective.forceProvider || "").trim();
-  if (forceModel && toList(effective.blockedModels).includes(forceModel)) {
-    return { values: {}, error: "forceModel must not be in blockedModels" };
-  }
-  if (forceProvider && toList(effective.blockedProviders).includes(forceProvider)) {
-    return { values: {}, error: "forceProvider must not be in blockedProviders" };
+  const after = {
+    forceModel: values.forceModel !== undefined ? values.forceModel : String(effective.forceModel || "").trim(),
+    forceProvider: values.forceProvider !== undefined ? values.forceProvider : String(effective.forceProvider || "").trim(),
+    blockedModels: effective.blockedModels,
+    blockedProviders: effective.blockedProviders,
+  };
+  const before = stored ? conflictKeys(stored) : new Set();
+  for (const key of conflictKeys(after)) {
+    if (before.has(key)) continue;
+    return { values: {}, error: key.startsWith("model|") ? "forceModel must not be in blockedModels" : "forceProvider must not be in blockedProviders" };
   }
   return { values, error: null };
+}
+
+/**
+ * True when the pair (forceProvider, forceModel) after an update differs from
+ * the stored pair, i.e. it needs the pair-consistency check. Unchanged pairs
+ * are skipped so a key that already holds a stale pair stays editable.
+ */
+export function forcePairChanged(values, stored) {
+  const storedModel = String(stored?.forceModel || "").trim();
+  const storedProvider = String(stored?.forceProvider || "").trim();
+  const model = values.forceModel !== undefined ? values.forceModel : storedModel;
+  const provider = values.forceProvider !== undefined ? values.forceProvider : storedProvider;
+  return model !== storedModel || provider !== storedProvider;
 }

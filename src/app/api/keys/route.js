@@ -4,6 +4,7 @@ import { getConsistentMachineId } from "@/shared/utils/machineId";
 import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
 import { serializeApiKey, serializeApiKeys } from "@/lib/apiKeys/serializers";
 import { validateForcePins } from "@/lib/apiKeys/forcePins";
+import { findForcePairMismatch } from "@/lib/apiKeys/forcePair";
 
 export const dynamic = "force-dynamic";
 
@@ -101,6 +102,8 @@ export async function POST(request) {
     const pins = validateForcePins(options, options);
     if (pins.error) return NextResponse.json({ error: pins.error }, { status: 400 });
     Object.assign(options, pins.values);
+    const pairError = await findForcePairMismatch(options);
+    if (pairError) return NextResponse.json({ error: pairError }, { status: 400 });
 
     const machineId = (isAdminApi && requestedMachineId) || await getConsistentMachineId();
     const apiKey = await createApiKey(name, machineId, customKey ? { ...options, key: customKey } : options);

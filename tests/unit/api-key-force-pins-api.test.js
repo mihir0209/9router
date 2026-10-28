@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   deleteApiKey: vi.fn(),
   getConsistentMachineId: vi.fn(),
   getBudgetState: vi.fn(),
+  findForcePairMismatch: vi.fn(),
 }));
 
 vi.mock("@/lib/auth/adminApiToken", () => ({ hasValidAdminApiToken: mocks.auth }));
@@ -22,6 +23,7 @@ vi.mock("@/lib/localDb", () => ({
   deleteApiKey: mocks.deleteApiKey,
 }));
 vi.mock("@/shared/utils/machineId", () => ({ getConsistentMachineId: mocks.getConsistentMachineId }));
+vi.mock("@/lib/apiKeys/forcePair", () => ({ findForcePairMismatch: mocks.findForcePairMismatch }));
 vi.mock("@/lib/budgetService.js", () => ({ getBudgetState: mocks.getBudgetState }));
 
 const { POST: create } = await import("@/app/api/keys/route.js");
@@ -60,6 +62,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.auth.mockResolvedValue(false);
   mocks.getConsistentMachineId.mockResolvedValue("machine-1");
+  mocks.findForcePairMismatch.mockResolvedValue(null);
   mocks.getApiKeyByKey.mockResolvedValue(null);
   mocks.getApiKeyById.mockResolvedValue({ ...existing });
   mocks.createApiKey.mockImplementation(async (name, machineId, options) => ({ ...existing, name, machineId, ...options }));
@@ -102,6 +105,23 @@ describe("POST /api/keys pins", () => {
     const res = await create(post({ name: "bad", forceProvider: "openai", blockedProviders: "openai" }));
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("forceProvider must not be in blockedProviders");
+    expect(mocks.createApiKey).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/keys pin pair and prefix normalisation", () => {
+  it("rejects a bare forceModel covered by a provider-prefixed blocked entry", async () => {
+    const res = await create(post({ name: "bad", forceModel: "gpt-4o", blockedModels: "openai/gpt-4o" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("forceModel must not be in blockedModels");
+  });
+
+  it("rejects a forceModel/forceProvider pair that does not match", async () => {
+    mocks.findForcePairMismatch.mockResolvedValue("forceModel 'openai/gpt-4o' routes to provider 'openai', which does not match forceProvider 'anthropic'");
+    const res = await create(post({ name: "bad", forceProvider: "anthropic", forceModel: "openai/gpt-4o" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/does not match forceProvider 'anthropic'/);
+    expect(mocks.findForcePairMismatch).toHaveBeenCalledWith(expect.objectContaining({ forceProvider: "anthropic", forceModel: "openai/gpt-4o" }));
     expect(mocks.createApiKey).not.toHaveBeenCalled();
   });
 });
@@ -157,6 +177,43 @@ describe("PUT /api/keys/[id] pins", () => {
   it("rejects a blocked list that would cover the stored pin", async () => {
     mocks.getApiKeyById.mockResolvedValue({ ...existing, forceModel: "openai/gpt-4o" });
     const res = await update(put({ blockedModels: "openai/gpt-4o" }), params);
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects changing the pair to a mismatching one", async () => {
+    mocks.getApiKeyById.mockResolvedValue({ ...existing, forceProvider: "openai", forceModel: "openai/gpt-4o" });
+    mocks.findForcePairMismatch.mockResolvedValue("mismatch");
+    const res = await update(put({ forceProvider: "anthropic" }), params);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("mismatch");
+    expect(mocks.findForcePairMismatch).toHaveBeenCalledWith({ forceProvider: "anthropic", forceModel: "openai/gpt-4o" });
+    expect(mocks.updateApiKey).not.toHaveBeenCalled();
+  });
+
+  it("does not re-check an unchanged (stale) pair, so the key stays editable", async () => {
+    mocks.getApiKeyById.mockResolvedValue({ ...existing, forceProvider: "anthropic", forceModel: "openai/gpt-4o" });
+    mocks.findForcePairMismatch.mockResolvedValue("mismatch");
+    const res = await update(put({ forceProvider: "anthropic", blockedModels: "other" }), params);
+    expect(res.status).toBe(200);
+    expect(mocks.findForcePairMismatch).not.toHaveBeenCalled();
+  });
+
+  it("lets the user clear a pin that already conflicts with the stored blocked list", async () => {
+    mocks.getApiKeyById.mockResolvedValue({ ...existing, forceModel: "openai/gpt-4o", blockedModels: "openai/gpt-4o" });
+    const res = await update(put({ forceModel: "" }), params);
+    expect(res.status).toBe(200);
+    expect(mocks.updateApiKey).toHaveBeenCalledWith("key-1", { forceModel: "" });
+  });
+
+  it("lets the user edit a blocked list while a pre-existing conflict remains", async () => {
+    mocks.getApiKeyById.mockResolvedValue({ ...existing, forceModel: "openai/gpt-4o", blockedModels: "openai/gpt-4o" });
+    const res = await update(put({ blockedModels: "openai/gpt-4o,x" }), params);
+    expect(res.status).toBe(200);
+  });
+
+  it("still rejects a different conflicting pin on a key that already has a conflict", async () => {
+    mocks.getApiKeyById.mockResolvedValue({ ...existing, forceModel: "openai/gpt-4o", blockedModels: "openai/gpt-4o,openai/o1" });
+    const res = await update(put({ forceModel: "openai/o1" }), params);
     expect(res.status).toBe(400);
   });
 

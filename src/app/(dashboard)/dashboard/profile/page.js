@@ -10,7 +10,7 @@ import { APP_CONFIG } from "@/shared/constants/config";
 import { LOCALE_COOKIE, normalizeLocale } from "@/i18n/config";
 import { LOCALE_FLAGS } from "@/shared/constants/locales";
 import { validateBackup, previewMerge, mergeBackups } from "@/lib/db/mergeBackups";
-import { IMPORT_STAGES, formatProgressMessage, withDuration } from "@/lib/importProgress";
+import { IMPORT_STAGES, formatProgressMessage, withDuration, describeImportResult } from "@/lib/importProgress";
 
 function getLocaleFromCookie() {
   if (typeof document === "undefined") return "en";
@@ -851,7 +851,7 @@ export default function ProfilePage() {
         setDbStatus({
           type: "success",
           message: withDuration(
-            `Import (merge) complete: ${preview.added} added, ${preview.updated} updated, ${preview.unchanged} unchanged`,
+            `Import (merge) complete: ${preview.added} added, ${preview.updated} updated, ${preview.unchanged} unchanged${describeImportResult(data)}`,
             Date.now() - importStartedAtRef.current
           ),
         });
@@ -877,7 +877,7 @@ export default function ProfilePage() {
       await reloadSettings();
       setDbStatus({
         type: "success",
-        message: withDuration("Database imported (replaced) successfully", Date.now() - importStartedAtRef.current),
+        message: withDuration(`Database imported (replaced) successfully${describeImportResult(data)}`, Date.now() - importStartedAtRef.current),
       });
     } catch (err) {
       setDbStatus({ type: "error", message: err.message || "Invalid backup file" });
@@ -949,7 +949,7 @@ export default function ProfilePage() {
       setDbStatus({
         type: "success",
         message: withDuration(
-          `Merge complete: ${preview.added} added, ${preview.updated} updated, ${preview.unchanged} unchanged`,
+          `Merge complete: ${preview.added} added, ${preview.updated} updated, ${preview.unchanged} unchanged${describeImportResult(data)}`,
           Date.now() - importStartedAtRef.current
         ),
       });

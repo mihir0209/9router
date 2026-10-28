@@ -143,15 +143,18 @@ export async function importDb(payload, options = {}) {
     throw new Error("Invalid database payload");
   }
   const db = await getAdapter();
+  // Rows actually written: INSERT OR REPLACE collapses duplicate ids/keys, so
+  // count distinct primary keys rather than the payload array length.
+  const distinct = (rows, keyOf) => new Set((rows || []).map(keyOf)).size;
   const counts = {
     settings: payload.settings ? 1 : 0,
-    providerConnections: (payload.providerConnections || []).length,
-    providerNodes: (payload.providerNodes || []).length,
-    proxyPools: (payload.proxyPools || []).length,
-    apiKeys: (payload.apiKeys || []).length,
-    combos: (payload.combos || []).length,
+    providerConnections: distinct(payload.providerConnections, (r) => r.id),
+    providerNodes: distinct(payload.providerNodes, (r) => r.id),
+    proxyPools: distinct(payload.proxyPools, (r) => r.id),
+    apiKeys: distinct(payload.apiKeys, (r) => r.id),
+    combos: distinct(payload.combos, (r) => r.id),
     modelAliases: Object.keys(payload.modelAliases || {}).length,
-    customModels: (payload.customModels || []).length,
+    customModels: distinct(payload.customModels, (m) => `${m.providerAlias}|${m.id}|${m.type || "llm"}`),
     mitmAlias: Object.keys(payload.mitmAlias || {}).length,
     pricing: Object.keys(payload.pricing || {}).length,
   };

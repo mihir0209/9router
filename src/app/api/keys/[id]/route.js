@@ -3,7 +3,8 @@ import { deleteApiKey, getApiKeyById, getApiKeyByKey, updateApiKey } from "@/lib
 import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
 import { serializeApiKey } from "@/lib/apiKeys/serializers";
 import { getBudgetState } from "@/lib/budgetService.js";
-import { validateForcePins } from "@/lib/apiKeys/forcePins";
+import { validateForcePins, forcePairChanged } from "@/lib/apiKeys/forcePins";
+import { findForcePairMismatch } from "@/lib/apiKeys/forcePair";
 
 function normalizeList(value) {
   return Array.isArray(value) ? value.join(",") : value;
@@ -112,9 +113,18 @@ export async function PUT(request, { params }) {
         forceModel: updateData.forceModel !== undefined ? updateData.forceModel : existing.forceModel,
         blockedModels: updateData.blockedModels !== undefined ? updateData.blockedModels : existing.blockedModels,
         blockedProviders: updateData.blockedProviders !== undefined ? updateData.blockedProviders : existing.blockedProviders,
-      });
+      }, existing);
       if (pins.error) return NextResponse.json({ error: pins.error }, { status: 400 });
       Object.assign(updateData, pins.values);
+      // An unchanged pair is not re-checked, so a key that already holds a
+      // stale pair can still be edited (and fixed).
+      if (forcePairChanged(pins.values, existing)) {
+        const pairError = await findForcePairMismatch({
+          forceProvider: pins.values.forceProvider !== undefined ? pins.values.forceProvider : existing.forceProvider,
+          forceModel: pins.values.forceModel !== undefined ? pins.values.forceModel : existing.forceModel,
+        });
+        if (pairError) return NextResponse.json({ error: pairError }, { status: 400 });
+      }
     }
     if (updateData.billingMode === "byok" && !existing.byokCredentialsCiphertext) {
       return NextResponse.json({ error: "Configure BYOK credentials before enabling byok billing" }, { status: 400 });

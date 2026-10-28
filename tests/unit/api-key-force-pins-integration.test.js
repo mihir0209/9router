@@ -83,3 +83,28 @@ describe("key pins end to end", () => {
     expect(denied.error).toBe("This API key is pinned to provider 'openai'");
   });
 });
+
+describe("pair check agrees with enforcement", () => {
+  it("rejects a mismatching pair at write time exactly where enforcement would 403", async () => {
+    const { findForcePairMismatch } = await import("@/lib/apiKeys/forcePair.js");
+    expect(await findForcePairMismatch({ forceProvider: "anthropic", forceModel: "openai/gpt-4o" })).toMatch(/does not match forceProvider 'anthropic'/);
+    expect(await findForcePairMismatch({ forceProvider: "openai", forceModel: "openai/gpt-4o" })).toBeNull();
+
+    const bad = await db.createApiKey("pair-bad", MACHINE, { key: "sk-pair-bad", forceProvider: "anthropic", forceModel: "openai/gpt-4o" });
+    const denied = await enforceApiKeyRestrictions(bad.key, request, { model: "openai/gpt-4o" });
+    expect(denied.allowed).toBe(false);
+    expect(denied.status).toBe(403);
+
+    const good = await db.createApiKey("pair-good", MACHINE, { key: "sk-pair-good", forceProvider: "openai", forceModel: "openai/gpt-4o" });
+    expect((await enforceApiKeyRestrictions(good.key, request, { model: "x" })).allowed).toBe(true);
+  });
+
+  it("a bare forceModel conflicts with a provider-prefixed blocked entry, and enforcement agrees", async () => {
+    const { values, error } = validateForcePins({ forceModel: "openai/gpt-4o" }, { forceModel: "openai/gpt-4o", blockedModels: "openai/gpt-4o" });
+    expect(error).toBe("forceModel must not be in blockedModels");
+    expect(values).toEqual({});
+    const key = await db.createApiKey("pair-blocked", MACHINE, { key: "sk-pair-blocked", forceModel: "openai/gpt-4o", blockedModels: "openai/gpt-4o" });
+    const r = await enforceApiKeyRestrictions(key.key, request, { model: "x" });
+    expect(r.allowed).toBe(false);
+  });
+});

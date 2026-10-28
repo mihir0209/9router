@@ -122,3 +122,26 @@ describe("importDb still resets read caches without the re-export", () => {
     });
   });
 });
+
+describe("importDb counts reflect rows written", () => {
+  it("does not over-report duplicate ids", async () => {
+    const db = await import("@/lib/db/index.js");
+    const now = new Date().toISOString();
+    const payload = {
+      providerConnections: [
+        { id: "dup", provider: "openai", authType: "apikey", name: "a", apiKey: "sk-1", createdAt: now, updatedAt: now },
+        { id: "dup", provider: "openai", authType: "apikey", name: "b", apiKey: "sk-2", createdAt: now, updatedAt: now },
+        { id: "other", provider: "openai", authType: "apikey", name: "c", apiKey: "sk-3", createdAt: now, updatedAt: now },
+      ],
+      combos: [
+        { id: "c1", name: "one", models: [], createdAt: now, updatedAt: now },
+        { id: "c1", name: "one-again", models: [], createdAt: now, updatedAt: now },
+      ],
+    };
+    const result = await db.importDb(payload);
+    expect(result.counts.providerConnections).toBe(2);
+    expect(result.counts.combos).toBe(1);
+    const stored = await db.getProviderConnections();
+    expect(stored.length).toBe(result.counts.providerConnections);
+  });
+});

@@ -50,7 +50,7 @@ function createLeaseRelease({ keyId, leaseId, scope }) {
 // Bound the walk so a cycle (or a pathological chain) cannot hang a request.
 const COMBO_EXPANSION_DEPTH = 10;
 
-async function resolveRequestedModels(model, body) {
+export async function resolveRequestedModels(model, body) {
   const raw = String(model || body?.provider || "").trim();
   if (!raw) return { models: [], providers: [], isCombo: false, leaves: [] };
 
