@@ -40,7 +40,7 @@ npx vitest run unit/capabilities.test.js   # single file (path relative to tests
 ```
 > The committed `tests/package.json` `test` script hardcodes Unix paths (`NODE_PATH=/tmp/node_modules …`) — a shared-install workaround from upstream. On Windows (or anywhere), ignore it and use the `npx vitest` form above; `vitest.config.js` resolves the `open-sse`/`@/` aliases from the repo root regardless of where vitest lives.
 >
-> **Fork status (v0.5.111 merge): ~4862 pass / 0 fail**, plus 2 environmental load-failures to ignore: `unit/db-benchmark.test.js` (needs removed `lowdb`) and `unit/embeddings.cloud.test.js` (imports absent `/cloud/`). Run vitest from `tests/`.
+> **Fork status (after key-pin and import-progress work): ~4903 pass / 9 fail**. Two environmental load-failures to ignore: `unit/db-benchmark.test.js` (needs removed `lowdb`) and `unit/embeddings.cloud.test.js` (imports absent `/cloud/`). The 9 failures are in `codex-stt-persisted-refresh`, `gemini-native-endpoint` and `models-auth-and-live`; they fail with "attempt to write a readonly database" in sandboxes where `~/.9router` is read-only, and fail identically on base commit `dbc8daec`. Run vitest from `tests/`.
 >
 > The notes below describe the older upstream baseline (~938 pass, ~64 fail) and may be stale; judge regressions with `tests/__baseline__/verify-no-regression.mjs` if in doubt. Historically red:
 > - 26 catalogued in `tests/__baseline__/known-fails.txt` (rtk, oauth-cursor-auto-import, translator-request-normalization, …).
