@@ -1,0 +1,21 @@
+[scale] N=1 tmp=/tmp/9r-scale-7qudZu out=/devspace/Projects/9router/docs/benchmarks/runs/scaling/n1 probe=false
+[scale] 1 server(s) warm
+[closed] N=1 c=  16 run=1    390 req/s p50=40.27 p99=65.89 max=95.0 err=0.000% srvCPU=1.10 (per-proc 1.10) lbCPU=0.05
+[closed] N=1 c=  16 run=2    394 req/s p50=38.13 p99=89.35 max=116.6 err=0.000% srvCPU=1.08 (per-proc 1.08) lbCPU=0.04
+[closed] N=1 c=  16 run=3    400 req/s p50=37.33 p99=113.46 max=174.3 err=0.000% srvCPU=1.16 (per-proc 1.16) lbCPU=0.04
+[closed] N=1 c=  64 run=1    511 req/s p50=126.49 p99=213.84 max=317.3 err=0.000% srvCPU=1.06 (per-proc 1.06) lbCPU=0.04
+[closed] N=1 c=  64 run=2    346 req/s p50=165.08 p99=391.04 max=496.0 err=0.000% srvCPU=1.04 (per-proc 1.04) lbCPU=0.04
+[closed] N=1 c=  64 run=3    592 req/s p50=108.38 p99=204.79 max=259.1 err=0.000% srvCPU=1.08 (per-proc 1.08) lbCPU=0.04
+[closed] N=1 c= 256 run=1    811 req/s p50=262.52 p99=4384.46 max=9991.9 err=0.000% srvCPU=1.09 (per-proc 1.09) lbCPU=0.05
+[closed] N=1 c= 256 run=2    508 req/s p50=489.84 p99=829.12 max=860.9 err=0.000% srvCPU=1.09 (per-proc 1.09) lbCPU=0.05
+[closed] N=1 c= 256 run=3    784 req/s p50=361.00 p99=645.11 max=7195.6 err=0.000% srvCPU=1.08 (per-proc 1.08) lbCPU=0.04
+[closed] N=1 c=1024 run=1   1124 req/s p50=457.97 p99=1287.67 max=11712.1 err=0.000% srvCPU=1.10 (per-proc 1.10) lbCPU=0.05
+[closed] N=1 c=1024 run=2   1128 req/s p50=453.80 p99=1948.38 max=11662.9 err=0.000% srvCPU=1.09 (per-proc 1.09) lbCPU=0.05
+[closed] N=1 c=1024 run=3   1146 req/s p50=385.22 p99=697.83 max=11711.4 err=0.000% srvCPU=1.02 (per-proc 1.02) lbCPU=0.05
+[open]   N=1 rate=  250 run=1 got 250 req/s p50=8.04 p99=28.97 p99.9=158.03 max=158.7 err=0.000% dropped=0 srvCPU=0.57 lbCPU=0.03
+[open]   N=1 rate=  250 run=2 got 250 req/s p50=5.69 p99=57.82 p99.9=184.01 max=206.3 err=0.000% dropped=0 srvCPU=0.62 lbCPU=0.03
+[open]   N=1 rate=  250 run=3 got 250 req/s p50=5.96 p99=32.03 p99.9=130.02 max=133.3 err=0.000% dropped=0 srvCPU=0.63 lbCPU=0.03
+[open]   N=1 rate=  400 run=1 got 400 req/s p50=7.37 p99=62.68 p99.9=337.34 max=381.3 err=0.000% dropped=0 srvCPU=0.90 lbCPU=0.04
+[open]   N=1 rate=  400 run=2 got 400 req/s p50=4.65 p99=67.88 p99.9=367.53 max=386.6 err=0.000% dropped=0 srvCPU=0.94 lbCPU=0.05
+[open]   N=1 rate=  400 run=3 got 400 req/s p50=5.03 p99=145.50 p99.9=292.10 max=319.9 err=0.000% dropped=0 srvCPU=0.92 lbCPU=0.05
+[scale] done -> /devspace/Projects/9router/docs/benchmarks/runs/scaling/n1

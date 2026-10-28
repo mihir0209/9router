@@ -1,0 +1,39 @@
+[00:12:12] 🟠 📊 DONE 2ms · IN 12 · OUT 8
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 📊 DONE 2ms · IN 12 · OUT 8
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 📊 DONE 3ms · IN 12 · OUT 8
+[00:12:12] 🟠 📊 DONE 2ms · IN 12 · OUT 8
+[00:12:12] 🟠 📊 DONE 1ms · IN 12 · OUT 8
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 📊 DONE 3ms · IN 12 · OUT 8
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 📊 DONE 12ms · IN 12 · OUT 8
+[00:12:12] 🟠 📊 DONE 10ms · IN 12 · OUT 8
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 📊 DONE 13ms · IN 12 · OUT 8
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 📊 DONE 5ms · IN 12 · OUT 8
+[00:12:12] 🟠 📊 DONE 5ms · IN 12 · OUT 8
+[00:12:12] 🟠 📊 DONE 3ms · IN 12 · OUT 8
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:12] 🟠 📊 DONE 5ms · IN 12 · OUT 8
+[00:12:12] 🟠 📊 DONE 2ms · IN 12 · OUT 8
+[00:12:12] 🟠 📊 DONE 2ms · IN 12 · OUT 8
+[00:12:12] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:13] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:13] 🟠 📊 DONE 2ms · IN 12 · OUT 8
+[00:12:13] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:13] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:13] 🟠 📊 DONE 5ms · IN 12 · OUT 8
+[00:12:13] 🟠 📊 DONE 3ms · IN 12 · OUT 8
+[00:12:13] 🟠 📊 DONE 2ms · IN 12 · OUT 8
+[00:12:13] 🟠 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:12:13] 🟠 📊 DONE 1ms · IN 12 · OUT 8

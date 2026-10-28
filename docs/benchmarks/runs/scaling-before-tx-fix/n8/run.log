@@ -1,0 +1,21 @@
+[scale] N=8 tmp=/tmp/9r-scale-x7Gl9T out=/devspace/Projects/9router/docs/benchmarks/runs/scaling/n8 probe=false
+[scale] 8 server(s) warm
+[closed] N=8 c=  16 run=1   1518 req/s p50=9.92 p99=22.36 max=76.7 err=0.000% srvCPU=8.03 (per-proc 1.02/1.02/1.03/1.03/1.03/1.02/0.93/0.93) lbCPU=0.21
+[closed] N=8 c=  16 run=2   1577 req/s p50=9.66 p99=21.01 max=31.3 err=0.000% srvCPU=7.73 (per-proc 0.99/0.98/0.99/0.99/1.00/0.99/0.90/0.89) lbCPU=0.21
+[closed] N=8 c=  16 run=3   1543 req/s p50=9.66 p99=24.06 max=97.0 err=0.000% srvCPU=7.96 (per-proc 1.02/1.02/1.01/1.02/1.02/1.02/0.92/0.92) lbCPU=0.21
+[closed] N=8 c=  64 run=1   1677 req/s p50=36.80 p99=63.56 max=101.6 err=0.000% srvCPU=7.86 (per-proc 1.01/1.02/1.03/1.01/1.01/0.99/0.89/0.90) lbCPU=0.23
+[closed] N=8 c=  64 run=2   1569 req/s p50=38.76 p99=83.67 max=201.0 err=0.000% srvCPU=8.45 (per-proc 1.14/1.12/1.14/1.14/1.10/1.01/0.91/0.89) lbCPU=0.22
+[closed] N=8 c=  64 run=3   1673 req/s p50=35.38 p99=83.21 max=171.1 err=0.000% srvCPU=8.36 (per-proc 1.04/1.05/1.06/1.06/1.06/1.11/1.01/0.98) lbCPU=0.22
+[closed] N=8 c= 256 run=1   1785 req/s p50=141.02 p99=217.57 max=372.9 err=0.000% srvCPU=7.98 (per-proc 1.02/1.01/1.02/1.01/1.02/1.02/0.92/0.95) lbCPU=0.24
+[closed] N=8 c= 256 run=2   1793 req/s p50=138.93 p99=260.79 max=398.1 err=0.000% srvCPU=7.95 (per-proc 1.02/1.02/1.03/1.02/1.03/0.99/0.92/0.92) lbCPU=0.24
+[closed] N=8 c= 256 run=3   1764 req/s p50=140.58 p99=240.95 max=386.4 err=0.000% srvCPU=7.87 (per-proc 1.01/1.00/1.03/1.01/1.00/1.00/0.92/0.90) lbCPU=0.24
+[closed] N=8 c=1024 run=1   1986 req/s p50=546.46 p99=869.91 max=1051.0 err=0.000% srvCPU=7.96 (per-proc 1.03/1.01/1.01/1.03/1.03/0.99/0.91/0.94) lbCPU=0.26
+[closed] N=8 c=1024 run=2   2938 req/s p50=283.11 p99=4783.95 max=9187.4 err=0.000% srvCPU=8.01 (per-proc 1.02/1.01/1.03/1.03/1.02/1.01/0.93/0.96) lbCPU=0.26
+[closed] N=8 c=1024 run=3   1853 req/s p50=549.83 p99=870.31 max=1033.9 err=0.000% srvCPU=7.98 (per-proc 1.02/1.00/1.02/1.02/1.02/1.00/0.96/0.94) lbCPU=0.25
+[open]   N=8 rate= 2000 run=1 got 1497 req/s p50=577.31 p99=14168.72 p99.9=14986.24 max=15321.5 err=0.000% dropped=7552 srvCPU=7.31 lbCPU=0.24
+[open]   N=8 rate= 2000 run=2 got 1807 req/s p50=407.72 p99=14077.95 p99.9=15039.34 max=15253.9 err=0.000% dropped=2899 srvCPU=7.78 lbCPU=0.28
+[open]   N=8 rate= 2000 run=3 got 1850 req/s p50=440.27 p99=14364.84 p99.9=15095.00 max=15339.5 err=0.000% dropped=2243 srvCPU=7.79 lbCPU=0.28
+[open]   N=8 rate= 3200 run=1 got 1680 req/s p50=468.22 p99=766.47 p99.9=912.72 max=939.2 err=0.000% dropped=22793 srvCPU=7.78 lbCPU=0.26
+[open]   N=8 rate= 3200 run=2 got 1396 req/s p50=557.22 p99=1031.00 p99.9=1213.07 max=1355.8 err=0.000% dropped=27064 srvCPU=7.44 lbCPU=0.23
+[open]   N=8 rate= 3200 run=3 got 1776 req/s p50=440.55 p99=745.18 p99.9=880.02 max=923.3 err=0.000% dropped=21365 srvCPU=7.79 lbCPU=0.27
+[scale] done -> /devspace/Projects/9router/docs/benchmarks/runs/scaling/n8

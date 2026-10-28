@@ -8,7 +8,8 @@ Contents: [1 Summary](#1-summary) · [2 Environment](#2-environment) · [3 Metho
 [4 Node build results](#4-node-build-results) · [5 What the profile found and the fix](#5-what-the-profile-found-and-the-fix) ·
 [6 Cloudflare build: projected cost](#6-cloudflare-build-projected-cost-per-1m-requests) ·
 [7 Reproduce](#7-reproduce) · [8 Caveats and what is not verified](#8-caveats-and-what-is-not-verified) ·
-[Appendix A: all generated tables](#appendix-a-all-generated-tables)
+[Appendix A: all generated tables](#appendix-a-all-generated-tables) ·
+[10 Multi-process scaling](#10-multi-process-scaling-1-2-4-8-node-processes-behind-a-balancer) · [11 CPU profile](#11-cpu-profile-of-the-chat-path) · [12 Cloudflare build dry run](#12-cloudflare-build-dry-run-no-deploy)
 
 ## 1. Summary
 
@@ -38,7 +39,7 @@ Findings that are not fixed and worth a follow-up:
   copied database. It is the slowest endpoint by an order of magnitude and a good candidate for a response cache.
 * The default per-request INFO log lines are cheap now (silencing them gave +2.6% on chat, within run-to-run noise),
   so `LOG_LEVEL` is no longer a meaningful tuning knob on this build.
-* One Node process uses ~1.15 cores. Throughput scales with processes behind a reverse proxy (not measured here).
+* One Node process uses ~1.15 cores. Throughput scales sublinearly with processes behind a balancer (section 10).
 
 ## 2. Environment
 
@@ -406,7 +407,7 @@ exits, so each group is a single foreground command; on a normal machine you can
   sessions chat throughput varied by up to ~13% (`chat-ns-plain` c=32: 519 in the A/B session, 588 in the main-matrix session
   about 14 minutes later, same build). Within a session the repeats agree well (CV 0.4 - 2.8% for most cells; 9.4% for `chat-ns-acl` c=32).
   Treat any difference below ~10% across sessions as noise.
-* **Single server process, single machine, loopback.** No network, TLS, reverse proxy, or multi-process/cluster mode was measured.
+* **Single server process, single machine, loopback.** (Sections 1-9.) No network, TLS or real reverse proxy was measured; multi-process mode is section 10.
   Absolute req/s will differ on other hardware; the shape (CPU-bound, N\* ≈ 1 for an instant upstream) will not.
 * **Instant mock upstream.** It isolates router overhead. Real providers add their own latency (the 50 ms run shows how
   N\* grows) and real streaming holds connections far longer than the 8-chunk mock.
@@ -1014,3 +1015,133 @@ narrowing and fail-closed behaviour are unchanged.
 Raw runs: `runs/models-fix/`. `/v1/models` is now about 8x faster, the same order as a chat completion, and no longer
 the slowest endpoint. Cold-isolate Cloudflare reads of the custom-model table (section 6) are unchanged.
 
+
+## 10. Multi-process scaling (1, 2, 4, 8 Node processes behind a balancer)
+
+Question: one Node process uses about one core, so does throughput scale with N processes behind a load balancer, and what
+breaks when several processes share one `DATA_DIR`? Chat completions, non-stream, valid plain key, instant mock upstream,
+normal Node build (`node custom-server.js`, variant `node`), scrubbed database copy, commit `e3be0d09`.
+
+### Setup
+
+| Item | Value |
+|---|---|
+| Processes | N copies of `node custom-server.js`, ports 20301+, **one shared `DATA_DIR`** (one SQLite file, WAL) |
+| Balancer | `scripts/bench/balancer.mjs`: Node L4 (TCP) round-robin, one backend per accepted connection (nginx and haproxy are not installed). It used 0.04 - 0.28 cores in every run, so it was never the limit. |
+| Pinning (`taskset`) | server i -> CPUs 2i,2i+1 (one **full physical core**, both SMT threads); mock upstream -> CPU 8; balancer -> CPU 10; **4 load-generator processes** -> CPUs 12-15. N <= 4 keeps servers and helpers on disjoint cores. **N = 8 cannot**: servers 4-7 take cores 4-7, shared with the mock, balancer and generators (16 threads for 8 servers + 7 helper processes). |
+| Load | closed loop at total c = 16, 64, 256, 1024 (split evenly over the 4 generators, so each generator holds c/4 keep-alive sockets), 8 s windows (longer when W is long), 2 s warm-up, 3 repeats; open loop at 250 x N and 400 x N req/s (15 s, 3 repeats). Exact nearest-rank percentiles over the pooled samples. |
+| Why 4 generators | one Node generator tops out near 3,000 req/s; N = 8 needs more. This changes the arrival pattern (see "Reading the result"), so the N = 1 numbers here are not comparable to section 4. |
+| Machine | same shared desktop as section 2, load average 3.1 - 6.7 at the start of the runs (`env.json`). |
+
+Raw data: `runs/scaling/n{1,2,4,8}/{closed,open,pooled,env}.json`, `run.log`; correctness probes in `runs/scaling/probe/`;
+an A/B of shared vs separate data directories in `runs/scaling/ab-shared-vs-separate-data.json`. Tables regenerate with
+`node scripts/bench/scaling-report.mjs docs/benchmarks/runs/scaling`.
+
+### Results
+
+Zero failed requests in all 48 closed-loop and 24 open-loop runs (arrivals dropped by the generators in the overload rows below are counted separately).
+
+**Peak closed-loop throughput** (best c per N; CI95 over 3 repeats):
+
+| N | peak req/s | at c | scaling efficiency `thr(N)/(N·thr(1))` | speed-up | server CPU (cores, all procs) | CPU ms / request |
+|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 1,132 ±29 | 1024 | 1.00 | 1.00x | 1.07 | 0.94 |
+| 2 | 1,759 ±832 | 1024 | 0.78 | 1.55x | 2.09 | 1.19 |
+| 4 | 1,830 ±866 | 1024 | 0.40 | 1.62x | 3.89 | 2.13 |
+| 8 | 1,704 ±127 | 1024 | 0.19 | 1.50x | 6.86 | 4.03 |
+
+The c = 1024 cells for N = 2 and 4 have CV 19% (one repeat in three runs far above the others), so their peak and efficiency
+carry a wide interval. The cells with tight intervals tell the same story:
+
+| c | N=1 | N=2 | N=4 | N=8 |
+|--:|--:|--:|--:|--:|
+| 16 req/s (efficiency) | 395 ±11 (1.00) | 725 ±79 (0.92) | 1,096 ±48 (0.69) | 1,422 ±32 (0.45) |
+| 256 req/s (efficiency) | 701 ±416 (1.00) | 906 ±27 (0.65) | 1,345 ±72 (0.48) | 1,677 ±36 (0.30) |
+
+**Open loop**, exact pooled percentiles in ms (rate = total arrival rate; 3 x 15 s each):
+
+| N | target req/s | achieved | dropped/run | server CPU / process | p50 | p90 | p95 | p99 | p99.9 | max |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 250 | 250 | 0 | 0.61 | 6.66 | 9.43 | 12.5 | 43.0 | 162 | 206 |
+| 1 | 400 | 400 | 0 | 0.92 | 5.84 | 15.3 | 24.1 | 78.2 | 330 | 387 |
+| 2 | 500 | 500 | 0 | 0.69 | 4.12 | 6.67 | 9.20 | 15.7 | 69.7 | 104 |
+| 2 | 800 | 800 | 0 | 1.00 | 13.96 | 56.1 | 73.3 | 112 | 380 | 663 |
+| 4 | 1000 | 1000 | 0 | 0.80 | 6.49 | 13.5 | 18.0 | 31.2 | 86.6 | 181 |
+| 4 | 1600 | **1396** | 3,054 | 0.98 | 357 | 546 | 13,457 | 15,260 | 15,614 | 15,806 |
+| 8 | 2000 | **1559** | 6,612 | 0.83 | 456 | 783 | 1,015 | 15,511 | 16,043 | 16,118 |
+| 8 | 3200 | **1599** | 24,018 | 0.84 | 475 | 653 | 703 | 777 | 926 | 1,027 |
+
+Rows whose achieved rate is below the target are **overload**, not service latency (queue grows for the whole window, the
+generators drop arrivals beyond 600 in flight per generator). The sustainable open-loop rate is therefore a little above
+400 req/s for 1 process, 800+ for 2 (800 works, p99 112 ms), 1,000-1,400 for 4 and about 1,500-1,600 for 8: a 1 -> 2 -> 4 -> 8 speed-up of
+roughly 1.9x, 2.8x, 3.6x (capacity estimates from the achieved rates, not separately measured knees).
+
+### Reading the result
+
+* **Scaling is sublinear and the CPU is the reason, not waiting.** Every server process sits at 0.85 - 1.1 cores in every
+  run, balanced within 10% (balancer connections per backend are exactly equal), but the CPU spent per request rises with N
+  (closed loop c=256: 1.55 ms at N=1, 2.30 at N=2, 2.93 at N=4, 4.10 at N=8). Adding processes adds capacity until the
+  machine, not the application, is the limit.
+* **Shared database cost is small.** Same N=4, c=256, shared vs separate `DATA_DIR` copies, arms alternated twice: 1,265 vs 1,359
+  req/s mean, **7% lower with one shared SQLite file** (`ab-shared-vs-separate-data.json`). That is the price of the per-request
+  usage write contending for the WAL write lock; it is not the main reason for the efficiency loss.
+* **The rest is the hardware and the arrival pattern, not proven to be the application.** This machine is a laptop-class Ryzen 7 5800H
+  whose per-core clocks fall when more cores are busy, N = 8 forces servers to share cores with helpers (and 7+ busy cores out of 8
+  physical), and the box was not idle. Per-request CPU also depends on how many requests the event loop finds ready per
+  iteration: with the four-generator pattern, one process at c=1024 spends 0.94 ms per request but only 2.8 ms at c=16, so cells
+  with fewer connections per process look "less efficient" regardless of N. A fair efficiency number needs a quiet multi-socket
+  host with the same connections per process; on this one, take **N = 2 -> 1.9x and N = 4 -> 3x as the realistic open-loop scaling,
+  and N = 8 as hardware-bound.**
+* **The single-process numbers of section 4 (617 req/s) are not a ceiling for a bursty client.** Four generator processes give
+  one server process 1,130 req/s at c=1024 (and 400 req/s at c=16), while a constant-rate (open-loop) client is at 0.92 cores with p99 78 ms at 400 req/s (an earlier, discarded N=1 run at 500 req/s queued for seconds), so its
+  capacity is a little above 400 req/s on one full core. Burst-heavy clients batch more work per event-loop turn; paced clients do not.
+* **Tail at overload.** c=1024 cells show `max` of 10 s: individual connections starved for the whole window (their first request
+  of the window started at t ~ 5 ms and completed at the window end). This happens with 1 process as with 8; it is connection
+  fairness under heavy overload, not an error (no request failed).
+
+### Correctness when several processes share one `DATA_DIR`
+
+All checked with N = 4 processes behind the balancer (`scaling.mjs --probe rate|conc|revoke|usage`, raw JSON in `runs/scaling/probe*`).
+
+| Concern | Result | Evidence |
+|---|---|---|
+| **Per-key rate limit** (`rateLimitRequests`) | **Per process, not global.** A key limited to 100 requests / 600 s let **400 of 440** requests through (4 x 100), 40 got HTTP 429. | `probe/probe-rate.json`; `memoryState()` in `src/lib/coordinator/client.js` keeps the window counters in a per-process `Map`. |
+| **Concurrent-request cap** (`maxConcurrentRequests`) | **Per process.** A cap of 4 let **16 of 32** simultaneous requests run (4 per process), 16 got 429. | `probe/probe-conc.json` |
+| **Key edit / revocation made by another process** | **Not seen until the 5-minute API-key cache expires.** After setting `isActive = 0` directly in SQLite, all 16 requests at +0 s, +2 s and +5 s still returned 200. In-process invalidation only clears the cache of the process that handled the edit. | `probe/probe-revoke.json`; `API_KEYS_CACHE_TTL_MS = 5 min` in `apiKeysRepo.js` |
+| Budgets, account locks, provider scores | Same mechanism (per-process `budgets`, `locks`, `scores` maps in the memory coordinator): **not shared**. Not tested, read from the code. | `src/lib/coordinator/client.js` |
+| **Client IP behind a TCP balancer** | The servers see the balancer's `127.0.0.1` for every client. Per-IP controls key on that address, and a burst of rate-limit 429s made the server **auto-block `127.0.0.1`** (HTTP 403 for everyone) in the first probe attempt. Use an L7 proxy that sets `X-Forwarded-For`/`X-Real-IP` (honoured from loopback peers only). | `probe/probe-rate.json` (`sampleErrorLines`) |
+| **SQLite write contention** | **Real bug found and fixed** (`e3be0d09`). The usage-stats transaction reads then writes. It started as a deferred transaction, which fails immediately with `database is locked` when another process committed in between (the 5 s `busy_timeout` is not consulted for that upgrade). Before: 949 `Failed to save usage stats` errors in 8 s of load at N=4; the full benchmark logged 14,994 / 61,804 / 171,258 "database is locked" lines for N = 2 / 4 / 8 (`runs/scaling-before-tx-fix/`). After (`BEGIN IMMEDIATE`, nested calls stay savepoints): **0 errors at N=4 and N=8** (`runs/scaling-probe-usage-after/`), no log lines in any of the final runs, `PRAGMA integrity_check` ok, journal mode `wal`. HTTP responses were never affected (0 failed requests either way); the loss was usage rows / the daily aggregate. |
+| Usage rows vs requests | At about 1,000 req/s only 60 - 66% of requests produce a `usageHistory` row at **any** N (N=1: 3,558 rows for 5,915 requests; N=4 after the fix: 6,702 for 10,203). Identical-millisecond rows with equal token counts collapse into one by the existing dedup check in `saveRequestUsage`. `totalRequestsLifetime` equals the row count. Pre-existing, not caused by multi-process; flagged because usage-based billing/limits read these rows. | `runs/scaling-probe-usage-{before,after}/` |
+| Cold start | Servers were started one after the other (the first alone). **Several processes cold-starting on an empty `DATA_DIR` at once (concurrent migrations) was not tested.** | |
+| Background work | Each process starts its own background token refresher (`custom-server.js`): N processes refresh the same OAuth connections N times. Read from the code, not measured (scrubbed connections are inactive here). | |
+
+Bottom line: **N processes on one machine work and add real capacity, but rate limits, concurrency caps, budgets and
+key revocation become approximately N-times looser / slower to propagate.** Run a single process per tenant scope, or
+move those counters to a shared store, before relying on exact enforcement behind a balancer.
+
+Not verified here: the dashboard (SSE stats, settings saves) with several writers, WAL checkpoint behaviour over hours,
+more than 8 processes, a real L7 proxy (nginx/haproxy/Caddy), TLS, streaming responses under N processes, and numbers on a
+quiet dedicated host.
+
+## 11. CPU profile of the chat path
+
+`node --cpu-prof` on one server process under closed-loop load (c=32, 25 s window): **no function above 5% self time**
+(largest: the settings normaliser at 2.6%), so no change was made. Application code is 30.5% of samples, Next.js 19.4%, undici
+9.7%, GC 3.7%. The SQLite adapter totals 4.2% and settings + connection-list copying 3.9%, both candidates for a cache. Full
+tables and how to reproduce: [CPU_PROFILE_CHAT.md](CPU_PROFILE_CHAT.md).
+
+## 12. Cloudflare build dry run (no deploy)
+
+`npm run build:cloudflare` run to completion on the same working tree; nothing was deployed or published (`wrangler deploy`/`publish`
+and the Antideploy flow were not invoked).
+
+| Item | Result |
+|---|---|
+| Build time | **62 s** wall clock (`next build --webpack` with `NINEROUTER_RUNTIME=cloudflare`, then `opennextjs-cloudflare build`, with the auth-guard and worker-parse self-checks); exit 0. Incremental caches in `.next/cache` were present; a cold-cache build was not measured. |
+| Marker | `.next/standalone/.9router-build-variant` = `cloudflare` |
+| Worker bundle | `.open-next/worker.js` 28,689 B; `.open-next/server-functions/default/handler.mjs` 13,998,196 B (13.35 MiB), **3,320,626 B gzip -9 (3.17 MiB)**; `middleware/handler.mjs` 634,436 B (146,982 B gzip). `.open-next/` is 75 MB in total including static assets and `node_modules` copies. Total gzip of the three entry files: about 3.47 MB. |
+| Local boot refused | `node custom-server.js` on that output: prints the "CLOUDFLARE WORKER variant" message and **exits with status 1**. With `NINEROUTER_ALLOW_CLOUDFLARE_STANDALONE=1` it boots (Next.js "Ready"), as designed. |
+| Node rebuild | `npm run build` right after: **41 s**, marker = `node`. Booted against a `VACUUM INTO` copy of the real database in a temp `DATA_DIR` (never the real file): `GET /api/health` -> **200**, and the first database access logged `[DB] Driver: node:sqlite | file: <tmp>/db/data.sqlite` (the line is lazy: not printed until the first DB access, e.g. `GET /api/init`). |
+
+Not verified: the worker running on Cloudflare (or in `wrangler dev`/`opennextjs-cloudflare preview`), its startup time, or the
+compressed size as Cloudflare counts it (that is measured by `wrangler deploy --dry-run`, which was not run).

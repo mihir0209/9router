@@ -1,0 +1,32 @@
+{
+  "servers": 4,
+  "probes": {
+    "usagePersistence": {
+      "requestsProcessed": 10203,
+      "requestsAnsweredOk": 9691,
+      "usageHistoryRows": 6702,
+      "totalRequestsLifetime": "6702",
+      "dailyRequests": 6702,
+      "saveFailures": 0,
+      "databaseIsLockedLines": 0
+    },
+    "database": {
+      "integrity": {
+        "integrity_check": "ok"
+      },
+      "journalMode": {
+        "journal_mode": "wal"
+      },
+      "tables": {
+        "usageHistory": 6702,
+        "usageDaily": 1,
+        "requestDetails": 0
+      },
+      "logErrors": {
+        "sqliteBusyOrLocked": 0,
+        "errorLines": 0,
+        "sampleErrorLines": []
+      }
+    }
+  }
+}

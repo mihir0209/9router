@@ -1,0 +1,8 @@
+{
+  "note": "N=4, closed loop c=256, 3 repeats per arm, arms alternated (shared, separate, shared, separate). Transcribed from the console output; the per-arm output dirs were temporary. req/s per repeat.",
+  "shared_datadir":   [[1202, 1285, 1218], [1296, 1336, 1250]],
+  "separate_datadir": [[1243, 1386, 1259], [1366, 1490, 1411]],
+  "mean_shared": 1264.5,
+  "mean_separate": 1359.2,
+  "shared_vs_separate_pct": -7.0
+}

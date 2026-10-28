@@ -1,0 +1,59 @@
+{
+  "servers": 4,
+  "probes": {
+    "revocationFromOtherWriter": {
+      "before": {
+        "by": {
+          "200": 16
+        }
+      },
+      "checks": [
+        {
+          "afterMs": 0,
+          "by": {
+            "200": 16
+          }
+        },
+        {
+          "afterMs": 2000,
+          "by": {
+            "200": 16
+          }
+        },
+        {
+          "afterMs": 5000,
+          "by": {
+            "200": 16
+          }
+        }
+      ]
+    },
+    "database": {
+      "integrity": {
+        "integrity_check": "ok"
+      },
+      "journalMode": {
+        "journal_mode": "wal"
+      },
+      "tables": {
+        "usageHistory": 2592,
+        "usageDaily": 1,
+        "requestDetails": 0
+      },
+      "logErrors": {
+        "sqliteBusyOrLocked": 814,
+        "errorLines": 407,
+        "sampleErrorLines": [
+          "Failed to save usage stats: Error: database is locked",
+          "  code: 'ERR_SQLITE_ERROR',",
+          "  errstr: 'database is locked'",
+          "Failed to save usage stats: Error: database is locked",
+          "  code: 'ERR_SQLITE_ERROR',",
+          "  errstr: 'database is locked'",
+          "Failed to save usage stats: Error: database is locked",
+          "  code: 'ERR_SQLITE_ERROR',"
+        ]
+      }
+    }
+  }
+}

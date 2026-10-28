@@ -1,0 +1,41 @@
+{
+  "servers": 4,
+  "probes": {
+    "concurrencyCap": {
+      "configured": 4,
+      "sent": 32,
+      "by": {
+        "200": 16,
+        "429": 16
+      },
+      "sample429": "{\"error\":{\"message\":\"Concurrent request limit reached\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"}}"
+    },
+    "database": {
+      "integrity": {
+        "integrity_check": "ok"
+      },
+      "journalMode": {
+        "journal_mode": "wal"
+      },
+      "tables": {
+        "usageHistory": 2498,
+        "usageDaily": 1,
+        "requestDetails": 0
+      },
+      "logErrors": {
+        "sqliteBusyOrLocked": 734,
+        "errorLines": 367,
+        "sampleErrorLines": [
+          "Failed to save usage stats: Error: database is locked",
+          "  code: 'ERR_SQLITE_ERROR',",
+          "  errstr: 'database is locked'",
+          "Failed to save usage stats: Error: database is locked",
+          "  code: 'ERR_SQLITE_ERROR',",
+          "  errstr: 'database is locked'",
+          "Failed to save usage stats: Error: database is locked",
+          "  code: 'ERR_SQLITE_ERROR',"
+        ]
+      }
+    }
+  }
+}

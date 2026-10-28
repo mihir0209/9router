@@ -1,0 +1,39 @@
+[00:22:57] 🟡 📊 DONE 3ms · IN 12 · OUT 8
+[00:22:57] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:22:57] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:22:57] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:22:57] 🟡 📊 DONE 7ms · IN 12 · OUT 8
+[00:22:57] 🟡 📊 DONE 6ms · IN 12 · OUT 8
+[00:22:57] 🟡 📊 DONE 4ms · IN 12 · OUT 8
+[00:22:57] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:22:57] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:22:57] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:22:57] 🟡 📊 DONE 6ms · IN 12 · OUT 8
+[00:22:57] 🟡 📊 DONE 4ms · IN 12 · OUT 8
+Failed to save usage stats: Error: database is locked
+    at Object.run (.next/server/chunks/8520.js:9:5593)
+    at Object.run (.next/server/chunks/9422.js:4:3942)
+    at <unknown> (.next/server/chunks/9422.js:22:258)
+    at Object.transaction (.next/server/chunks/8520.js:9:5862)
+    at O (.next/server/chunks/9422.js:13:43981) {
+  code: 'ERR_SQLITE_ERROR',
+  errcode: 5,
+  errstr: 'database is locked'
+}
+[00:22:57] 🟡 📊 DONE 3ms · IN 12 · OUT 8
+[00:22:57] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:22:57] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:22:57] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[00:22:57] 🟡 📊 DONE 6ms · IN 12 · OUT 8
+[00:22:57] 🟡 📊 DONE 13ms · IN 12 · OUT 8
+[00:22:57] 🟡 📊 DONE 11ms · IN 12 · OUT 8
+Failed to save usage stats: Error: database is locked
+    at Object.run (.next/server/chunks/8520.js:9:5593)
+    at Object.run (.next/server/chunks/9422.js:4:3942)
+    at <unknown> (.next/server/chunks/9422.js:22:258)
+    at Object.transaction (.next/server/chunks/8520.js:9:5862)
+    at O (.next/server/chunks/9422.js:13:43981) {
+  code: 'ERR_SQLITE_ERROR',
+  errcode: 5,
+  errstr: 'database is locked'
+}

@@ -1,0 +1,5 @@
+{
+  "note": "Copied from the console output of the run before the BEGIN IMMEDIATE fix (the per-run out dir was in a temp location). Same probe: scripts/bench/scaling.mjs --probe usage, 64 connections per generator x 4 generators, 8 s closed loop, 15 s flush wait.",
+  "n1": {"requestsProcessed":5915,"requestsAnsweredOk":5403,"usageHistoryRows":3558,"totalRequestsLifetime":"3558","dailyRequests":3558,"saveFailures":0,"databaseIsLockedLines":0},
+  "n4": {"requestsProcessed":9660,"requestsAnsweredOk":9148,"usageHistoryRows":6156,"totalRequestsLifetime":"6156","dailyRequests":6156,"saveFailures":949,"databaseIsLockedLines":1898}
+}
