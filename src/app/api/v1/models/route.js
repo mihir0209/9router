@@ -242,13 +242,32 @@ export function modelsInputsEtag(inputs, extra = "") {
     .update(JSON.stringify({
       c: inputs.connections.map((x) => [x.id, x.provider, x.isActive, x.priority]),
       b: inputs.combos.map((x) => [x.name, x.models, x.kind]),
-      m: inputs.customModels.map((x) => [x.providerAlias, x.id, x.name, x.kind]),
-      a: inputs.modelAliases,
+      m: digestOnce(inputs.customModels, (list) => list.map((x) => [x.providerAlias, x.id, x.name, x.kind])),
+      a: digestOnce(inputs.modelAliases, (aliases) => aliases),
       d: inputs.disabledByAlias,
       e: extra,
     }))
     .digest("hex")
     .slice(0, 32);
+}
+
+// The custom-model list and alias map are the large inputs (thousands of
+// entries) and the repos hand back the same object until a write or the cache
+// TTL replaces it. Hashing them on every request was most of the cost of a
+// /v1/models call, so digest each distinct object once. A changed catalogue is
+// always a new object (writes invalidate the repo cache), so the fingerprint
+// still moves on the very next request after an edit. Falls back to hashing
+// every time for anything that cannot be a WeakMap key.
+const inputDigests = new WeakMap();
+function digestOnce(value, project) {
+  const hashable = () => createHash("sha256").update(JSON.stringify(project(value))).digest("hex");
+  if (value === null || typeof value !== "object") return hashable();
+  let digest = inputDigests.get(value);
+  if (!digest) {
+    digest = hashable();
+    inputDigests.set(value, digest);
+  }
+  return digest;
 }
 
 export async function buildModelsList(kindFilter, options = {}) {

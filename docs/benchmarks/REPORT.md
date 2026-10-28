@@ -991,3 +991,26 @@ Exact percentiles over the pooled samples of all repeats of each cell (nearest r
 - highest tested concurrency with zero errors in every repeat: **c = 32**
 - run-to-run variance of throughput (coefficient of variation): c=1: 9.9%, c=8: 4.6%, c=32: 2.6%
 
+## 9. Follow-up: `GET /v1/models` (6 ms -> 0.7 ms CPU per call)
+
+Profiling `/v1/models` on the copied database (`--cpu-prof`, c=8) showed the catalogue projection was already skipped
+by the hash gate, but the gate itself cost almost everything: `modelsInputsEtag` ran `JSON.stringify` + SHA-256 over
+5,291 custom models and 1,085 aliases on every request (about 55% of server CPU), and `getCustomModels()` rebuilt a
+5,291-element array with `Object.values` on every call (about 17%).
+
+Fix: the alias map and custom-model list are digested once per distinct object (the repos hand back the same object until a
+write or the 5 s kv cache TTL replaces it, so an edit still moves the ETag on the very next request), and `getCustomModels()`
+derives its (frozen) array once per cached object. The response bytes, ETag semantics, per-key restricted-catalogue
+narrowing and fail-closed behaviour are unchanged.
+
+| Metric (`models`, one process, Node build, 3 repeats) | Before | After |
+|---|--:|--:|
+| c=8 throughput (profiling run) | 178 - 183 req/s | 1,130 req/s |
+| c=32 throughput | 172 - 178 req/s | 1,393 req/s |
+| c=128 throughput | 172 req/s | 1,336 - 1,388 req/s |
+| c=1 latency p50 / p99 | n/a | 0.72 - 0.81 ms / 1.3 - 1.6 ms |
+| CPU per call | ~6 ms | ~0.7 ms |
+
+Raw runs: `runs/models-fix/`. `/v1/models` is now about 8x faster, the same order as a chat completion, and no longer
+the slowest endpoint. Cold-isolate Cloudflare reads of the custom-model table (section 6) are unchanged.
+

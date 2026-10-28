@@ -70,9 +70,20 @@ function customKey(providerAlias, id, type) {
   return `${providerAlias}|${id}|${type}`;
 }
 
+// Object.values over thousands of keys is a measurable per-request cost on
+// /v1/models, and the kv cache hands back the same object until a write or the
+// TTL replaces it. Derive the array once per cached object. It is frozen so a
+// caller cannot corrupt the shared copy; every caller only reads or filters.
+const customModelsArrays = new WeakMap();
+
 export async function getCustomModels() {
   const all = await cachedGetAll("customModels", () => customKv.getAll());
-  return Object.values(all);
+  let list = customModelsArrays.get(all);
+  if (!list) {
+    list = Object.freeze(Object.values(all));
+    customModelsArrays.set(all, list);
+  }
+  return list;
 }
 
 // Atomic upsert inside transaction to prevent duplicate races.
