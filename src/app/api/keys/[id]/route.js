@@ -3,6 +3,7 @@ import { deleteApiKey, getApiKeyById, getApiKeyByKey, updateApiKey } from "@/lib
 import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
 import { serializeApiKey } from "@/lib/apiKeys/serializers";
 import { getBudgetState } from "@/lib/budgetService.js";
+import { validateForcePins } from "@/lib/apiKeys/forcePins";
 
 function normalizeList(value) {
   return Array.isArray(value) ? value.join(",") : value;
@@ -102,6 +103,19 @@ export async function PUT(request, { params }) {
     }
     const validationError = validatePolicy(updateData);
     if (validationError) return NextResponse.json({ error: validationError }, { status: 400 });
+    // Validate pins against the post-update state: a supplied value wins over
+    // the stored one, so a pin is also re-checked when only a blocked list moves.
+    const pinFieldsTouched = ["forceProvider", "forceModel", "blockedModels", "blockedProviders"].some((field) => updateData[field] !== undefined);
+    if (pinFieldsTouched) {
+      const pins = validateForcePins(updateData, {
+        forceProvider: updateData.forceProvider !== undefined ? updateData.forceProvider : existing.forceProvider,
+        forceModel: updateData.forceModel !== undefined ? updateData.forceModel : existing.forceModel,
+        blockedModels: updateData.blockedModels !== undefined ? updateData.blockedModels : existing.blockedModels,
+        blockedProviders: updateData.blockedProviders !== undefined ? updateData.blockedProviders : existing.blockedProviders,
+      });
+      if (pins.error) return NextResponse.json({ error: pins.error }, { status: 400 });
+      Object.assign(updateData, pins.values);
+    }
     if (updateData.billingMode === "byok" && !existing.byokCredentialsCiphertext) {
       return NextResponse.json({ error: "Configure BYOK credentials before enabling byok billing" }, { status: 400 });
     }

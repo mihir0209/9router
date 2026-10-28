@@ -40,6 +40,8 @@ export default function APIPageClient({ machineId }) {
     allowedIPs: "",
     blockedIPs: "",
     expiresAt: "",
+    forceProvider: "",
+    forceModel: "",
   });
   const [showEditModal, setShowEditModal] = useState(false);
   const [editingKey, setEditingKey] = useState(null);
@@ -656,6 +658,42 @@ export default function APIPageClient({ machineId }) {
     }
   };
 
+  // Forced routing inputs shared by the Add and Edit modals. A plain function
+  // (not a component) so the inputs keep focus across re-renders.
+  const renderForcedRouting = (idPrefix) => {
+    const providerIds = [...new Set((activeProviders || []).map((c) => c?.provider).filter(Boolean))];
+    return (
+      <div className="border-t border-border pt-4">
+        <p className="text-sm font-medium text-text-main mb-1">Forced Routing</p>
+        <p className="text-xs text-text-muted mb-3">
+          A pinned model overrides whatever model the client asks for, and a pinned provider restricts the key to
+          that provider. Pins also narrow what /v1/models lists for this key. Leave empty for no pin.
+        </p>
+        <Input
+          label="Forced Provider"
+          value={keyForm.forceProvider}
+          onChange={(e) => setKeyForm({ ...keyForm, forceProvider: e.target.value })}
+          placeholder="e.g. openai"
+          list={`${idPrefix}-force-providers`}
+          autoComplete="off"
+          maxLength={256}
+        />
+        <datalist id={`${idPrefix}-force-providers`}>
+          {providerIds.map((id) => <option key={id} value={id} />)}
+        </datalist>
+        <Input
+          label="Forced Model"
+          value={keyForm.forceModel}
+          onChange={(e) => setKeyForm({ ...keyForm, forceModel: e.target.value })}
+          placeholder="provider/model, e.g. openai/gpt-4o"
+          autoComplete="off"
+          maxLength={256}
+          className="mt-3"
+        />
+      </div>
+    );
+  };
+
   const handleCreateKey = async () => {
     if (!newKeyName.trim()) return;
 
@@ -671,6 +709,8 @@ export default function APIPageClient({ machineId }) {
           rateLimitWindowSeconds: parseInt(keyForm.rateLimitWindowSeconds) || 60,
           tokenLimitDaily: parseInt(keyForm.tokenLimitDaily) || 0,
           tokenLimitMonthly: parseInt(keyForm.tokenLimitMonthly) || 0,
+          forceProvider: keyForm.forceProvider.trim(),
+          forceModel: keyForm.forceModel.trim(),
         }),
       });
       const data = await res.json();
@@ -704,6 +744,8 @@ export default function APIPageClient({ machineId }) {
       allowedIPs: "",
       blockedIPs: "",
       expiresAt: "",
+      forceProvider: "",
+      forceModel: "",
     });
   };
 
@@ -758,6 +800,8 @@ export default function APIPageClient({ machineId }) {
       allowedIPs: key.allowedIPs || "",
       blockedIPs: key.blockedIPs || "",
       expiresAt: key.expiresAt ? key.expiresAt.slice(0, 16) : "",
+      forceProvider: key.forceProvider || "",
+      forceModel: key.forceModel || "",
     });
     setShowEditModal(true);
   };
@@ -777,6 +821,8 @@ export default function APIPageClient({ machineId }) {
           tokenLimitDaily: parseInt(keyForm.tokenLimitDaily) || 0,
           tokenLimitMonthly: parseInt(keyForm.tokenLimitMonthly) || 0,
           expiresAt: keyForm.expiresAt ? new Date(keyForm.expiresAt).toISOString() : "",
+          forceProvider: keyForm.forceProvider.trim(),
+          forceModel: keyForm.forceModel.trim(),
         }),
       });
       if (res.ok) {
@@ -1244,6 +1290,14 @@ export default function APIPageClient({ machineId }) {
                         {key.allowedModels.split(",").length} model{key.allowedModels.split(",").length > 1 ? "s" : ""}
                       </span>
                     )}
+                    {(key.forceModel || key.forceProvider) && (
+                      <span
+                        className="text-xs text-cyan-500 bg-cyan-500/10 px-1.5 py-0.5 rounded max-w-[16rem] truncate"
+                        title={`Pinned: ${[key.forceProvider && `provider ${key.forceProvider}`, key.forceModel && `model ${key.forceModel}`].filter(Boolean).join(", ")}`}
+                      >
+                        Pinned: {key.forceModel || key.forceProvider}
+                      </span>
+                    )}
                     {key.allowedIPs && (
                       <span className="text-xs text-orange-500 bg-orange-500/10 px-1.5 py-0.5 rounded">
                         IP locked
@@ -1423,6 +1477,8 @@ export default function APIPageClient({ machineId }) {
             />
           </div>
 
+          {renderForcedRouting("add-key")}
+
           <div className="border-t border-border pt-4">
             <Input
               label="Expires At"
@@ -1568,6 +1624,8 @@ export default function APIPageClient({ machineId }) {
               className="mt-3"
             />
           </div>
+
+          {renderForcedRouting("edit-key")}
 
           <div className="border-t border-border pt-4">
             <Input
