@@ -57,9 +57,33 @@ export async function createCloudflareMemoryAdapter() {
   // reference data most requests never read; providerConnections is read by
   // routing, not by the admin/auth surface; the other two are analytics that
   // belong in the DB, not in a Worker's heap.
-  const LAZY_TABLES = new Set(["kv", "providerConnections", "usageHistory", "requestDetails"]);
+  // usageDaily is lazy too: one fat row per calendar day, read only by the usage
+  // dashboard; the analytics flush point-loads the single day it merges into
+  // (ensureRow) instead of every cold isolate reading the whole history.
+  const LAZY_TABLES = new Set(["kv", "providerConnections", "usageHistory", "requestDetails", "usageDaily"]);
   const EAGER_TABLES = Object.keys(TABLES).filter((table) => !LAZY_TABLES.has(table));
   const loadedTables = new Set(EAGER_TABLES);
+
+  // Last time each table was read from D1. Lets callers skip a forced refresh
+  // that would re-read what the isolate fetched a moment ago (cold start loads
+  // settings and apiKeys, and the first request then used to force-resync both).
+  const fetchedAt = new Map();
+  function freshWithin(table, ms) {
+    const at = fetchedAt.get(table);
+    return at !== undefined && Date.now() - at < ms;
+  }
+
+  /** Push fetched rows into live state, skipping rows already resident (local writes win). */
+  function mergeFetched(table, rows) {
+    if (!state.tables[table]) state.tables[table] = [];
+    const resident = state.tables[table];
+    if (!resident.length) {
+      for (const row of rows) resident.push(row);
+      return;
+    }
+    const known = new Set(resident.map((row) => primaryKeyFor(table, row)));
+    for (const row of rows) if (!known.has(primaryKeyFor(table, row))) resident.push(row);
+  }
 
   /** Load a lazy table from D1 once, on first touch. Safe to call concurrently. */
   async function ensureTables(names) {
@@ -70,14 +94,63 @@ export async function createCloudflareMemoryAdapter() {
     for (const table of wanted) loadedTables.add(table);
     try {
       const fresh = await fetchTablesFromD1(wanted);
-      for (const table of wanted) {
-        if (!state.tables[table]) state.tables[table] = [];
-        for (const row of fresh[table] || []) state.tables[table].push(row);
-      }
+      for (const table of wanted) mergeFetched(table, fresh[table] || []);
     } catch (error) {
       for (const table of wanted) loadedTables.delete(table);
       console.warn(`[DB] lazy load failed for ${wanted.join(",")}: ${error.message}`);
     }
+  }
+
+  /** Point-load one persisted row of a lazy table (no-op once the table is fully resident). */
+  const loadedRows = new Set();
+  async function ensureRow(table, rowKey) {
+    if (!d1 || !LAZY_TABLES.has(table) || loadedTables.has(table) || ops?.inTransaction()) return;
+    const id = `${table}\u0000${rowKey}`;
+    if (loadedRows.has(id)) return;
+    loadedRows.add(id);
+    try {
+      const result = await d1.prepare(`SELECT table_name, data FROM ${D1_TABLE} WHERE table_name = ? AND row_key = ?`).bind(table, rowKey).all();
+      const rows = [];
+      for (const row of result.results || []) {
+        try { rows.push(JSON.parse(row.data)); } catch { /* corrupt row: skip */ }
+      }
+      mergeFetched(table, rows);
+    } catch (error) {
+      loadedRows.delete(id);
+      console.warn(`[DB] row load failed for ${table}/${rowKey}: ${error.message}`);
+    }
+  }
+
+  // `kv` holds reference data in independent scopes (modelAliases,
+  // customModels, pricing, disabledModels, ...). customModels alone can be
+  // thousands of rows, and a proxied request almost never needs it, so the
+  // table is hydrated per scope: a request reads only the scopes it touches.
+  // ensureTables(["kv"]) still loads everything (export/import need that).
+  const loadedKvScopes = new Map(); // scope -> Promise<void> | true
+  const KV_SCOPE_SELECT = `SELECT table_name, data FROM ${D1_TABLE} WHERE table_name = 'kv' AND row_key >= ? AND row_key < ?`;
+
+  async function ensureKvScope(scope) {
+    if (!d1 || !scope || loadedTables.has("kv") || ops?.inTransaction()) return;
+    const existing = loadedKvScopes.get(scope);
+    if (existing) { if (existing !== true) await existing; return; }
+    // Row keys are `scope:<scope>|key:<key>`; '|' (0x7C) + 1 = '}' bounds the prefix.
+    const task = (async () => {
+      try {
+        const result = await d1.prepare(KV_SCOPE_SELECT).bind(`scope:${scope}|`, `scope:${scope}}`).all();
+        const rows = [];
+        for (const row of result.results || []) {
+          try { rows.push(JSON.parse(row.data)); } catch { /* corrupt row: skip, adapter is fail-open */ }
+        }
+        mergeFetched("kv", rows);
+        loadedKvScopes.set(scope, true);
+        fetchedAt.set(`kv:${scope}`, Date.now());
+      } catch (error) {
+        loadedKvScopes.delete(scope);
+        console.warn(`[DB] kv scope load failed for ${scope}: ${error.message}`);
+      }
+    })();
+    loadedKvScopes.set(scope, task);
+    await task;
   }
 
   /**
@@ -97,6 +170,8 @@ export async function createCloudflareMemoryAdapter() {
           )
           .bind(...tableNames)
           .all();
+    const stamp = Date.now();
+    for (const table of tableNames) fetchedAt.set(table, stamp);
     for (const row of result.results || []) {
       if (!fresh[row.table_name]) continue;
       try {
@@ -112,17 +187,26 @@ export async function createCloudflareMemoryAdapter() {
     return fresh;
   }
 
+  const CREATE_TABLE_SQL =
+    `CREATE TABLE IF NOT EXISTS ${D1_TABLE} (` +
+    `table_name TEXT NOT NULL, ` +
+    `row_key TEXT NOT NULL, ` +
+    `data TEXT NOT NULL, ` +
+    `updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, ` +
+    `PRIMARY KEY (table_name, row_key))`;
+
   async function initializeD1() {
     if (!d1) return;
-    await d1.prepare(
-      `CREATE TABLE IF NOT EXISTS ${D1_TABLE} (` +
-      `table_name TEXT NOT NULL, ` +
-      `row_key TEXT NOT NULL, ` +
-      `data TEXT NOT NULL, ` +
-      `updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, ` +
-      `PRIMARY KEY (table_name, row_key))`
-    ).run();
-    const fresh = await fetchTablesFromD1(EAGER_TABLES);
+    // Read first, create only when the table is missing: the DDL ran on every
+    // cold isolate and is a wasted statement everywhere but the very first boot.
+    let fresh;
+    try {
+      fresh = await fetchTablesFromD1(EAGER_TABLES);
+    } catch (error) {
+      if (!/no such table/i.test(String(error?.message || error))) throw error;
+      await d1.prepare(CREATE_TABLE_SQL).run();
+      fresh = await fetchTablesFromD1(EAGER_TABLES);
+    }
     for (const table of EAGER_TABLES) {
       state.tables[table] = fresh[table] || [];
     }
@@ -284,6 +368,9 @@ export async function createCloudflareMemoryAdapter() {
     transaction: ops.transaction,
     resync: resyncFromD1,
     ensureTables,
+    ensureKvScope,
+    ensureRow,
+    freshWithin,
     close: () => {},
     raw: state,
   };

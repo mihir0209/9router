@@ -1,0 +1,163 @@
+// Request-path traffic shaping for the coordinator Durable Object.
+//
+// Every proxied request used to cost the Durable Object (SQLite-backed, billed
+// per request and per row read/written) about 3 RPCs, 7 row reads and 4 row
+// writes: getActiveLocks, recordOutcome and recordMetrics. This module turns
+// that into amortised work, without changing what the coordinator ends up
+// knowing:
+//
+//   * reads (locks, scores) are served from a short TTL cache;
+//   * outcome and metric reports are aggregated in memory and sent as one batch
+//     per provider scope every `flushMs` (or `maxEvents` events), with the
+//     batch sent through ctx.waitUntil when a Workers context is available.
+//
+// Trade-offs, all explicit:
+//   * a lock another isolate sets is seen after at most `readTtlMs`; this
+//     isolate invalidates its own cache the moment it sets or clears one.
+//   * events not yet flushed when an isolate is evicted are lost (the same
+//     exposure the analytics buffer already has). They feed adaptive scoring
+//     and observability only, never enforcement.
+//
+// The module is runtime-agnostic: `call(method, payload, scope)` is injected,
+// and `waitUntil` is optional.
+
+export function createCoalescer({ call, now = () => Date.now(), tunables, waitUntil = null, onError = () => {} }) {
+  const cache = new Map(); // key -> { value, expires, scope }
+  const inflight = new Map();
+  const CACHE_CAP = 1000;
+
+  // pending aggregates
+  const outcomes = new Map(); // `${provider}|${connectionId}|${model}` -> item
+  const metrics = new Map(); // `${tenant}|${provider}|${connectionId}|${model}` -> item
+  let pendingEvents = 0;
+  let firstEventAt = null;
+  let timer = null;
+  let flushing = null;
+
+  const config = () => (typeof tunables === "function" ? tunables() : tunables);
+
+  // ---------- cached reads ----------
+
+  async function read(key, scope, loader) {
+    const ttl = config().coordinatorReadTtlMs;
+    if (!(ttl > 0)) return loader();
+    const hit = cache.get(key);
+    const t = now();
+    if (hit && hit.expires > t) return hit.value;
+    if (inflight.has(key)) return inflight.get(key);
+    const promise = Promise.resolve()
+      .then(loader)
+      .then((value) => {
+        if (cache.size >= CACHE_CAP) cache.delete(cache.keys().next().value);
+        cache.set(key, { value, expires: now() + ttl, scope });
+        return value;
+      })
+      .finally(() => inflight.delete(key));
+    inflight.set(key, promise);
+    return promise;
+  }
+
+  /** Drop cached reads for a coordinator scope (after this isolate changed that state). */
+  function invalidate(scope) {
+    for (const [key, entry] of cache) if (entry.scope === scope) cache.delete(key);
+  }
+
+  // ---------- coalesced writes ----------
+
+  function noteEvent() {
+    pendingEvents += 1;
+    const t = now();
+    if (firstEventAt === null) firstEventAt = t;
+    const { coordinatorFlushMs, coordinatorFlushMaxEvents } = config();
+    if (pendingEvents >= coordinatorFlushMaxEvents || t - firstEventAt >= coordinatorFlushMs) {
+      const task = flush();
+      if (waitUntil) waitUntil(task);
+      return;
+    }
+    if (!timer) {
+      timer = setTimeout(() => {
+        timer = null;
+        const task = flush();
+        if (waitUntil) waitUntil(task);
+      }, Math.max(1, coordinatorFlushMs - (t - firstEventAt)));
+      timer.unref?.();
+    }
+  }
+
+  function queueOutcome({ provider, connectionId, model, success, latencyMs, status, costUsd = 0 }) {
+    if (!provider || !connectionId) return;
+    const key = `${provider}|${connectionId}|${model}`;
+    const item = outcomes.get(key) || {
+      provider, connectionId, model, samples: 0, successes: 0, failures: 0, tailFailures: 0,
+      latencySumMs: 0, latencyCount: 0, costUsd: 0, lastStatus: 0,
+    };
+    item.samples += 1;
+    if (success) { item.successes += 1; item.tailFailures = 0; } else { item.failures += 1; item.tailFailures += 1; }
+    if (Number.isFinite(latencyMs)) { item.latencySumMs += Math.max(latencyMs, 0); item.latencyCount += 1; }
+    item.costUsd += Math.max(Number(costUsd) || 0, 0);
+    item.lastStatus = Number(status) || 0;
+    outcomes.set(key, item);
+    noteEvent();
+  }
+
+  function queueMetrics({ tenant, provider, connectionId, model, success, status, latencyMs }) {
+    if (!provider) return;
+    const key = `${tenant || "anonymous"}|${provider}|${connectionId}|${model}`;
+    const item = metrics.get(key) || {
+      tenant: tenant || "anonymous", provider, connectionId, model, successes: 0, failures: 0, tailFailures: 0,
+      lastStatus: 0, lastLatencyMs: null, latencyCount: 0, latencySumMs: 0, latencyMaxMs: 0,
+    };
+    if (success) { item.successes += 1; item.tailFailures = 0; } else { item.failures += 1; item.tailFailures += 1; }
+    item.lastStatus = Number(status) || 0;
+    if (Number.isFinite(latencyMs)) {
+      const l = Math.max(latencyMs, 0);
+      item.lastLatencyMs = l;
+      item.latencyCount += 1;
+      item.latencySumMs += l;
+      item.latencyMaxMs = Math.max(item.latencyMaxMs, l);
+    }
+    metrics.set(key, item);
+    noteEvent();
+  }
+
+  /** Send everything pending. Safe to call concurrently; failures requeue nothing (best effort). */
+  async function flush() {
+    if (flushing) return flushing;
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (!outcomes.size && !metrics.size) { pendingEvents = 0; firstEventAt = null; return { sent: 0 }; }
+    const outcomeItems = [...outcomes.values()];
+    const metricItems = [...metrics.values()];
+    outcomes.clear();
+    metrics.clear();
+    const sentEvents = pendingEvents;
+    pendingEvents = 0;
+    firstEventAt = null;
+
+    flushing = (async () => {
+      const byProvider = new Map();
+      for (const item of outcomeItems) {
+        if (!byProvider.has(item.provider)) byProvider.set(item.provider, []);
+        byProvider.get(item.provider).push(item);
+      }
+      const calls = [];
+      for (const [provider, items] of byProvider) {
+        calls.push(call("recordOutcomes", { items, now: now() }, `provider:${provider}`));
+      }
+      if (metricItems.length) calls.push(call("recordMetricsBatch", { items: metricItems, now: now() }, "metrics"));
+      const results = await Promise.allSettled(calls);
+      for (const r of results) if (r.status === "rejected") onError(r.reason);
+      return { sent: sentEvents, rpcs: calls.length };
+    })().finally(() => { flushing = null; });
+    return flushing;
+  }
+
+  return {
+    read,
+    invalidate,
+    queueOutcome,
+    queueMetrics,
+    flush,
+    pending: () => ({ events: pendingEvents, outcomeKeys: outcomes.size, metricKeys: metrics.size }),
+    clear() { cache.clear(); outcomes.clear(); metrics.clear(); pendingEvents = 0; firstEventAt = null; if (timer) { clearTimeout(timer); timer = null; } },
+  };
+}

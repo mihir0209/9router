@@ -77,6 +77,8 @@ beforeEach(() => {
   store.clear();
   mocks.run.mockImplementation(() => ({ changes: 1 }));
   process.env.NINEROUTER_RUNTIME = "cloudflare";
+  // Standard profile: 2s per-domain version polling (the extreme profile has its own tests).
+  process.env.NINEROUTER_D1_PROFILE = "standard";
   versionTest.reset();
   resetSettingsCache();
   resetApiKeysCache();
@@ -84,6 +86,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.NINEROUTER_RUNTIME;
+  delete process.env.NINEROUTER_D1_PROFILE;
 });
 
 describe("settings cache invalidation across isolates", () => {

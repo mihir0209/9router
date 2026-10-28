@@ -1,0 +1,1591 @@
+{
+  "generatedAt": "2026-10-28T08:00:35.814Z",
+  "label": "after-extreme",
+  "dataset": {
+    "connections": 42,
+    "apiKeys": 5,
+    "combos": 8,
+    "pools": 31,
+    "customModels": 5291,
+    "usageDays": 30
+  },
+  "scenarios": [
+    {
+      "scenario": "cold: chat non-stream",
+      "requests": 1,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 4,
+        "roundTrips": 4,
+        "rowsRead": 93,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 3,
+        "doRowsRead": 6,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 93,
+        "d1RowsWritten": 0,
+        "d1RowsWrittenWorstCase": 0,
+        "d1Queries": 4,
+        "doRpcs": 3,
+        "doRowsRead": 6,
+        "doRowsWritten": 0
+      },
+      "immediate": {
+        "queries": 4,
+        "roundTrips": 4,
+        "rowsRead": 93,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {
+          "select": 4
+        }
+      },
+      "deferredFlush": null,
+      "durableObject": {
+        "rpcs": 3,
+        "rowsRead": 6,
+        "rowsWritten": 0,
+        "byMethod": {
+          "getVersions": 2,
+          "getActiveLocks": 1
+        }
+      },
+      "deferredDurableObject": null,
+      "d1Statements": [
+        "select n=51 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?, ?, ?, ?, ?, ?, ?) [\"_meta\",\"settings\",\"providerNodes\",\"proxyPools\"]",
+        "select n=0 SELECT table_name, data FROM ninerouter_rows WHERE table_name = 'kv' AND row_key >= ? AND row_key <  [\"scope:modelDisplayNames|\",\"scope:modelDisplayNames}\"]",
+        "select n=42 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"providerConnections\"]",
+        "select n=0 SELECT table_name, data FROM ninerouter_rows WHERE table_name = 'kv' AND row_key >= ? AND row_key <  [\"scope:pricing|\",\"scope:pricing}\"]"
+      ]
+    },
+    {
+      "scenario": "cold: chat stream",
+      "requests": 1,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 4,
+        "roundTrips": 4,
+        "rowsRead": 93,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 3,
+        "doRowsRead": 6,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 93,
+        "d1RowsWritten": 0,
+        "d1RowsWrittenWorstCase": 0,
+        "d1Queries": 4,
+        "doRpcs": 3,
+        "doRowsRead": 6,
+        "doRowsWritten": 0
+      },
+      "immediate": {
+        "queries": 4,
+        "roundTrips": 4,
+        "rowsRead": 93,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {
+          "select": 4
+        }
+      },
+      "deferredFlush": null,
+      "durableObject": {
+        "rpcs": 3,
+        "rowsRead": 6,
+        "rowsWritten": 0,
+        "byMethod": {
+          "getVersions": 2,
+          "getActiveLocks": 1
+        }
+      },
+      "deferredDurableObject": null,
+      "d1Statements": [
+        "select n=51 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?, ?, ?, ?, ?, ?, ?) [\"_meta\",\"settings\",\"providerNodes\",\"proxyPools\"]",
+        "select n=0 SELECT table_name, data FROM ninerouter_rows WHERE table_name = 'kv' AND row_key >= ? AND row_key <  [\"scope:modelDisplayNames|\",\"scope:modelDisplayNames}\"]",
+        "select n=42 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"providerConnections\"]",
+        "select n=0 SELECT table_name, data FROM ninerouter_rows WHERE table_name = 'kv' AND row_key >= ? AND row_key <  [\"scope:pricing|\",\"scope:pricing}\"]"
+      ]
+    },
+    {
+      "scenario": "cold: chat budget key",
+      "requests": 1,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 5,
+        "roundTrips": 5,
+        "rowsRead": 93,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 5,
+        "doRowsRead": 8,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 93,
+        "d1RowsWritten": 0,
+        "d1RowsWrittenWorstCase": 0,
+        "d1Queries": 5,
+        "doRpcs": 5,
+        "doRowsRead": 8,
+        "doRowsWritten": 0
+      },
+      "immediate": {
+        "queries": 5,
+        "roundTrips": 5,
+        "rowsRead": 93,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {
+          "select": 5
+        }
+      },
+      "deferredFlush": null,
+      "durableObject": {
+        "rpcs": 5,
+        "rowsRead": 8,
+        "rowsWritten": 0,
+        "byMethod": {
+          "getVersions": 2,
+          "getBudgetReservations": 2,
+          "getActiveLocks": 1
+        }
+      },
+      "deferredDurableObject": null,
+      "d1Statements": [
+        "select n=51 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?, ?, ?, ?, ?, ?, ?) [\"_meta\",\"settings\",\"providerNodes\",\"proxyPools\"]",
+        "select n=0 SELECT table_name, data FROM ninerouter_rows WHERE table_name = 'kv' AND row_key >= ? AND row_key <  [\"scope:modelDisplayNames|\",\"scope:modelDisplayNames}\"]",
+        "select n=0 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"usageHistory\"]",
+        "select n=42 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"providerConnections\"]",
+        "select n=0 SELECT table_name, data FROM ninerouter_rows WHERE table_name = 'kv' AND row_key >= ? AND row_key <  [\"scope:pricing|\",\"scope:pricing}\"]"
+      ]
+    },
+    {
+      "scenario": "cold: GET /v1/models",
+      "requests": 1,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 6,
+        "roundTrips": 6,
+        "rowsRead": 5384,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 2,
+        "doRowsRead": 3,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 5384,
+        "d1RowsWritten": 0,
+        "d1RowsWrittenWorstCase": 0,
+        "d1Queries": 6,
+        "doRpcs": 2,
+        "doRowsRead": 3,
+        "doRowsWritten": 0
+      },
+      "immediate": {
+        "queries": 6,
+        "roundTrips": 6,
+        "rowsRead": 5384,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {
+          "select": 6
+        }
+      },
+      "deferredFlush": null,
+      "durableObject": {
+        "rpcs": 2,
+        "rowsRead": 3,
+        "rowsWritten": 0,
+        "byMethod": {
+          "getVersions": 2
+        }
+      },
+      "deferredDurableObject": null,
+      "d1Statements": [
+        "select n=51 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?, ?, ?, ?, ?, ?, ?) [\"_meta\",\"settings\",\"providerNodes\",\"proxyPools\"]",
+        "select n=42 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"providerConnections\"]",
+        "select n=5291 SELECT table_name, data FROM ninerouter_rows WHERE table_name = 'kv' AND row_key >= ? AND row_key <  [\"scope:customModels|\",\"scope:customModels}\"]",
+        "select n=0 SELECT table_name, data FROM ninerouter_rows WHERE table_name = 'kv' AND row_key >= ? AND row_key <  [\"scope:modelAliases|\",\"scope:modelAliases}\"]",
+        "select n=0 SELECT table_name, data FROM ninerouter_rows WHERE table_name = 'kv' AND row_key >= ? AND row_key <  [\"scope:disabledModels|\",\"scope:disabledModels}\"]",
+        "select n=0 SELECT table_name, data FROM ninerouter_rows WHERE table_name = 'kv' AND row_key >= ? AND row_key <  [\"scope:providerModelCache|\",\"scope:providerModelCache}\"]"
+      ]
+    },
+    {
+      "scenario": "cold: GET /api/health",
+      "requests": 1,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0,
+        "d1RowsWrittenWorstCase": 0,
+        "d1Queries": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": null,
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": null,
+      "d1Statements": []
+    },
+    {
+      "scenario": "cold: POST /api/cron/flush",
+      "requests": 1,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0,
+        "d1RowsWrittenWorstCase": 0,
+        "d1Queries": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": null,
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": null,
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: chat non-stream x20",
+      "requests": 20,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0.05,
+        "d1RowsWritten": 0.1,
+        "d1RowsWrittenWorstCase": 0.2,
+        "d1Queries": 0.15,
+        "doRpcs": 0.05,
+        "doRowsRead": 0.05,
+        "doRowsWritten": 0.05
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 3,
+        "roundTrips": 3,
+        "rowsRead": 1,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "select": 1,
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: chat stream x20",
+      "requests": 20,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0.1,
+        "d1RowsWrittenWorstCase": 0.2,
+        "d1Queries": 0.1,
+        "doRpcs": 0.05,
+        "doRowsRead": 0.05,
+        "doRowsWritten": 0.05
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 2,
+        "roundTrips": 2,
+        "rowsRead": 0,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: chat pinned key (force pins + ACL) x20",
+      "requests": 20,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0.1,
+        "d1RowsWrittenWorstCase": 0.2,
+        "d1Queries": 0.1,
+        "doRpcs": 0.05,
+        "doRowsRead": 0.05,
+        "doRowsWritten": 0.05
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 2,
+        "roundTrips": 2,
+        "rowsRead": 0,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: chat rate-limited key x20",
+      "requests": 20,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 1,
+        "doRowsRead": 1,
+        "doRowsWritten": 1
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0.1,
+        "d1RowsWrittenWorstCase": 0.2,
+        "d1Queries": 0.1,
+        "doRpcs": 1.05,
+        "doRowsRead": 1.05,
+        "doRowsWritten": 1.05
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 2,
+        "roundTrips": 2,
+        "rowsRead": 0,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 20,
+        "rowsRead": 20,
+        "rowsWritten": 20,
+        "byMethod": {
+          "checkRateLimit": 20
+        }
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: chat max-concurrent key x20",
+      "requests": 20,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 2,
+        "doRowsRead": 2,
+        "doRowsWritten": 2
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0.1,
+        "d1RowsWrittenWorstCase": 0.2,
+        "d1Queries": 0.1,
+        "doRpcs": 2.05,
+        "doRowsRead": 2.05,
+        "doRowsWritten": 2.05
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 2,
+        "roundTrips": 2,
+        "rowsRead": 0,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 40,
+        "rowsRead": 40,
+        "rowsWritten": 40,
+        "byMethod": {
+          "beginRequest": 20,
+          "endRequest": 20
+        }
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: chat token-limit key x20",
+      "requests": 20,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0.1,
+        "d1RowsWrittenWorstCase": 0.2,
+        "d1Queries": 0.1,
+        "doRpcs": 0.05,
+        "doRowsRead": 0.05,
+        "doRowsWritten": 0.05
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 2,
+        "roundTrips": 2,
+        "rowsRead": 0,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: chat budget key x20",
+      "requests": 20,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 2,
+        "doRowsRead": 2,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0.1,
+        "d1RowsWrittenWorstCase": 0.2,
+        "d1Queries": 0.1,
+        "doRpcs": 2.05,
+        "doRowsRead": 2.05,
+        "doRowsWritten": 0.05
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 2,
+        "roundTrips": 2,
+        "rowsRead": 0,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 40,
+        "rowsRead": 40,
+        "rowsWritten": 0,
+        "byMethod": {
+          "getBudgetReservations": 40
+        }
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: GET /v1/models x20",
+      "requests": 20,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0,
+        "d1RowsWrittenWorstCase": 0,
+        "d1Queries": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: GET /api/health x20",
+      "requests": 20,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0,
+        "d1RowsWrittenWorstCase": 0,
+        "d1Queries": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: invalid API key x20",
+      "requests": 20,
+      "outcome": 401,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0,
+        "d1RowsWrittenWorstCase": 0,
+        "d1Queries": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm: upstream 500 x5",
+      "requests": 5,
+      "outcome": 503,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0.6,
+        "doRowsRead": 1.4,
+        "doRowsWritten": 0.4
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0,
+        "d1RowsWritten": 0,
+        "d1RowsWrittenWorstCase": 0,
+        "d1Queries": 0,
+        "doRpcs": 0.8,
+        "doRowsRead": 1.6,
+        "doRowsWritten": 0.6
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "durableObject": {
+        "rpcs": 3,
+        "rowsRead": 7,
+        "rowsWritten": 2,
+        "byMethod": {
+          "getActiveLocks": 2,
+          "setLock": 1
+        }
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "steady 1h @ 0.1 req/s (360 req)",
+      "requests": 360,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0.10277777777777777,
+        "roundTrips": 0.10277777777777777,
+        "rowsRead": 0.36944444444444446,
+        "rowsWritten": 0.03333333333333333,
+        "rowsWrittenWorstCase": 0.06666666666666667,
+        "doRpcs": 2.3333333333333335,
+        "doRowsRead": 5.333333333333333,
+        "doRowsWritten": 0.3333333333333333
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0.36944444444444446,
+        "d1RowsWritten": 0.03888888888888889,
+        "d1RowsWrittenWorstCase": 0.07777777777777778,
+        "d1Queries": 0.10833333333333334,
+        "doRpcs": 2.3361111111111112,
+        "doRowsRead": 5.341666666666667,
+        "doRowsWritten": 0.3416666666666667
+      },
+      "immediate": {
+        "queries": 37,
+        "roundTrips": 37,
+        "rowsRead": 133,
+        "rowsWritten": 12,
+        "rowsWrittenWorstCase": 24,
+        "byKind": {
+          "select": 25,
+          "insert": 12
+        }
+      },
+      "deferredFlush": {
+        "queries": 2,
+        "roundTrips": 2,
+        "rowsRead": 0,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 840,
+        "rowsRead": 1920,
+        "rowsWritten": 120,
+        "byMethod": {
+          "getVersions": 360,
+          "getActiveLocks": 360,
+          "recordOutcomes": 120
+        }
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 3,
+        "rowsWritten": 3,
+        "byMethod": {
+          "recordMetricsBatch": 1
+        }
+      },
+      "d1Statements": [
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name = ? AND row_key = ? [\"usageDaily\",\"dateKey:2026-10-28\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":303,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"203\\\"}\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":363,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"263\\\"}\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":423,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"323\\\"}\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":483,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"383\\\"}\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":543,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"443\\\"}\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":603,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"503\\\"}\"]"
+      ]
+    },
+    {
+      "scenario": "steady 1h @ 1 req/min (60 req)",
+      "requests": 60,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0.6166666666666667,
+        "roundTrips": 0.6166666666666667,
+        "rowsRead": 2.216666666666667,
+        "rowsWritten": 0.2,
+        "rowsWrittenWorstCase": 0.4,
+        "doRpcs": 3,
+        "doRowsRead": 6,
+        "doRowsWritten": 1
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 2.216666666666667,
+        "d1RowsWritten": 0.23333333333333334,
+        "d1RowsWrittenWorstCase": 0.4666666666666667,
+        "d1Queries": 0.65,
+        "doRpcs": 3.0166666666666666,
+        "doRowsRead": 6.05,
+        "doRowsWritten": 1.05
+      },
+      "immediate": {
+        "queries": 37,
+        "roundTrips": 37,
+        "rowsRead": 133,
+        "rowsWritten": 12,
+        "rowsWrittenWorstCase": 24,
+        "byKind": {
+          "select": 25,
+          "insert": 12
+        }
+      },
+      "deferredFlush": {
+        "queries": 2,
+        "roundTrips": 2,
+        "rowsRead": 0,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 180,
+        "rowsRead": 360,
+        "rowsWritten": 60,
+        "byMethod": {
+          "getVersions": 60,
+          "getActiveLocks": 60,
+          "recordOutcomes": 60
+        }
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 3,
+        "rowsWritten": 3,
+        "byMethod": {
+          "recordMetricsBatch": 1
+        }
+      },
+      "d1Statements": [
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name = ? AND row_key = ? [\"usageDaily\",\"dateKey:2026-10-28\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":614,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"514\\\"}\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":624,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"524\\\"}\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":634,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"534\\\"}\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":644,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"544\\\"}\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":654,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"554\\\"}\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=1 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"settings\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"usageDaily\",\"dateKey:2026-10-28\",\"{\\\"dateKey\\\":\\\"2026-10-28\\\",\\\"data\\\":\\\"{\\\\\\\"requests\\\\\\\":664,\\\\\\\"promptTo\"]",
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"_meta\",\"key:totalRequestsLifetime\",\"{\\\"key\\\":\\\"totalRequestsLifetime\\\",\\\"value\\\":\\\"564\\\"}\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]"
+      ]
+    },
+    {
+      "scenario": "warm: observability on x20",
+      "requests": 20,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0.05,
+        "d1RowsWritten": 0.1,
+        "d1RowsWrittenWorstCase": 0.2,
+        "d1Queries": 0.15,
+        "doRpcs": 0.05,
+        "doRowsRead": 0.05,
+        "doRowsWritten": 0.05
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 3,
+        "roundTrips": 3,
+        "rowsRead": 1,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "select": 1,
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm chat non-stream [standard] x30",
+      "requests": 30,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 3,
+        "doRowsRead": 7,
+        "doRowsWritten": 4
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0.03333333333333333,
+        "d1RowsWritten": 0.06666666666666667,
+        "d1RowsWrittenWorstCase": 0.13333333333333333,
+        "d1Queries": 0.1,
+        "doRpcs": 3,
+        "doRowsRead": 7,
+        "doRowsWritten": 4
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 3,
+        "roundTrips": 3,
+        "rowsRead": 1,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "select": 1,
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 90,
+        "rowsRead": 210,
+        "rowsWritten": 120,
+        "byMethod": {
+          "getActiveLocks": 30,
+          "recordOutcome": 30,
+          "recordMetrics": 30
+        }
+      },
+      "deferredDurableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm chat non-stream [extreme] x30",
+      "requests": 30,
+      "outcome": 200,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0.03333333333333333,
+        "d1RowsWritten": 0.06666666666666667,
+        "d1RowsWrittenWorstCase": 0.13333333333333333,
+        "d1Queries": 0.1,
+        "doRpcs": 0.03333333333333333,
+        "doRowsRead": 0.03333333333333333,
+        "doRowsWritten": 0.03333333333333333
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 3,
+        "roundTrips": 3,
+        "rowsRead": 1,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "select": 1,
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "warm upstream 502 [standard] x4",
+      "requests": 4,
+      "outcome": 503,
+      "perRequest": {
+        "queries": 0.25,
+        "roundTrips": 0.25,
+        "rowsRead": 0,
+        "rowsWritten": 0.25,
+        "rowsWrittenWorstCase": 0.5,
+        "doRpcs": 2.5,
+        "doRowsRead": 5.5,
+        "doRowsWritten": 1.5
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0.25,
+        "d1RowsWritten": 0.75,
+        "d1RowsWrittenWorstCase": 1.5,
+        "d1Queries": 1,
+        "doRpcs": 2.5,
+        "doRowsRead": 5.5,
+        "doRowsWritten": 1.5
+      },
+      "immediate": {
+        "queries": 1,
+        "roundTrips": 1,
+        "rowsRead": 0,
+        "rowsWritten": 1,
+        "rowsWrittenWorstCase": 2,
+        "byKind": {
+          "insert": 1
+        }
+      },
+      "deferredFlush": {
+        "queries": 3,
+        "roundTrips": 3,
+        "rowsRead": 1,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "select": 1,
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 10,
+        "rowsRead": 22,
+        "rowsWritten": 6,
+        "byMethod": {
+          "getActiveLocks": 5,
+          "recordOutcome": 1,
+          "recordMetrics": 1,
+          "getVersion": 2,
+          "setLock": 1
+        }
+      },
+      "deferredDurableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "d1Statements": [
+        "insert n=1 INSERT INTO ninerouter_rows(table_name, row_key, data, updated_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP [\"providerConnections\",\"id:conn-mock\",\"{\\\"id\\\":\\\"conn-mock\\\",\\\"provider\\\":\\\"openai-compatible-mock\\\",\\\"authT\"]"
+      ]
+    },
+    {
+      "scenario": "warm upstream 503 [extreme] x4",
+      "requests": 4,
+      "outcome": 503,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0.75,
+        "doRowsRead": 1.75,
+        "doRowsWritten": 0.5
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0.25,
+        "d1RowsWritten": 0.5,
+        "d1RowsWrittenWorstCase": 1,
+        "d1Queries": 0.75,
+        "doRpcs": 1,
+        "doRowsRead": 2.25,
+        "doRowsWritten": 1
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 3,
+        "roundTrips": 3,
+        "rowsRead": 1,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "select": 1,
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 3,
+        "rowsRead": 7,
+        "rowsWritten": 2,
+        "byMethod": {
+          "getActiveLocks": 2,
+          "setLock": 1
+        }
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 2,
+        "rowsWritten": 2,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    },
+    {
+      "scenario": "invalid API key [standard] x20",
+      "requests": 20,
+      "outcome": 401,
+      "perRequest": {
+        "queries": 2,
+        "roundTrips": 2,
+        "rowsRead": 20,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 20.05,
+        "d1RowsWritten": 0.1,
+        "d1RowsWrittenWorstCase": 0.2,
+        "d1Queries": 2.15,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "immediate": {
+        "queries": 40,
+        "roundTrips": 40,
+        "rowsRead": 400,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {
+          "select": 40
+        }
+      },
+      "deferredFlush": {
+        "queries": 3,
+        "roundTrips": 3,
+        "rowsRead": 1,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "select": 1,
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "d1Statements": [
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]",
+        "select n=10 SELECT table_name, data FROM ninerouter_rows WHERE table_name IN (?) [\"apiKeys\"]"
+      ]
+    },
+    {
+      "scenario": "invalid API key [extreme] x20",
+      "requests": 20,
+      "outcome": 401,
+      "perRequest": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "doRpcs": 0,
+        "doRowsRead": 0,
+        "doRowsWritten": 0
+      },
+      "amortizedPerRequest": {
+        "d1RowsRead": 0.05,
+        "d1RowsWritten": 0.1,
+        "d1RowsWrittenWorstCase": 0.2,
+        "d1Queries": 0.15,
+        "doRpcs": 0.05,
+        "doRowsRead": 0.05,
+        "doRowsWritten": 0.05
+      },
+      "immediate": {
+        "queries": 0,
+        "roundTrips": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "rowsWrittenWorstCase": 0,
+        "byKind": {}
+      },
+      "deferredFlush": {
+        "queries": 3,
+        "roundTrips": 3,
+        "rowsRead": 1,
+        "rowsWritten": 2,
+        "rowsWrittenWorstCase": 4,
+        "byKind": {
+          "select": 1,
+          "insert": 2
+        }
+      },
+      "durableObject": {
+        "rpcs": 0,
+        "rowsRead": 0,
+        "rowsWritten": 0,
+        "byMethod": {}
+      },
+      "deferredDurableObject": {
+        "rpcs": 1,
+        "rowsRead": 1,
+        "rowsWritten": 1,
+        "byMethod": {
+          "recordOutcomes": 1
+        }
+      },
+      "d1Statements": []
+    }
+  ]
+}

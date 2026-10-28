@@ -1,5 +1,6 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import { isExtremeProfile } from "../writeProfile.js";
 
 const DEFAULT_MITM_ROUTER_BASE = `http://localhost:${process.env.PORT || "20128"}`;
 const DEFAULT_HEADROOM_URL = process.env.HEADROOM_URL || "http://localhost:8787";
@@ -206,7 +207,9 @@ async function readRaw() {
   // adapter's own timer fires. Force the refresh so the data we cache always
   // matches the version we record alongside it.
   if (process.env.NINEROUTER_RUNTIME === "cloudflare" && typeof db.resync === "function") {
-    await db.resync(true, ["settings"]).catch(() => {});
+    // The adapter reads settings at init; a second read straight after is pure waste.
+    const justRead = isExtremeProfile() && db.freshWithin?.("settings", 2_000);
+    if (!justRead) await db.resync(true, ["settings"]).catch(() => {});
   }
   const row = db.get(`SELECT data FROM settings WHERE id = 1`);
   const data = row ? parseJson(row.data, {}) : {};

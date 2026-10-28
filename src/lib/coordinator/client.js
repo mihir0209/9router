@@ -1,3 +1,6 @@
+import { isExtremeProfile, extremeTunables } from "@/lib/db/writeProfile.js";
+import { createCoalescer } from "./coalescer.js";
+
 function memoryState() {
   if (!global._gatewayCoordinatorMemory) {
     global._gatewayCoordinatorMemory = {
@@ -118,6 +121,32 @@ function memoryCall(method, payload = {}) {
     state.scores.set(key, entry);
     return entry;
   }
+  if (method === "recordOutcomes") {
+    for (const item of payload.items || []) {
+      const key = `${item.provider}:${item.connectionId}:${item.model}`;
+      const previous = state.scores.get(key) || { samples: 0, successes: 0, failures: 0, consecutiveFailures: 0, ewmaLatencyMs: 0, totalCostUsd: 0 };
+      const latencyCount = Number(item.latencyCount) || 0;
+      const mean = latencyCount > 0 ? Number(item.latencySumMs || 0) / latencyCount : previous.ewmaLatencyMs;
+      const decay = Math.pow(0.7, latencyCount);
+      state.scores.set(key, {
+        ...previous,
+        provider: item.provider,
+        connectionId: item.connectionId,
+        model: item.model,
+        samples: previous.samples + item.samples,
+        successes: previous.successes + item.successes,
+        failures: previous.failures + item.failures,
+        consecutiveFailures: item.successes === 0 ? previous.consecutiveFailures + item.failures : item.tailFailures,
+        ewmaLatencyMs: previous.samples === 0 ? mean : previous.ewmaLatencyMs * decay + mean * (1 - decay),
+        totalCostUsd: previous.totalCostUsd + Math.max(Number(item.costUsd) || 0, 0),
+        lastStatus: Number(item.lastStatus) || 0,
+        updatedAt: now,
+      });
+    }
+    return { recorded: (payload.items || []).length };
+  }
+  // Metrics are aggregated in-process (observability/metrics.js) when there is no coordinator.
+  if (method === "recordMetricsBatch") return { recorded: 0 };
   if (method === "getScores") {
     return payload.connectionIds.map((connectionId) => state.scores.get(`${payload.provider}:${connectionId}:${payload.model}`)).filter(Boolean);
   }
@@ -203,7 +232,59 @@ const breaker = {
   },
 };
 
+// ---- extreme-profile traffic shaping (Cloudflare) -------------------------
+function coalescingActive() {
+  return process.env.NINEROUTER_RUNTIME === "cloudflare" && isExtremeProfile();
+}
+
+function scheduleWaitUntil(task) {
+  import("@opennextjs/cloudflare")
+    .then((mod) => mod.getCloudflareContext({ async: true }))
+    .then((context) => context?.ctx?.waitUntil?.(task))
+    .catch(() => {});
+}
+
+function getCoalescer() {
+  if (!global._coordinatorCoalescer) {
+    global._coordinatorCoalescer = createCoalescer({
+      call: (method, payload, scope) => coordinatorCall(method, payload, scope),
+      tunables: extremeTunables,
+      waitUntil: scheduleWaitUntil,
+      onError: (error) => console.warn(`[coordinator] batched report failed: ${error?.message || error}`),
+    });
+  }
+  return global._coordinatorCoalescer;
+}
+
+/** Locks / scores read through a short TTL cache in the extreme profile; plain call otherwise. */
+export async function coordinatorRead(method, payload, scope = "global") {
+  if (!coalescingActive()) return coordinatorCall(method, payload, scope);
+  const { now: _now, ...stable } = payload || {};
+  return getCoalescer().read(`${method}|${scope}|${JSON.stringify(stable)}`, scope, () => coordinatorCall(method, payload, scope));
+}
+
+/** Send any coalesced outcome/metric batches now (cron flush, tests, graceful shutdown). */
+export async function flushCoordinatorBatches() {
+  if (!global._coordinatorCoalescer) return { sent: 0 };
+  return global._coordinatorCoalescer.flush();
+}
+
+export function pendingCoordinatorBatches() {
+  return global._coordinatorCoalescer ? global._coordinatorCoalescer.pending() : { events: 0, outcomeKeys: 0, metricKeys: 0 };
+}
+
+/** Record a request outcome for observability. Coalesced on Cloudflare-extreme. Returns true when handled here. */
+export async function recordMetricsOutcome(outcome) {
+  if (!coalescingActive()) return coordinatorCall("recordMetrics", { outcome }, "metrics");
+  getCoalescer().queueMetrics(outcome);
+  return { queued: true };
+}
+
 export async function coordinatorCall(method, payload = {}, scope = "global", { failClosed = false } = {}) {
+  // A lock this isolate sets or clears must be visible to its own next read.
+  if ((method === "setLock" || method === "clearLock") && global._coordinatorCoalescer) {
+    global._coordinatorCoalescer.invalidate(scope);
+  }
   const stub = await getStub(scope);
   if (!stub) {
     if (failClosed && process.env.NINEROUTER_RUNTIME === "cloudflare") {
@@ -276,12 +357,16 @@ export function scoreProviderEntries(entries, priorities = new Map()) {
 
 export async function getAdaptiveScores(provider, model, connectionIds) {
   if (!connectionIds.length) return new Map();
-  const entries = await coordinatorCall("getScores", { provider, model, connectionIds }, `provider:${provider}`);
+  const entries = await coordinatorRead("getScores", { provider, model, connectionIds }, `provider:${provider}`);
   const byConnection = new Map(entries.map((entry) => [entry.connectionId, entry]));
   return new Map(connectionIds.map((connectionId) => [connectionId, byConnection.get(connectionId) || { provider, connectionId, model, samples: 0 }]));
 }
 
 export async function recordProviderOutcome(payload) {
+  if (coalescingActive()) {
+    getCoalescer().queueOutcome(payload);
+    return { queued: true };
+  }
   return await coordinatorCall("recordOutcome", payload, `provider:${payload.provider}`);
 }
 

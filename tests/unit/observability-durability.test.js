@@ -52,6 +52,7 @@ beforeEach(() => {
   mocks.run.mockReturnValue({ changes: 1 });
   mocks.all.mockResolvedValue([auditRow]);
   process.env.NINEROUTER_RUNTIME = "node";
+  delete process.env.NINEROUTER_D1_PROFILE;
   resetMetrics();
 });
 
@@ -126,6 +127,7 @@ describe("metrics durability", () => {
 
   it("mirrors every outcome to the Durable Object on Cloudflare", async () => {
     process.env.NINEROUTER_RUNTIME = "cloudflare";
+    process.env.NINEROUTER_D1_PROFILE = "standard"; // extreme coalesces; see coordinator-extreme-profile.test.js
     mocks.coordinatorCall.mockResolvedValue({ recorded: true });
 
     recordRequestOutcome({ provider: "openai", connectionId: "a1", model: "gpt-5", success: true, status: 200, latencyMs: 120 });

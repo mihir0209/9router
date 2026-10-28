@@ -91,6 +91,9 @@ export {
 // Export/import full DB
 export async function exportDb() {
   const db = await getAdapter();
+  // Lazy tables on the Cloudflare adapter: without this an export from a cold
+  // isolate silently omitted every connection and kv scope.
+  await db.ensureTables?.(["providerConnections", "kv"]);
   const { exportSettings } = await import("./repos/settingsRepo.js");
 
   const out = {
@@ -143,6 +146,8 @@ export async function importDb(payload, options = {}) {
     throw new Error("Invalid database payload");
   }
   const db = await getAdapter();
+  // The wipe below must see (and so persist the deletion of) every resident row.
+  await db.ensureTables?.(["providerConnections", "kv"]);
   // Rows actually written: INSERT OR REPLACE collapses duplicate ids/keys, so
   // count distinct primary keys rather than the payload array length.
   const distinct = (rows, keyOf) => new Set((rows || []).map(keyOf)).size;

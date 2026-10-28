@@ -1,6 +1,6 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
-import { makeKv } from "../helpers/kvStore.js";
+import { makeKv, ensureKvScope } from "../helpers/kvStore.js";
 
 const aliasKv = makeKv("modelAliases");
 const customKv = makeKv("customModels");
@@ -80,6 +80,7 @@ export async function getCustomModels() {
 export async function addCustomModel({ providerAlias, id, type = "llm", name, caps, transport }) {
   const k = customKey(providerAlias, id, type);
   const db = await getAdapter();
+  await ensureKvScope(db, "customModels");
   let added = false;
   db.transaction(() => {
     const row = db.get(`SELECT value FROM kv WHERE scope = 'customModels' AND key = ?`, [k]);

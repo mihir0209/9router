@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "../driver.js";
 import { generateApiKeyWithMachine } from "@/shared/utils/apiKey";
+import { isExtremeProfile, extremeTunables } from "../writeProfile.js";
 
 const API_KEY_FIELDS = [
   "id", "key", "name", "machineId", "isActive", "createdAt",
@@ -64,6 +65,23 @@ if (!global._apiKeysRepoCache) {
   global._apiKeysRepoCache = { byKey: new Map(), byId: new Map(), list: null, ts: 0, version: null };
 }
 const apiKeyCache = global._apiKeysRepoCache;
+
+
+/**
+ * Pre-read refresh of the adapter's copy of the apiKeys table (Cloudflare only).
+ *
+ * In the extreme profile this is skipped when the table was read from D1 within
+ * `unknownKeyRefreshMs`. Without that, every lookup of a key this isolate does
+ * not know (a typo, a scanner, a revoked key) cost a D1 read of the whole
+ * table, so unauthenticated traffic could drive D1 spend. A key created or
+ * rotated elsewhere still arrives promptly through the control-version poll,
+ * which forces its own refresh; an unknown key stays rejected (fail closed).
+ */
+async function refreshApiKeysForRead(db) {
+  if (process.env.NINEROUTER_RUNTIME !== "cloudflare" || typeof db.resync !== "function") return;
+  if (isExtremeProfile() && db.freshWithin?.("apiKeys", extremeTunables().unknownKeyRefreshMs)) return;
+  await db.resync(true, ["apiKeys"]).catch(() => {});
+}
 
 export function resetApiKeysCache() {
   apiKeyCache.byKey.clear();
@@ -148,9 +166,7 @@ export async function getApiKeyById(id) {
   // in-memory copy, so a cold read must refresh D1 first. Otherwise this
   // isolate caches stale data and stamps it with the current control version,
   // convincing itself it is fresh until the adapter's own timer fires.
-  if (process.env.NINEROUTER_RUNTIME === "cloudflare" && typeof db.resync === "function") {
-    await db.resync(true, ["apiKeys"]).catch(() => {});
-  }
+  await refreshApiKeysForRead(db);
   const row = db.get(`SELECT * FROM apiKeys WHERE id = ?`, [id]);
   const parsed = rowToKey(row);
   if (now - apiKeyCache.ts >= API_KEYS_CACHE_TTL_MS) {
@@ -179,9 +195,7 @@ export async function getApiKeyByKey(key) {
   // in-memory copy, so a cold read must refresh D1 first. Otherwise this
   // isolate caches stale data and stamps it with the current control version,
   // convincing itself it is fresh until the adapter's own timer fires.
-  if (process.env.NINEROUTER_RUNTIME === "cloudflare" && typeof db.resync === "function") {
-    await db.resync(true, ["apiKeys"]).catch(() => {});
-  }
+  await refreshApiKeysForRead(db);
   const row = db.get(`SELECT * FROM apiKeys WHERE key = ?`, [key]);
   const parsed = rowToKey(row);
   if (now - apiKeyCache.ts >= API_KEYS_CACHE_TTL_MS) {

@@ -132,6 +132,47 @@ export class GatewayCoordinator extends DurableObject {
     return entry;
   }
 
+  /**
+   * Batched form of recordOutcome. Each item is the pre-aggregated delta of
+   * many outcomes for one (provider, connection, model):
+   *   { provider, connectionId, model, samples, successes, failures,
+   *     tailFailures, latencySumMs, latencyCount, costUsd, lastStatus }
+   * `tailFailures` is the run of failures at the end of the batch. One storage
+   * read + write per distinct key replaces one per request.
+   */
+  async recordOutcomes({ items = [], now = Date.now() } = {}) {
+    let applied = 0;
+    for (const item of items) {
+      if (!item?.provider || !item?.connectionId || !(Number(item.samples) > 0)) continue;
+      const key = `score:${item.provider}:${item.connectionId}:${item.model}`;
+      const previous = await this.ctx.storage.get(key);
+      const priorSamples = Number(previous?.samples) || 0;
+      const priorLatency = Number(previous?.ewmaLatencyMs) || 0;
+      const latencyCount = Number(item.latencyCount) || 0;
+      const meanLatency = latencyCount > 0 ? Math.max(Number(item.latencySumMs) || 0, 0) / latencyCount : priorLatency;
+      // n events at the batch mean latency, folded into the EWMA (weight 0.3 each).
+      const decay = Math.pow(0.7, latencyCount);
+      const ewmaLatencyMs = priorSamples === 0 ? meanLatency : priorLatency * decay + meanLatency * (1 - decay);
+      const successes = Number(item.successes) || 0;
+      const failures = Number(item.failures) || 0;
+      await this.ctx.storage.put(key, {
+        provider: item.provider,
+        connectionId: item.connectionId,
+        model: item.model,
+        samples: priorSamples + Number(item.samples),
+        successes: (Number(previous?.successes) || 0) + successes,
+        failures: (Number(previous?.failures) || 0) + failures,
+        consecutiveFailures: successes === 0 ? (Number(previous?.consecutiveFailures) || 0) + failures : Number(item.tailFailures) || 0,
+        ewmaLatencyMs,
+        totalCostUsd: (Number(previous?.totalCostUsd) || 0) + Math.max(Number(item.costUsd) || 0, 0),
+        lastStatus: Number(item.lastStatus) || 0,
+        updatedAt: now,
+      });
+      applied += 1;
+    }
+    return { recorded: applied };
+  }
+
   async getScores({ provider, connectionIds, model, now = Date.now() }) {
     const entries = await Promise.all(connectionIds.map(async (connectionId) => {
       const entry = await this.ctx.storage.get(`score:${provider}:${connectionId}:${model}`);
@@ -183,6 +224,13 @@ export class GatewayCoordinator extends DurableObject {
     const next = current + 1;
     await this.ctx.storage.put(key, next);
     return { version: next };
+  }
+
+  /** Versions for several domains in one call (one RPC instead of one per domain). */
+  async getVersions({ domains = [] } = {}) {
+    const versions = {};
+    for (const domain of domains) versions[domain] = Number(await this.ctx.storage.get(`version:${domain}`)) || 0;
+    return { versions };
   }
 
   async getVersion({ domain }) {
@@ -242,6 +290,62 @@ export class GatewayCoordinator extends DurableObject {
     await this.ctx.storage.put(tenantTotalsKey, tenantTotals);
 
     return { recorded: true };
+  }
+
+  /**
+   * Batched form of recordMetrics. Items are per-(tenant, provider,
+   * connection, model) deltas:
+   *   { tenant, provider, connectionId, model, successes, failures,
+   *     tailFailures, lastStatus, lastLatencyMs, latencyCount, latencySumMs,
+   *     latencyMaxMs }
+   * The cluster totals and per-tenant rollups are read and written once per
+   * batch instead of once per request.
+   */
+  async recordMetricsBatch({ items = [], now = Date.now() } = {}) {
+    const valid = items.filter((item) => item?.provider && (Number(item.successes) || 0) + (Number(item.failures) || 0) > 0);
+    if (!valid.length) return { recorded: 0 };
+    const totalsKey = "metrics:totals";
+    const totals = (await this.ctx.storage.get(totalsKey)) || { startedAt: now, requests: 0, successes: 0, failures: 0, latencyCount: 0, latencySumMs: 0, latencyMaxMs: 0 };
+    const tenantTotals = new Map();
+    for (const item of valid) {
+      const tenant = typeof item.tenant === "string" && item.tenant.trim() ? item.tenant.trim() : "anonymous";
+      const successes = Number(item.successes) || 0;
+      const failures = Number(item.failures) || 0;
+      const key = `metrics:outcome:${tenant}:${item.provider}:${item.connectionId}:${item.model}`;
+      const previous = await this.ctx.storage.get(key);
+      const current = previous || { tenant, provider: item.provider, connectionId: item.connectionId, model: item.model, successes: 0, failures: 0, consecutiveFailures: 0, lastStatus: 0, lastLatencyMs: 0, updatedAt: now };
+      current.successes += successes;
+      current.failures += failures;
+      current.consecutiveFailures = successes === 0 ? current.consecutiveFailures + failures : Number(item.tailFailures) || 0;
+      current.lastStatus = Number(item.lastStatus) || 0;
+      if (Number.isFinite(item.lastLatencyMs)) current.lastLatencyMs = Math.max(Number(item.lastLatencyMs), 0);
+      current.updatedAt = now;
+      await this.ctx.storage.put(key, current);
+
+      totals.requests += successes + failures;
+      totals.successes += successes;
+      totals.failures += failures;
+      if (Number(item.latencyCount) > 0) {
+        totals.latencyCount += Number(item.latencyCount);
+        totals.latencySumMs += Math.max(Number(item.latencySumMs) || 0, 0);
+        totals.latencyMaxMs = Math.max(totals.latencyMaxMs, Number(item.latencyMaxMs) || 0);
+      }
+      const rollup = tenantTotals.get(tenant) || { tenant, requests: 0, successes: 0, failures: 0 };
+      rollup.requests += successes + failures;
+      rollup.successes += successes;
+      rollup.failures += failures;
+      tenantTotals.set(tenant, rollup);
+    }
+    await this.ctx.storage.put(totalsKey, totals);
+    for (const [tenant, delta] of tenantTotals) {
+      const key = `metrics:tenant:${tenant}`;
+      const stored = (await this.ctx.storage.get(key)) || { tenant, requests: 0, successes: 0, failures: 0 };
+      stored.requests += delta.requests;
+      stored.successes += delta.successes;
+      stored.failures += delta.failures;
+      await this.ctx.storage.put(key, stored);
+    }
+    return { recorded: valid.length };
   }
 
   async getMetrics({ tenant } = {}) {

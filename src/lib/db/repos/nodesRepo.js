@@ -119,6 +119,8 @@ export async function updateProviderNode(id, data) {
 
 export async function deleteProviderNode(id) {
   const db = await getAdapter();
+  // The cascade below deletes this node's customModels rows; they must be resident to be deleted (and persisted as deleted).
+  await db.ensureKvScope?.("customModels");
   let removed = null;
   db.transaction(() => {
     const row = db.get(`SELECT * FROM providerNodes WHERE id = ?`, [id]);

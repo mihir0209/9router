@@ -16,6 +16,10 @@ service = "mihir-router"
 NODE_ENV = "production"
 NEXTJS_ENV = "production"
 NINEROUTER_RUNTIME = "cloudflare"
+# Persistence profile for D1 / Durable Object operations: "extreme" (default on
+# Cloudflare) or "standard" (previous per-request behaviour). See
+# docs/CLOUDFLARE_EXTREME_PROFILE.md for the knobs.
+# NINEROUTER_D1_PROFILE = "extreme"
 
 # Flush in-memory analytics buffer + observability batch before isolate eviction.
 [triggers]

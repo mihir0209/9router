@@ -7,7 +7,7 @@ import { resolveProviderId, FREE_PROVIDERS, isOpenAICompatibleProvider, isAnthro
 import { getProxyPoolQuarantine, isProxyQuarantined } from "@/lib/proxy/quarantine";
 import { getAntigravityQuotaCache, getAntigravityModelQuota } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
-import { coordinatorCall, getAdaptiveScores, recordProviderOutcome, scoreProviderEntries } from "@/lib/coordinator/client.js";
+import { coordinatorCall, coordinatorRead, getAdaptiveScores, recordProviderOutcome, scoreProviderEntries } from "@/lib/coordinator/client.js";
 import { recordRequestOutcome } from "@/lib/observability/metrics.js";
 import { scopeConnectionsByDeployment } from "./azureDeploymentScope.js";
 
@@ -219,7 +219,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const connLocked = (c) => isModelLockActive(c, model) || isExtremeModelLockActive(c.id, model);
 
     // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
-    const lockState = await coordinatorCall("getActiveLocks", { provider: providerId, connectionIds: connections.map((entry) => entry.id), model }, `provider:${providerId}`);
+    const lockState = await coordinatorRead("getActiveLocks", { provider: providerId, connectionIds: connections.map((entry) => entry.id), model }, `provider:${providerId}`);
     const coordinatorLocks = lockState?.locks || [];
     // Generation observed at selection time. A success may only clear locks
     // that existed then, so a failure landing mid-request is not wiped.
@@ -518,8 +518,8 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   const reason = typeof errorText === "string" ? errorText.slice(0, 200) : "Provider error";
   const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
 
-  const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
-  const extreme = await isExtremeWriteMode().catch(() => false);
+  const { isMemoryOnlyState } = await import("@/lib/db/repos/usageRepo.js");
+  const extreme = await isMemoryOnlyState();
   const isMultiHourLock = cooldownMs >= 60 * 60 * 1000;
   if (extreme && !isMultiHourLock) {
     // Registry, not the conn object: getProviderConnections() returns fresh
@@ -578,6 +578,12 @@ export async function clearAccountError(connectionId, currentConnection, model =
     return expiry && new Date(expiry).getTime() <= now;   // expired
   });
 
+  // Nothing recorded on the connection: there is no lock of ours to clear, and
+  // a connection that was selected cannot have held an active coordinator lock
+  // (locked ones are filtered out at selection). Skip the coordinator round
+  // trip entirely - this used to be one Durable Object RPC per healthy request.
+  if (keysToClear.length === 0 && conn.testStatus !== "unavailable" && !conn.lastError) return;
+
   const provider = currentConnection?.provider || conn?.provider;
   if (provider) {
     await coordinatorCall("clearLock", {
@@ -587,7 +593,6 @@ export async function clearAccountError(connectionId, currentConnection, model =
       expectedGeneration: currentConnection?.observedLockGeneration ?? null,
     }, `provider:${resolveProviderId(provider)}`).catch(() => {});
   }
-  if (keysToClear.length === 0 && conn.testStatus !== "unavailable" && !conn.lastError) return;
 
   // Check if any active locks remain after clearing
   const remainingActiveLocks = allLockKeys.filter(k => {
@@ -620,6 +625,11 @@ export async function clearAccountError(connectionId, currentConnection, model =
       clearExtremeModelLock(connectionId, model);
       clearExtremeModelLock(connectionId, null); // account-level lock
     }
+    // Error state persisted by an earlier build/profile would otherwise keep
+    // this branch (and the coordinator clearLock above) firing on every
+    // request forever. Heal it with one write; afterwards nothing is left to
+    // clear, so the hot path stays write-free.
+    if (clearObj.testStatus === "active") await updateProviderConnection(connectionId, clearObj).catch(() => {});
     return;
   }
 

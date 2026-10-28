@@ -65,8 +65,8 @@ function addMinutes(minutes) {
 }
 
 export async function getProxyPoolQuarantine() {
-  const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
-  if (await isExtremeWriteMode().catch(() => false)) {
+  const { isMemoryOnlyState } = await import("@/lib/db/repos/usageRepo.js");
+  if (await isMemoryOnlyState()) {
     if (!inMemoryQuarantine) {
       const settings = await getSettings();
       inMemoryQuarantine = pruneStore(settings.proxyPoolQuarantine);
@@ -81,8 +81,8 @@ export async function quarantineProxyPool(proxyPoolId, { provider, model, reason
   const id = normalizeString(proxyPoolId);
   if (!id) return null;
 
-  const { isExtremeWriteMode } = await import("@/lib/db/repos/usageRepo.js");
-  const extreme = await isExtremeWriteMode().catch(() => false);
+  const { isMemoryOnlyState } = await import("@/lib/db/repos/usageRepo.js");
+  const extreme = await isMemoryOnlyState();
 
   const settings = await getSettings();
   const store = pruneStore(extreme && inMemoryQuarantine ? inMemoryQuarantine : settings.proxyPoolQuarantine);

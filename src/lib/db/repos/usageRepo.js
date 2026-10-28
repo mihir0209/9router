@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { getMeta, setMeta } from "../helpers/metaStore.js";
+import { isExtremeProfile } from "../writeProfile.js";
 
 function maskApiKey(key) {
   if (!key || typeof key !== "string") return null;
@@ -245,6 +246,12 @@ export async function flushAnalyticsBuffer() {
 
   try {
     const db = await getAdapter();
+    // Lazy tables on the Cloudflare adapter: the transaction body below is
+    // synchronous, so whatever it reads or appends to must be resident first.
+    // History rows need the whole table (autoincrement ids); the daily
+    // aggregates only need the single row of each day being merged.
+    if (historySnapshot.length) await db.ensureTables?.(["usageHistory"]);
+    for (const dateKey of Object.keys(daysSnapshot)) await db.ensureRow?.("usageDaily", `dateKey:${dateKey}`);
     db.transaction(() => {
       // 1. History rows (if any)
       for (const entry of historySnapshot) {
@@ -317,6 +324,16 @@ export async function isExtremeWriteMode() {
   } catch {
     return false;
   }
+}
+
+// Operational state (model locks, proxy-pool quarantine, rotation) stays in
+// isolate memory instead of being written back to the database on every
+// failure. True for the extreme persistence profile (the Cloudflare default,
+// see lib/db/writeProfile.js) and for the explicit lowWriteMode "extreme"
+// setting. Unlike isExtremeWriteMode() this does NOT skip usage analytics.
+export async function isMemoryOnlyState() {
+  if (isExtremeProfile()) return true;
+  return isExtremeWriteMode().catch(() => false);
 }
 
 // In-memory recent-request ring (no DB cost). In low-write mode this is the
@@ -546,7 +563,6 @@ export async function saveRequestUsage(entry) {
     }
 
     const db = await getAdapter();
-  await db.ensureTables?.(["usageHistory", "usageDaily"]);
 
     if (!entry.timestamp) entry.timestamp = new Date().toISOString();
     if (entry.forceZeroCost || entry.connectionId?.startsWith("byok:")) {
@@ -591,6 +607,10 @@ export async function saveRequestUsage(entry) {
       }
       return;
     }
+
+    // The transaction below reads and writes usageHistory/usageDaily; the
+    // buffered path above never touches them, so it no longer loads them.
+    await db.ensureTables?.(["usageHistory", "usageDaily"]);
 
     // All writes in ONE transaction.
     // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.

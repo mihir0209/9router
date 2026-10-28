@@ -45,6 +45,9 @@ beforeEach(() => {
   rpcCalls.length = 0;
   stubs.clear();
   process.env.NINEROUTER_RUNTIME = "cloudflare";
+  // These pin the per-request (standard profile) contract; the extreme profile
+  // is covered by coordinator-extreme-profile.test.js.
+  process.env.NINEROUTER_D1_PROFILE = "standard";
   __test__.memoryState().rate.clear();
   __test__.memoryState().active.clear();
   __test__.memoryState().locks.clear();
@@ -61,6 +64,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.NINEROUTER_RUNTIME;
+  delete process.env.NINEROUTER_D1_PROFILE;
   vi.clearAllMocks();
 });
 

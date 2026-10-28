@@ -53,6 +53,8 @@ source/*
 .cursor/*
 docs/*
 !docs/ARCHITECTURE.md
+!docs/CLOUDFLARE_EXTREME_PROFILE.md
+!docs/benchmarks/
 test/*
 open-sse/test/*
 RM.vn.md

@@ -1,3 +1,5 @@
+import { isExtremeProfile } from "@/lib/db/writeProfile.js";
+
 if (!global._gatewayMetrics) {
   global._gatewayMetrics = {
     startedAt: Date.now(),
@@ -53,6 +55,13 @@ function trackAlert(alert, fingerprint) {
 async function persistOutcome(outcome) {
   if (process.env.NINEROUTER_RUNTIME !== "cloudflare") return false;
   try {
+    // Extreme profile: aggregate in memory, one batched report per flush
+    // interval (see lib/coordinator/coalescer.js). Standard: one call per outcome.
+    if (isExtremeProfile()) {
+      const { recordMetricsOutcome } = await import("@/lib/coordinator/client.js");
+      await recordMetricsOutcome(outcome);
+      return true;
+    }
     const { coordinatorCall } = await import("@/lib/coordinator/client.js");
     await coordinatorCall("recordMetrics", { outcome }, METRICS_SCOPE);
     return true;
