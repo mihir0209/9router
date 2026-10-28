@@ -34,7 +34,7 @@ for g in "${GROUPS_TO_RUN[@]}"; do
     # Open-loop sweep through the saturation knee (no closed-loop scenarios).
     knee) run node-open-knee --scenarios "" --open-scenario chat-ns-plain --open-rates 450,500,550,600 ;;
     # A/B for a code change: run on each build, keep the output dirs apart via BENCH_OUT.
-    ab) run ab --scenarios chat-ns-plain,chat-stream-plain --concurrency 1,8,32 --repeats 4 ;;
+    ab) run "${AB_NAME:-ab}" --scenarios chat-ns-plain,chat-stream-plain --concurrency 1,8,32 --repeats 4 ;;
     *) echo "unknown group $g" >&2; exit 2 ;;
   esac
 done

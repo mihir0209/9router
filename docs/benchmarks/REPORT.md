@@ -23,9 +23,9 @@ credential was used: the server ran on a scrubbed copy of the database in a temp
 | Latency, unloaded (c=1, n=10,463) | p50 **2.19 ms**, p90 2.72, p95 2.94, p99 **6.11**, p99.9 **8.25**, max 25.4 |
 | Latency, open loop 300 req/s (n=13,500) | p50 3.01 ms, p90 3.93, p95 5.83, p99 10.98, p99.9 52.0, max 57.8 |
 | Latency, open loop 500 req/s (n=22,500) | p50 4.34 ms, p90 11.4, p95 22.4, p99 42.2, p99.9 210, max 270 |
-| Saturation knee | open loop: stable up to **500 req/s**, degrading at 550 (p50 10 ms, p99 72 ms), queue grows without bound at **600** (p50 130 ms, p99.9 2.9 s). Closed loop: 95% of peak is reached at c=32 |
+| Saturation knee | open loop: p50 stays within 4.4 ms up to **500 req/s** (p99 42 ms, p99.9 210 ms), degrading at 550 (p50 10 ms, p99 72 ms), queue grows without bound at **600** (p50 130 ms, p99.9 2.9 s). Closed loop: 95% of peak is reached at c=32 |
 | Error rate | **0 errors in 1,308,875 requests** inside the measured windows of the fixed-build runs (195 closed + 30 open runs); the only errors anywhere are overload client timeouts in the pre-fix open loop beyond capacity |
-| Max sustainable concurrency | **No failures up to the largest tested c=1024** (all scenarios, all repeats). The server is CPU bound on one core: latency W = c / λ grows linearly with c, so concurrency above N\* only adds queueing. N\* = λ_max x W(1) = 617 x 2.30 ms = **1.4** in-flight requests with an instant upstream; **32.7** with a 50 ms upstream |
+| Max sustainable concurrency | **No failures up to the largest tested concurrency** (c=1024 for every scenario except `models`, which was tested to c=128; all repeats). The server is CPU bound on one core: latency W = c / λ grows linearly with c, so concurrency above N\* only adds queueing. N\* = λ_max x W(1) = 617 x 2.30 ms = **1.4** in-flight requests with an instant upstream; **32.7** with a 50 ms upstream |
 | Process CPU / RSS | 1.15 cores (one saturated event-loop thread + GC/libuv helpers) at peak; RSS 590 MB at c=1, 640 MB at c=32, 1.18 GB at c=1024 (about 0.57 MB per extra in-flight connection) |
 | Router cost per request | CPU 1.86 ms for a chat request (1.15 cores / 617 req/s); 0.60 ms for health; 0.92 ms for a 401; 6.0 ms for `/v1/models` |
 | Little's law cross-check | L = λ·W matches the independently sampled in-flight count in all 195 closed-loop runs with median error 0.08%, 89% of runs within 1%, worst 13.1% (one c=1024 run, see caveats) |
@@ -78,8 +78,9 @@ mis-configured scenario aborts instead of producing latency numbers for error re
   rate), so its latencies are service latencies at that population, not what a constant-rate population would see.
 * **Open loop** (constant arrival rate, coordinated-omission free): request *i* is scheduled at `t0 + i/rate` and its
   latency is measured **from that intended send time**, so time spent queueing behind a slow server (including inside
-  the generator's pool) is counted. The generator's own send lag is recorded (p99 1.0 - 1.8 ms at every rate, so the
-  generator was never the limit).
+  the generator's pool) is counted. The generator's own send lag is recorded (p99 1.0 - 1.8 ms at every rate). That lag is part of every open-loop latency
+  (so open-loop p50 3.65 ms at 100 req/s sits above closed-loop c=1 p50 2.19 ms) and is small against the multi-millisecond
+  and larger tails that matter, which is why the generator is not the limit.
 * **Connection barrier**: before the clock starts, all `c` sockets are opened and one request completes on each. The
   cold-connect burst is measured and reported separately (column "cold-connect burst" in Appendix A). An earlier
   version without the barrier let single 2-4 s TCP handshake stalls at the start of 128+ connection runs dominate
@@ -187,7 +188,7 @@ Little's law for the same rows (L = λ·W vs the sampled in-flight count):
 ### 4.3 Open loop (constant arrival rate, coordinated-omission free), chat non-stream
 
 3 repeats per rate of 15 s after a 2 s warm-up; latency from the intended send time; pooled exact percentiles (ms).
-Achieved rate equals the target in every run and nothing was dropped, with 0 errors.
+Nothing was dropped and there were 0 errors. (The reported "achieved" rate equals the target by construction, because requests are counted by intended send time; saturation shows up in the latency columns, not in that rate.)
 
 | target req/s | pooled n | p50 | p90 | p95 | p99 | p99.9 | max | server CPU cores | generator send lag p99 |
 |--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
@@ -212,8 +213,8 @@ the p50 stays at or below 4.4 ms until 500 req/s, and at 600 req/s (utilisation 
 closed-loop peak of 617 req/s is the absolute ceiling at which the CPU is 100% busy.
 
 Open-loop Little check: L = λ·W against the sampled in-flight count agrees within ~2% at 250 - 600 req/s (for example
-500 req/s: 3.25 vs 3.24; 600 req/s: 86.5 vs 87.2). At 200 req/s it differs by 20% in absolute 0.1-request terms
-(0.58 vs 0.71), which is the 5 ms sampling granularity at an average of < 1 request in flight.
+500 req/s: 3.25 vs 3.24; 600 req/s: 86.5 vs 87.2). At 200 req/s it differs by 20% (0.58 vs 0.71 in-flight requests in all three repeats): the 5 ms arrival interval equals the 5 ms sampler
+period, so phase locking between the two is the likely cause (not investigated; the sampler is not jittered).
 
 ### 4.4 Upstream with 50 ms latency (`chat-ns-plain`, mock delay 50 ms)
 
@@ -263,7 +264,7 @@ after = `runs/ab-after`):
 | chat-stream-plain | 32 | 339 | 518 | **+53%** | 98.75 -> 62.48 | 130.21 -> 89.29 | 163.97 -> 113.00 |
 
 The full matrix before (`runs/pre-fix/node-main-*`, taken at `6029c755`) versus after (`runs/node-main-*`) is in the
-table below. Those two matrices were run about two hours apart on a shared machine, so the cross-session differences
+table below. Those two matrices were run about 70 minutes apart on a shared machine, so the cross-session differences
 (+33% to +92% on chat cells; health/models within -8% to +10%, i.e. noise) overstate the gain; **the A/B above (+46% to +53%)
 is the number to quote**. Pre-fix saturation was ~320 req/s in the open loop (p99 4.5 s at 320 req/s, client timeouts
 at 380 and 420 req/s); post-fix the first unstable rate is 600 req/s with no timeouts.
@@ -368,8 +369,9 @@ request/CPU charges, assuming each meter has its own allotment as the pricing pa
 | 1,000,000,000 | $4,449.85 | $57.35 |
 | 10,000,000,000 | $45,486.72 | $1,474.85 |
 
-Before, the coordinator exhausted its included 1 million DO requests after 333k requests/month and its 50 million written rows
-after 12 million requests/month (4.1 rows written per request); after, those limits move to 20 million and 333 million requests/month.
+Before, the coordinator exhausted its included 1 million DO requests after 333k requests/month (3 RPCs per request) and the 50 million
+included DO written rows after 12.5 million requests/month (4 per request); after, those limits move to 20 million requests/month (0.05 RPC per
+request) and 1 billion requests/month (0.05 row per request). The D1 write meter (0.1 row per request) is separate and lasts 500 million requests.
 At low volume the saving is therefore smaller in dollars (it is absorbed by the free allotments) and dominant at scale.
 
 ## 7. Reproduce
@@ -381,7 +383,7 @@ scripts/bench/run-all.sh main1                  # health, models, chat-401
 scripts/bench/run-all.sh main2                  # chat-ns-plain, chat-stream-plain
 scripts/bench/run-all.sh main3                  # chat-ns-acl, chat-stream-acl, open loop 100..400 req/s
 scripts/bench/run-all.sh delay logerror knee ab # 50 ms upstream, LOG_LEVEL=ERROR, open loop 450..600, A/B (4 repeats)
-BENCH_OUT=docs/benchmarks/runs/pre-fix scripts/bench/run-all.sh ab   # same on another build
+AB_NAME=ab-before BENCH_OUT=docs/benchmarks/runs/pre-fix scripts/bench/run-all.sh ab   # same on another build (check out the old commit and rebuild first)
 
 node scripts/bench/report.mjs docs/benchmarks/runs/node-main-1 ... > tables.md   # Appendix A
 node scripts/bench/summary.mjs docs/benchmarks/runs/node-main-{1,2,3}              # section 4.1
@@ -390,6 +392,9 @@ node scripts/bench/d1-cost.mjs                                                  
 node scripts/bench/cpu-top.mjs <file.cpuprofile>                                   # section 5
 ```
 
+The pre-fix open-loop rates (100, 200, 250, 280, 320 and 300, 340, 380, 420) are recorded in `runs/pre-fix/*/env.json` under `config.openRates` and can be passed with `--open-rates`.
+`env.json` records the `HEAD` commit without a dirty flag, so the fixed-build runs name the parent commit `6029c755`.
+
 `run-bench.mjs` flags: `--src <db>` (read-only source, scrubbed copy is used), `--scenarios`, `--concurrency`, `--duration`,
 `--warmup`, `--repeats`, `--open-scenario/--open-rates/--open-duration`, `--mock-delay`, `--log-level`, `--server-node-args`
 (for `--cpu-prof`), `--smoke`. The sandbox/agent shell gives every command a fresh `/tmp` and kills background processes when it
@@ -397,9 +402,9 @@ exits, so each group is a single foreground command; on a normal machine you can
 
 ## 8. Caveats and what is not verified
 
-* **Shared, non-quiet machine.** A desktop with other applications; load average at the start of the fixed-build runs was 1.7 - 7.3 (1.1 - 2.9 for the pre-fix runs). Between
+* **Shared, non-quiet machine.** A desktop with other applications; load average at the start of the fixed-build runs was 1.7 - 7.3 (1.1 - 3.2 for the pre-fix runs). Between
   sessions chat throughput varied by up to ~13% (`chat-ns-plain` c=32: 519 in the A/B session, 588 in the main-matrix session
-  two hours later, same build). Within a session the repeats agree well (CV 0.4 - 2.8% for most cells; 9.4% for `chat-ns-acl` c=32).
+  about 14 minutes later, same build). Within a session the repeats agree well (CV 0.4 - 2.8% for most cells; 9.4% for `chat-ns-acl` c=32).
   Treat any difference below ~10% across sessions as noise.
 * **Single server process, single machine, loopback.** No network, TLS, reverse proxy, or multi-process/cluster mode was measured.
   Absolute req/s will differ on other hardware; the shape (CPU-bound, N\* ≈ 1 for an instant upstream) will not.
@@ -419,6 +424,18 @@ exits, so each group is a single foreground command; on a normal machine you can
   include Worker CPU/request charges, D1 or DO storage charges, egress (none for D1), the $5 plan minimum, real isolate recycle rates
   (shown as a sensitivity on f), or real DO wall-clock time (assumed 1 ms/RPC, under $0.005 per million). Cloudflare may change prices; edit
   `PRICE` in `scripts/bench/d1-cost.mjs`.
+* **CPU and RSS figures** are sampled over the whole run (connection barrier, warm-up, window and drain), not only the measured window. At saturation
+  that is immaterial (1.15 cores), but at low rates the average is diluted, so do not divide low-rate CPU by rate to get a CPU cost per request;
+  the 1.86 ms per request quoted above is the saturated figure. RSS assumes 4 KiB pages.
+* **"After" Cloudflare operation counts are amortised over the harness's 20-request warm scenarios** (one coalesced coordinator flush per 20
+  requests, `NINEROUTER_COORDINATOR_FLUSH_MS` is 30 s in production). At several hundred req/s a flush covers thousands of requests and the
+  per-request cost falls further; at 1 request/minute it is higher (the steady-state rows: 3.0 RPC per request).
+* **Open-loop sockets are created lazily** (no connection barrier as in the closed loop), and the 2 s warm-up absorbs most of that; the occasional
+  excursions in single repeats (for example 920 ms at 400 req/s) were not attributed to the server or to connection setup.
+* **Profile percentages** in section 5 are from two single runs (`scripts/bench/cpu-top.mjs`); the `.cpuprofile` files (1.7 MB each) are not committed. The summed
+  25% self-time predicts about +33% throughput versus the measured +46%; the remainder is plausibly GC pressure from the removed allocations, not measured.
+* **The bench database copy** (`setup-bench-db.mjs`) is scrubbed by key name only and lives under the system temp directory while a run is in flight; run it on
+  a trusted machine. Committed artefacts were grepped for `sk-` strings and bearer tokens and contain none.
 * **Pre-fix vs post-fix cross-session comparison** overstates the gain; use the A/B (section 5).
 * **Not tested:** the Cloudflare/Worker runtime under load, memory over hours (RSS was observed only within each run, roughly 0.57 MB
   per extra in-flight connection), more than 1,024 connections, mixed workloads, real upstreams, and any dashboard route.

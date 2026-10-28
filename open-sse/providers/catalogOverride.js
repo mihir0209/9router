@@ -2,8 +2,8 @@
 //
 // The file is the source of truth; the only thing held in memory is a parsed
 // copy dropped as soon as the file's mtime changes. getCapabilitiesForModel is
-// synchronous and runs per request, so the hot path is one stat (~1us) and the
-// parse (~0.1ms on a ~18KB file) only reruns after a sync.
+// synchronous and runs per request, so the hot path is a time check (a stat at most
+// once per STAT_INTERVAL_MS) and the parse (~0.1ms on a ~18KB file) only reruns after a sync.
 
 import fs from "node:fs";
 import path from "node:path";
