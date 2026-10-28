@@ -131,11 +131,30 @@ export async function exportDb() {
   return out;
 }
 
-export async function importDb(payload) {
+/**
+ * Replace the whole database with `payload`.
+ *
+ * Returns `{ success: true, counts }` where `counts` is the number of rows
+ * written per table. With `options.returnSnapshot === true` the result also
+ * carries `snapshot`, the post-import `exportDb()` (not on Cloudflare).
+ */
+export async function importDb(payload, options = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("Invalid database payload");
   }
   const db = await getAdapter();
+  const counts = {
+    settings: payload.settings ? 1 : 0,
+    providerConnections: (payload.providerConnections || []).length,
+    providerNodes: (payload.providerNodes || []).length,
+    proxyPools: (payload.proxyPools || []).length,
+    apiKeys: (payload.apiKeys || []).length,
+    combos: (payload.combos || []).length,
+    modelAliases: Object.keys(payload.modelAliases || {}).length,
+    customModels: (payload.customModels || []).length,
+    mitmAlias: Object.keys(payload.mitmAlias || {}).length,
+    pricing: Object.keys(payload.pricing || {}).length,
+  };
 
   db.transaction(() => {
     // Wipe all tables (keep _meta)
@@ -243,11 +262,17 @@ export async function importDb(payload) {
     } catch { /* replica sync is best-effort; DB stays authoritative */ }
   }
 
-  if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
-    return { success: true };
+  const result = { success: true, counts };
+
+  // The full re-export used to run on every import and nothing read it (the
+  // route ignores the return value), which doubled the work for large backups.
+  // Callers that want the post-import state ask for it. Cloudflare never
+  // returned a snapshot, so it stays without one.
+  if (options.returnSnapshot === true && process.env.NINEROUTER_RUNTIME !== "cloudflare") {
+    result.snapshot = await exportDb();
   }
 
-  return await exportDb();
+  return result;
 }
 
 // Eager init helper (optional)

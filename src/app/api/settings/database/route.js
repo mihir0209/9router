@@ -67,7 +67,8 @@ export async function POST(request) {
     }
 
     payload.settings = preserveProtectedSettings(payload.settings, currentSettings);
-    await importDb(payload);
+    const startedAt = Date.now();
+    const result = await importDb(payload);
 
     // Wait for the write to actually be durable before reporting success.
     //
@@ -88,7 +89,12 @@ export async function POST(request) {
       console.warn("[Settings][DatabaseImport] Failed to re-apply outbound proxy env:", err);
     }
 
-    return NextResponse.json({ success: true });
+    // Row counts and server-side duration only; no payload data is echoed back.
+    return NextResponse.json({
+      success: true,
+      counts: result?.counts,
+      durationMs: Date.now() - startedAt,
+    });
   } catch (error) {
     console.log("Error importing database:", error);
     return NextResponse.json(

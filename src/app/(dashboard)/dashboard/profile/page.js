@@ -10,6 +10,7 @@ import { APP_CONFIG } from "@/shared/constants/config";
 import { LOCALE_COOKIE, normalizeLocale } from "@/i18n/config";
 import { LOCALE_FLAGS } from "@/shared/constants/locales";
 import { validateBackup, previewMerge, mergeBackups } from "@/lib/db/mergeBackups";
+import { IMPORT_STAGES, formatProgressMessage, withDuration } from "@/lib/importProgress";
 
 function getLocaleFromCookie() {
   if (typeof document === "undefined") return "en";
@@ -34,6 +35,11 @@ export default function ProfilePage() {
   const [dbLoading, setDbLoading] = useState(false);
   const [dbStatus, setDbStatus] = useState({ type: "", message: "" });
   const [dbAuth, setDbAuth] = useState({ open: false, mode: "", password: "" });
+  // Staged progress for Import / Merge Backup: { stage, detail, startedAt } or null.
+  // `progressNow` only exists to re-render once a second so the elapsed time ticks.
+  const [importProgress, setImportProgress] = useState(null);
+  const [progressNow, setProgressNow] = useState(() => Date.now());
+  const importStartedAtRef = useRef(0);
   const pendingImportRef = useRef(null);
   const [oidcForm, setOidcForm] = useState({
     authMode: "password",
@@ -731,6 +737,26 @@ export default function ProfilePage() {
     }
   };
 
+  const isImportRunning = importProgress !== null;
+  useEffect(() => {
+    if (!isImportRunning) return undefined;
+    const timer = setInterval(() => setProgressNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [isImportRunning]);
+
+  const beginImportProgress = () => {
+    importStartedAtRef.current = Date.now();
+    setImportProgress({ stage: IMPORT_STAGES.reading, detail: null, startedAt: importStartedAtRef.current });
+  };
+
+  const setImportStage = (stage, detail = null) => {
+    setProgressNow(Date.now());
+    setImportProgress({ stage, detail, startedAt: importStartedAtRef.current });
+  };
+
+  // Let React paint the new stage before a long synchronous step or request starts.
+  const nextPaint = () => new Promise((resolve) => setTimeout(resolve, 0));
+
   const handleExportDatabase = async (password) => {
     setDbLoading(true);
     setDbStatus({ type: "", message: "" });
@@ -777,14 +803,23 @@ export default function ProfilePage() {
     const file = pendingImportRef.current;
     if (!file) return;
     setDbLoading(true);
+    beginImportProgress();
+    setImportStage(IMPORT_STAGES.reading, file.size);
     try {
+      await nextPaint();
       const raw = await file.text();
+      setImportStage(IMPORT_STAGES.validating);
+      await nextPaint();
       const payload = JSON.parse(raw);
 
       if (importMode === "merge") {
         // Non-destructive import: fetch the live DB, merge the backup into it,
         // then write the merged result. Existing rows are kept unless the
         // strategy resolves a conflict in favor of the incoming value.
+        const { valid, errors } = validateBackup(payload);
+        if (!valid) throw new Error(`Invalid backup: ${errors.join(", ")}`);
+
+        setImportStage(IMPORT_STAGES.loadingCurrent);
         const baseRes = await fetch("/api/settings/database", {
           headers: { "x-9r-password": password },
         });
@@ -794,32 +829,43 @@ export default function ProfilePage() {
         }
         const base = await baseRes.json();
 
-        const { valid, errors } = validateBackup(payload);
-        if (!valid) throw new Error(`Invalid backup: ${errors.join(", ")}`);
-
+        setImportStage(IMPORT_STAGES.merging);
+        await nextPaint();
         const preview = previewMerge(base, payload, mergeStrategy);
         const merged = mergeBackups(base, payload, mergeStrategy);
 
+        setImportStage(IMPORT_STAGES.uploading);
+        await nextPaint();
+        const body = JSON.stringify({ ...merged, password });
+        setImportStage(IMPORT_STAGES.restoring);
         const res = await fetch("/api/settings/database", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...merged, password }),
+          body,
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "Failed to import database");
 
+        setImportStage(IMPORT_STAGES.refreshing);
         await reloadSettings();
         setDbStatus({
           type: "success",
-          message: `Import (merge) complete: ${preview.added} added, ${preview.updated} updated, ${preview.unchanged} unchanged`,
+          message: withDuration(
+            `Import (merge) complete: ${preview.added} added, ${preview.updated} updated, ${preview.unchanged} unchanged`,
+            Date.now() - importStartedAtRef.current
+          ),
         });
         return;
       }
 
+      setImportStage(IMPORT_STAGES.uploading);
+      await nextPaint();
+      const body = JSON.stringify({ ...payload, password });
+      setImportStage(IMPORT_STAGES.restoring);
       const res = await fetch("/api/settings/database", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...payload, password }),
+        body,
       });
 
       const data = await res.json().catch(() => ({}));
@@ -827,12 +873,17 @@ export default function ProfilePage() {
         throw new Error(data.error || "Failed to import database");
       }
 
+      setImportStage(IMPORT_STAGES.refreshing);
       await reloadSettings();
-      setDbStatus({ type: "success", message: "Database imported (replaced) successfully" });
+      setDbStatus({
+        type: "success",
+        message: withDuration("Database imported (replaced) successfully", Date.now() - importStartedAtRef.current),
+      });
     } catch (err) {
       setDbStatus({ type: "error", message: err.message || "Invalid backup file" });
     } finally {
       pendingImportRef.current = null;
+      setImportProgress(null);
       setDbLoading(false);
     }
   };
@@ -862,6 +913,8 @@ export default function ProfilePage() {
     const incoming = pendingMergeRef.current;
     if (!incoming) return;
     setDbLoading(true);
+    beginImportProgress();
+    setImportStage(IMPORT_STAGES.loadingCurrent);
     try {
       // Load the current database with GET (the exporter). POSTing here would
       // run the importer and wipe the live DB before the merge even starts.
@@ -874,23 +927,37 @@ export default function ProfilePage() {
       }
       const base = await baseRes.json();
 
+      setImportStage(IMPORT_STAGES.merging);
+      await nextPaint();
       const preview = previewMerge(base, incoming, mergeStrategy);
 
       const merged = mergeBackups(base, incoming, mergeStrategy);
+      setImportStage(IMPORT_STAGES.uploading);
+      await nextPaint();
+      const body = JSON.stringify({ ...merged, password });
+      setImportStage(IMPORT_STAGES.restoring);
       const res = await fetch("/api/settings/database", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...merged, password }),
+        body,
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to import merged database");
 
+      setImportStage(IMPORT_STAGES.refreshing);
       await reloadSettings();
-      setDbStatus({ type: "success", message: `Merge complete: ${preview.added} added, ${preview.updated} updated, ${preview.unchanged} unchanged` });
+      setDbStatus({
+        type: "success",
+        message: withDuration(
+          `Merge complete: ${preview.added} added, ${preview.updated} updated, ${preview.unchanged} unchanged`,
+          Date.now() - importStartedAtRef.current
+        ),
+      });
     } catch (err) {
       setDbStatus({ type: "error", message: err.message || "Merge failed" });
     } finally {
       pendingMergeRef.current = null;
+      setImportProgress(null);
       setDbLoading(false);
     }
   };
@@ -1014,7 +1081,22 @@ export default function ProfilePage() {
                 onChange={handleMergeFileSelect}
               />
             </div>
-            {dbStatus.message && (
+            {importProgress && (
+              <p
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-2 text-sm text-text-muted"
+              >
+                <span
+                  className="material-symbols-outlined animate-spin text-[18px] shrink-0"
+                  aria-hidden="true"
+                >
+                  progress_activity
+                </span>
+                <span>{formatProgressMessage(importProgress, progressNow)}</span>
+              </p>
+            )}
+            {dbStatus.message && !importProgress && (
               <p className={`text-sm ${dbStatus.type === "error" ? "text-red-500" : "text-green-600 dark:text-green-400"}`}>
                 {dbStatus.message}
               </p>
