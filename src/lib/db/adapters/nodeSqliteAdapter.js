@@ -48,6 +48,8 @@ export async function createNodeSqliteAdapter(filePath) {
   process.once("SIGINT", () => { onShutdown(); process.exit(0); });
   process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
 
+  let txDepth = 0;
+
   return {
     driver: "node:sqlite",
     run(sql, params = []) {
@@ -62,16 +64,41 @@ export async function createNodeSqliteAdapter(filePath) {
     },
     exec(sql) { return db.exec(sql); },
     transaction(fn) {
-      // node:sqlite has no transaction wrapper. Use SAVEPOINT for nested support.
-      const sp = `sp_${Math.random().toString(36).slice(2)}`;
-      db.exec(`SAVEPOINT ${sp}`);
+      // node:sqlite has no transaction wrapper.
+      //
+      // The outermost transaction is BEGIN IMMEDIATE, not the deferred transaction a bare SAVEPOINT
+      // starts. Callers read then write (usage stats: SELECT usageDaily, then upsert it). With several
+      // server processes sharing one WAL database, a deferred transaction that read first and then tries
+      // to write fails at once with SQLITE_BUSY ("database is locked") if another process committed in
+      // between, and the busy_timeout is not consulted for that upgrade. IMMEDIATE takes the write lock
+      // up front, where busy_timeout does apply, and also makes the read-modify-write atomic across
+      // processes. Nested calls use SAVEPOINT as before.
+      if (txDepth > 0) {
+        const sp = `sp_${Math.random().toString(36).slice(2)}`;
+        db.exec(`SAVEPOINT ${sp}`);
+        txDepth++;
+        try {
+          const r = fn();
+          db.exec(`RELEASE ${sp}`);
+          return r;
+        } catch (e) {
+          try { db.exec(`ROLLBACK TO ${sp}`); db.exec(`RELEASE ${sp}`); } catch {}
+          throw e;
+        } finally {
+          txDepth--;
+        }
+      }
+      db.exec("BEGIN IMMEDIATE");
+      txDepth++;
       try {
         const r = fn();
-        db.exec(`RELEASE ${sp}`);
+        db.exec("COMMIT");
         return r;
       } catch (e) {
-        try { db.exec(`ROLLBACK TO ${sp}`); db.exec(`RELEASE ${sp}`); } catch {}
+        try { db.exec("ROLLBACK"); } catch {}
         throw e;
+      } finally {
+        txDepth--;
       }
     },
     checkpoint() { try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {} },

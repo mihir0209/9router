@@ -44,7 +44,10 @@ export function createBetterSqliteAdapter(filePath) {
     get(sql, params = []) { return prepare(sql).get(...params); },
     all(sql, params = []) { return prepare(sql).all(...params); },
     exec(sql) { return db.exec(sql); },
-    transaction(fn) { return db.transaction(fn)(); },
+    // IMMEDIATE: take the write lock up front so a read-then-write transaction cannot fail with
+    // SQLITE_BUSY when another process sharing the WAL database commits in between (nested calls
+    // become savepoints). See nodeSqliteAdapter.
+    transaction(fn) { return db.transaction(fn).immediate(); },
     checkpoint() { try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch {} },
     close() {
       clearInterval(checkpointTimer);
