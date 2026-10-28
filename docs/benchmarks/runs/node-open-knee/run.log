@@ -1,0 +1,15 @@
+[bench] tmp=/tmp/9r-bench-vbza03 out=/devspace/Projects/9router/docs/benchmarks/runs/node-open-knee
+[bench] fresh server for chat-ns-plain (pid 35, rss 425 MB after warm-up)
+[open]   chat-ns-plain      rate=  450 run=1 got 450 req/s p50=4.59 p99=48.48 p99.9=328.61 max=382.3 err=0.00% lagP99=1.55ms
+[open]   chat-ns-plain      rate=  450 run=2 got 450 req/s p50=3.00 p99=77.94 p99.9=212.30 max=272.4 err=0.00% lagP99=1.66ms
+[open]   chat-ns-plain      rate=  450 run=3 got 450 req/s p50=2.84 p99=24.38 p99.9=143.13 max=178.2 err=0.00% lagP99=1.67ms
+[open]   chat-ns-plain      rate=  500 run=1 got 500 req/s p50=4.53 p99=44.38 p99.9=200.05 max=241.0 err=0.00% lagP99=1.83ms
+[open]   chat-ns-plain      rate=  500 run=2 got 500 req/s p50=4.20 p99=36.40 p99.9=206.25 max=227.2 err=0.00% lagP99=1.49ms
+[open]   chat-ns-plain      rate=  500 run=3 got 500 req/s p50=4.34 p99=44.12 p99.9=234.12 max=269.6 err=0.00% lagP99=1.77ms
+[open]   chat-ns-plain      rate=  550 run=1 got 550 req/s p50=9.76 p99=74.59 p99.9=358.56 max=451.3 err=0.00% lagP99=1.61ms
+[open]   chat-ns-plain      rate=  550 run=2 got 550 req/s p50=9.22 p99=63.00 p99.9=435.65 max=490.3 err=0.00% lagP99=1.61ms
+[open]   chat-ns-plain      rate=  550 run=3 got 550 req/s p50=11.24 p99=72.40 p99.9=424.41 max=502.0 err=0.00% lagP99=1.61ms
+[open]   chat-ns-plain      rate=  600 run=1 got 600 req/s p50=133.45 p99=210.17 p99.9=2234.89 max=2468.0 err=0.00% lagP99=1.35ms
+[open]   chat-ns-plain      rate=  600 run=2 got 600 req/s p50=109.00 p99=329.23 p99.9=1705.93 max=2050.7 err=0.00% lagP99=1.44ms
+[open]   chat-ns-plain      rate=  600 run=3 got 600 req/s p50=153.01 p99=635.03 p99.9=3568.58 max=3758.1 err=0.00% lagP99=1.28ms
+[bench] done -> /devspace/Projects/9router/docs/benchmarks/runs/node-open-knee

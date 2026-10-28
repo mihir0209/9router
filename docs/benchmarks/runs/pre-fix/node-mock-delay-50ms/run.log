@@ -1,0 +1,30 @@
+[bench] tmp=/tmp/9r-bench-HFv7tL out=/devspace/Projects/9router/docs/benchmarks/runs/node-mock-delay-50ms
+[bench] fresh server for chat-ns-plain (pid 33, rss 374 MB after warm-up)
+[closed] chat-ns-plain      c=   1 run=1      18 req/s  p50=54.61 p99=55.42 max=55.7 err=0.00% srvCPU=0.09 genCPU=0.01 rss=386MB
+[closed] chat-ns-plain      c=   1 run=2      18 req/s  p50=54.76 p99=56.05 max=56.1 err=0.00% srvCPU=0.09 genCPU=0.01 rss=399MB
+[closed] chat-ns-plain      c=   1 run=3      18 req/s  p50=54.75 p99=55.92 max=59.9 err=0.00% srvCPU=0.09 genCPU=0.01 rss=411MB
+[closed] chat-ns-plain      c=   4 run=1      73 req/s  p50=54.70 p99=59.75 max=63.6 err=0.00% srvCPU=0.34 genCPU=0.03 rss=440MB
+[closed] chat-ns-plain      c=   4 run=2      73 req/s  p50=54.62 p99=58.21 max=59.6 err=0.00% srvCPU=0.31 genCPU=0.02 rss=440MB
+[closed] chat-ns-plain      c=   4 run=3      73 req/s  p50=54.72 p99=59.20 max=60.2 err=0.00% srvCPU=0.33 genCPU=0.03 rss=444MB
+[closed] chat-ns-plain      c=   8 run=1     146 req/s  p50=54.61 p99=60.02 max=63.4 err=0.00% srvCPU=0.60 genCPU=0.04 rss=532MB
+[closed] chat-ns-plain      c=   8 run=2     146 req/s  p50=54.50 p99=60.86 max=68.0 err=0.00% srvCPU=0.62 genCPU=0.04 rss=541MB
+[closed] chat-ns-plain      c=   8 run=3     147 req/s  p50=54.38 p99=59.27 max=61.5 err=0.00% srvCPU=0.57 genCPU=0.04 rss=543MB
+[closed] chat-ns-plain      c=  16 run=1     203 req/s  p50=82.05 p99=93.82 max=103.2 err=0.00% srvCPU=0.64 genCPU=0.03 rss=580MB
+[closed] chat-ns-plain      c=  16 run=2     235 req/s  p50=67.20 p99=83.28 max=98.1 err=0.00% srvCPU=0.81 genCPU=0.04 rss=591MB
+[closed] chat-ns-plain      c=  16 run=3     242 req/s  p50=65.26 p99=82.94 max=92.2 err=0.00% srvCPU=0.81 genCPU=0.04 rss=603MB
+[closed] chat-ns-plain      c=  32 run=1     361 req/s  p50=87.22 p99=119.86 max=142.2 err=0.00% srvCPU=1.06 genCPU=0.04 rss=608MB
+[closed] chat-ns-plain      c=  32 run=2     350 req/s  p50=86.94 p99=182.52 max=214.4 err=0.00% srvCPU=1.06 genCPU=0.05 rss=610MB
+[closed] chat-ns-plain      c=  32 run=3     372 req/s  p50=85.29 p99=118.75 max=140.5 err=0.00% srvCPU=1.07 genCPU=0.05 rss=613MB
+[closed] chat-ns-plain      c=  64 run=1     384 req/s  p50=166.07 p99=212.57 max=224.5 err=0.00% srvCPU=1.07 genCPU=0.04 rss=616MB
+[closed] chat-ns-plain      c=  64 run=2     379 req/s  p50=165.79 p99=235.83 max=239.6 err=0.00% srvCPU=1.08 genCPU=0.04 rss=630MB
+[closed] chat-ns-plain      c=  64 run=3     376 req/s  p50=167.32 p99=238.11 max=243.4 err=0.00% srvCPU=1.08 genCPU=0.04 rss=633MB
+[closed] chat-ns-plain      c= 128 run=1     370 req/s  p50=339.40 p99=391.24 max=392.5 err=0.00% srvCPU=1.08 genCPU=0.04 rss=636MB
+[closed] chat-ns-plain      c= 128 run=2     375 req/s  p50=339.12 p99=406.79 max=417.3 err=0.00% srvCPU=1.09 genCPU=0.04 rss=653MB
+[closed] chat-ns-plain      c= 128 run=3     380 req/s  p50=335.01 p99=388.83 max=389.6 err=0.00% srvCPU=1.12 genCPU=0.04 rss=665MB
+[closed] chat-ns-plain      c= 512 run=1     358 req/s  p50=1385.24 p99=1510.44 max=1515.2 err=0.00% srvCPU=1.12 genCPU=0.05 rss=795MB
+[closed] chat-ns-plain      c= 512 run=2     363 req/s  p50=1389.76 p99=1594.61 max=1598.7 err=0.00% srvCPU=1.14 genCPU=0.04 rss=893MB
+[closed] chat-ns-plain      c= 512 run=3     370 req/s  p50=1364.60 p99=1440.37 max=1440.6 err=0.00% srvCPU=1.11 genCPU=0.05 rss=893MB
+[closed] chat-ns-plain      c=1024 run=1     359 req/s  p50=2826.32 p99=2932.71 max=2941.7 err=0.00% srvCPU=1.13 genCPU=0.05 rss=1098MB
+[closed] chat-ns-plain      c=1024 run=2     367 req/s  p50=2868.32 p99=3073.19 max=3078.3 err=0.00% srvCPU=1.12 genCPU=0.05 rss=1263MB
+[closed] chat-ns-plain      c=1024 run=3     375 req/s  p50=2774.35 p99=2897.95 max=2903.5 err=0.00% srvCPU=1.14 genCPU=0.05 rss=1270MB
+[bench] done -> /devspace/Projects/9router/docs/benchmarks/runs/node-mock-delay-50ms

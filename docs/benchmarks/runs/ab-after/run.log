@@ -1,0 +1,28 @@
+[bench] tmp=/tmp/9r-bench-5ZeyPq out=/devspace/Projects/9router/docs/benchmarks/runs/ab
+[bench] fresh server for chat-ns-plain (pid 38, rss 418 MB after warm-up)
+[closed] chat-ns-plain      c=   1 run=1     407 req/s  p50=2.33 p99=6.63 max=24.9 err=0.00% srvCPU=1.08 genCPU=0.08 rss=553MB
+[closed] chat-ns-plain      c=   1 run=2     443 req/s  p50=2.12 p99=6.22 max=29.9 err=0.00% srvCPU=1.04 genCPU=0.08 rss=581MB
+[closed] chat-ns-plain      c=   1 run=3     460 req/s  p50=2.03 p99=6.14 max=25.6 err=0.00% srvCPU=1.12 genCPU=0.08 rss=589MB
+[closed] chat-ns-plain      c=   1 run=4     469 req/s  p50=2.01 p99=6.10 max=27.8 err=0.00% srvCPU=1.02 genCPU=0.07 rss=591MB
+[closed] chat-ns-plain      c=   8 run=1     501 req/s  p50=15.30 p99=23.29 max=53.9 err=0.00% srvCPU=1.10 genCPU=0.07 rss=592MB
+[closed] chat-ns-plain      c=   8 run=2     499 req/s  p50=15.39 p99=25.41 max=65.8 err=0.00% srvCPU=1.11 genCPU=0.07 rss=596MB
+[closed] chat-ns-plain      c=   8 run=3     480 req/s  p50=15.91 p99=26.89 max=48.5 err=0.00% srvCPU=1.09 genCPU=0.07 rss=598MB
+[closed] chat-ns-plain      c=   8 run=4     465 req/s  p50=16.59 p99=24.38 max=44.0 err=0.00% srvCPU=1.09 genCPU=0.07 rss=601MB
+[closed] chat-ns-plain      c=  32 run=1     527 req/s  p50=59.89 p99=88.36 max=130.2 err=0.00% srvCPU=1.11 genCPU=0.06 rss=629MB
+[closed] chat-ns-plain      c=  32 run=2     517 req/s  p50=61.93 p99=93.07 max=126.0 err=0.00% srvCPU=1.10 genCPU=0.06 rss=638MB
+[closed] chat-ns-plain      c=  32 run=3     515 req/s  p50=59.52 p99=86.88 max=115.9 err=0.00% srvCPU=1.10 genCPU=0.06 rss=640MB
+[closed] chat-ns-plain      c=  32 run=4     516 req/s  p50=59.20 p99=93.35 max=119.5 err=0.00% srvCPU=1.12 genCPU=0.06 rss=643MB
+[bench] fresh server for chat-stream-plain (pid 55, rss 394 MB after warm-up)
+[closed] chat-stream-plain  c=   1 run=1     321 req/s  p50=2.98 p99=7.01 max=14.5 err=0.00% srvCPU=1.08 genCPU=0.08 rss=490MB
+[closed] chat-stream-plain  c=   1 run=2     339 req/s  p50=2.82 p99=6.52 max=28.7 err=0.00% srvCPU=1.07 genCPU=0.08 rss=553MB
+[closed] chat-stream-plain  c=   1 run=3     340 req/s  p50=2.77 p99=6.94 max=26.1 err=0.00% srvCPU=1.14 genCPU=0.09 rss=589MB
+[closed] chat-stream-plain  c=   1 run=4     401 req/s  p50=2.34 p99=5.77 max=30.8 err=0.00% srvCPU=1.05 genCPU=0.08 rss=593MB
+[closed] chat-stream-plain  c=   8 run=1     485 req/s  p50=15.65 p99=27.36 max=55.7 err=0.00% srvCPU=1.12 genCPU=0.08 rss=598MB
+[closed] chat-stream-plain  c=   8 run=2     449 req/s  p50=16.15 p99=43.49 max=58.3 err=0.00% srvCPU=1.11 genCPU=0.08 rss=600MB
+[closed] chat-stream-plain  c=   8 run=3     489 req/s  p50=15.61 p99=24.32 max=47.2 err=0.00% srvCPU=1.10 genCPU=0.11 rss=603MB
+[closed] chat-stream-plain  c=   8 run=4     451 req/s  p50=15.98 p99=47.37 max=57.1 err=0.00% srvCPU=1.10 genCPU=0.10 rss=606MB
+[closed] chat-stream-plain  c=  32 run=1     499 req/s  p50=64.77 p99=91.57 max=116.0 err=0.00% srvCPU=1.12 genCPU=0.10 rss=637MB
+[closed] chat-stream-plain  c=  32 run=2     516 req/s  p50=63.32 p99=86.57 max=124.4 err=0.00% srvCPU=1.10 genCPU=0.08 rss=639MB
+[closed] chat-stream-plain  c=  32 run=3     526 req/s  p50=61.97 p99=95.22 max=115.0 err=0.00% srvCPU=1.13 genCPU=0.08 rss=643MB
+[closed] chat-stream-plain  c=  32 run=4     529 req/s  p50=61.49 p99=89.95 max=109.7 err=0.00% srvCPU=1.11 genCPU=0.08 rss=644MB
+[bench] done -> /devspace/Projects/9router/docs/benchmarks/runs/ab

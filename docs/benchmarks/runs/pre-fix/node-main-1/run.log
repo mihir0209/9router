@@ -1,0 +1,53 @@
+[bench] tmp=/tmp/9r-bench-5LrXHA out=/devspace/Projects/9router/docs/benchmarks/runs/node-main-1
+[bench] fresh server for health (pid 33, rss 431 MB after warm-up)
+[closed] health             c=   1 run=1    1436 req/s  p50=0.62 p99=1.61 max=26.0 err=0.00% srvCPU=1.16 genCPU=0.19 rss=527MB
+[closed] health             c=   1 run=2    1634 req/s  p50=0.56 p99=1.05 max=22.7 err=0.00% srvCPU=1.09 genCPU=0.16 rss=528MB
+[closed] health             c=   1 run=3    1624 req/s  p50=0.56 p99=1.24 max=22.0 err=0.00% srvCPU=1.10 genCPU=0.15 rss=528MB
+[closed] health             c=   8 run=1    1861 req/s  p50=3.51 p99=10.20 max=33.5 err=0.00% srvCPU=1.15 genCPU=0.16 rss=527MB
+[closed] health             c=   8 run=2    1777 req/s  p50=3.83 p99=10.39 max=44.6 err=0.00% srvCPU=1.16 genCPU=0.18 rss=527MB
+[closed] health             c=   8 run=3    1789 req/s  p50=3.88 p99=10.75 max=35.1 err=0.00% srvCPU=1.18 genCPU=0.15 rss=528MB
+[closed] health             c=  32 run=1    1859 req/s  p50=15.99 p99=31.49 max=54.7 err=0.00% srvCPU=1.15 genCPU=0.15 rss=540MB
+[closed] health             c=  32 run=2    1835 req/s  p50=16.08 p99=31.09 max=42.2 err=0.00% srvCPU=1.16 genCPU=0.16 rss=540MB
+[closed] health             c=  32 run=3    1815 req/s  p50=16.17 p99=33.14 max=60.1 err=0.00% srvCPU=1.15 genCPU=0.16 rss=541MB
+[closed] health             c= 128 run=1    1728 req/s  p50=73.35 p99=100.20 max=122.8 err=0.00% srvCPU=1.17 genCPU=0.15 rss=541MB
+[closed] health             c= 128 run=2    1735 req/s  p50=73.95 p99=99.08 max=123.0 err=0.00% srvCPU=1.16 genCPU=0.16 rss=541MB
+[closed] health             c= 128 run=3    1738 req/s  p50=72.66 p99=96.23 max=111.5 err=0.00% srvCPU=1.15 genCPU=0.16 rss=541MB
+[closed] health             c= 512 run=1    1769 req/s  p50=286.22 p99=327.14 max=345.1 err=0.00% srvCPU=1.15 genCPU=0.18 rss=549MB
+[closed] health             c= 512 run=2    1789 req/s  p50=283.51 p99=340.26 max=342.7 err=0.00% srvCPU=1.16 genCPU=0.17 rss=551MB
+[closed] health             c= 512 run=3    1819 req/s  p50=278.07 p99=311.72 max=319.7 err=0.00% srvCPU=1.16 genCPU=0.18 rss=559MB
+[closed] health             c=1024 run=1    1729 req/s  p50=584.90 p99=648.27 max=654.1 err=0.00% srvCPU=1.18 genCPU=0.18 rss=698MB
+[closed] health             c=1024 run=2    1751 req/s  p50=571.27 p99=679.91 max=723.7 err=0.00% srvCPU=1.18 genCPU=0.18 rss=991MB
+[closed] health             c=1024 run=3    1744 req/s  p50=565.43 p99=738.43 max=788.5 err=0.00% srvCPU=1.17 genCPU=0.18 rss=1036MB
+[bench] fresh server for models (pid 50, rss 353 MB after warm-up)
+[closed] models             c=   1 run=1     170 req/s  p50=5.72 p99=11.49 max=16.2 err=0.00% srvCPU=1.03 genCPU=0.05 rss=441MB
+[closed] models             c=   1 run=2     174 req/s  p50=5.60 p99=11.72 max=15.9 err=0.00% srvCPU=1.01 genCPU=0.05 rss=499MB
+[closed] models             c=   1 run=3     171 req/s  p50=5.70 p99=11.68 max=16.1 err=0.00% srvCPU=1.03 genCPU=0.04 rss=510MB
+[closed] models             c=   8 run=1     167 req/s  p50=41.69 p99=98.01 max=117.4 err=0.00% srvCPU=1.06 genCPU=0.05 rss=522MB
+[closed] models             c=   8 run=2     172 req/s  p50=40.18 p99=93.00 max=113.4 err=0.00% srvCPU=1.08 genCPU=0.04 rss=523MB
+[closed] models             c=   8 run=3     165 req/s  p50=41.92 p99=96.18 max=118.2 err=0.00% srvCPU=1.12 genCPU=0.05 rss=525MB
+[closed] models             c=  32 run=1     181 req/s  p50=170.99 p99=345.08 max=366.7 err=0.00% srvCPU=1.06 genCPU=0.04 rss=521MB
+[closed] models             c=  32 run=2     176 req/s  p50=175.76 p99=357.67 max=385.0 err=0.00% srvCPU=1.05 genCPU=0.05 rss=521MB
+[closed] models             c=  32 run=3     177 req/s  p50=175.54 p99=360.21 max=379.0 err=0.00% srvCPU=1.04 genCPU=0.04 rss=519MB
+[closed] models             c= 128 run=1     176 req/s  p50=729.38 p99=751.09 max=756.5 err=0.00% srvCPU=1.03 genCPU=0.05 rss=522MB
+[closed] models             c= 128 run=2     182 req/s  p50=699.54 p99=745.28 max=750.7 err=0.00% srvCPU=1.03 genCPU=0.05 rss=520MB
+[closed] models             c= 128 run=3     179 req/s  p50=707.17 p99=782.90 max=1409.7 err=0.00% srvCPU=1.03 genCPU=0.05 rss=522MB
+[bench] fresh server for chat-401 (pid 64, rss 435 MB after warm-up)
+[closed] chat-401           c=   1 run=1     833 req/s  p50=1.09 p99=2.72 max=20.0 err=0.00% srvCPU=1.18 genCPU=0.13 rss=520MB
+[closed] chat-401           c=   1 run=2     940 req/s  p50=0.98 p99=2.02 max=22.5 err=0.00% srvCPU=1.06 genCPU=0.12 rss=541MB
+[closed] chat-401           c=   1 run=3     928 req/s  p50=0.99 p99=1.94 max=21.0 err=0.00% srvCPU=1.06 genCPU=0.11 rss=541MB
+[closed] chat-401           c=   8 run=1    1025 req/s  p50=6.49 p99=16.51 max=42.5 err=0.00% srvCPU=1.11 genCPU=0.11 rss=539MB
+[closed] chat-401           c=   8 run=2    1045 req/s  p50=6.36 p99=15.38 max=41.5 err=0.00% srvCPU=1.11 genCPU=0.12 rss=539MB
+[closed] chat-401           c=   8 run=3     992 req/s  p50=6.61 p99=20.03 max=42.6 err=0.00% srvCPU=1.13 genCPU=0.11 rss=542MB
+[closed] chat-401           c=  32 run=1     962 req/s  p50=31.72 p99=59.77 max=92.2 err=0.00% srvCPU=1.12 genCPU=0.13 rss=546MB
+[closed] chat-401           c=  32 run=2    1025 req/s  p50=29.38 p99=57.84 max=80.2 err=0.00% srvCPU=1.11 genCPU=0.12 rss=550MB
+[closed] chat-401           c=  32 run=3    1005 req/s  p50=30.10 p99=59.98 max=94.9 err=0.00% srvCPU=1.11 genCPU=0.12 rss=550MB
+[closed] chat-401           c= 128 run=1    1050 req/s  p50=120.71 p99=155.07 max=160.5 err=0.00% srvCPU=1.11 genCPU=0.12 rss=554MB
+[closed] chat-401           c= 128 run=2    1041 req/s  p50=121.72 p99=152.87 max=162.2 err=0.00% srvCPU=1.11 genCPU=0.11 rss=554MB
+[closed] chat-401           c= 128 run=3     994 req/s  p50=125.60 p99=177.84 max=185.3 err=0.00% srvCPU=1.11 genCPU=0.13 rss=555MB
+[closed] chat-401           c= 512 run=1    1042 req/s  p50=489.11 p99=521.69 max=530.2 err=0.00% srvCPU=1.11 genCPU=0.12 rss=561MB
+[closed] chat-401           c= 512 run=2    1030 req/s  p50=494.67 p99=536.46 max=547.7 err=0.00% srvCPU=1.10 genCPU=0.13 rss=593MB
+[closed] chat-401           c= 512 run=3    1042 req/s  p50=488.09 p99=532.99 max=539.7 err=0.00% srvCPU=1.12 genCPU=0.12 rss=594MB
+[closed] chat-401           c=1024 run=1    1012 req/s  p50=1016.35 p99=1073.72 max=1077.8 err=0.00% srvCPU=1.11 genCPU=0.15 rss=603MB
+[closed] chat-401           c=1024 run=2    1034 req/s  p50=982.01 p99=1055.86 max=1076.8 err=0.00% srvCPU=1.11 genCPU=0.14 rss=825MB
+[closed] chat-401           c=1024 run=3    1022 req/s  p50=992.77 p99=1048.92 max=1064.9 err=0.00% srvCPU=1.13 genCPU=0.15 rss=825MB
+[bench] done -> /devspace/Projects/9router/docs/benchmarks/runs/node-main-1

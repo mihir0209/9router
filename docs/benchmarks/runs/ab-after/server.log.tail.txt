@@ -1,0 +1,59 @@
+[16:07:55] 🟤 📊 DONE 33ms · TTFT 32ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 32ms · TTFT 32ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 32ms · TTFT 32ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 31ms · TTFT 31ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 31ms · TTFT 31ms · IN 12 · OUT 8
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 📊 DONE 32ms · TTFT 32ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 32ms · TTFT 31ms · IN 12 · OUT 8
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 📊 DONE 35ms · TTFT 35ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 34ms · TTFT 34ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 34ms · TTFT 33ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 33ms · TTFT 33ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 33ms · TTFT 32ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 33ms · TTFT 33ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 33ms · TTFT 32ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 32ms · TTFT 32ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 31ms · TTFT 30ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 30ms · TTFT 30ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 30ms · TTFT 29ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 29ms · TTFT 29ms · IN 12 · OUT 8
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · STREAM · 1 MSG · ACC:mock
+[16:07:55] 🟤 📊 DONE 35ms · TTFT 35ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 33ms · TTFT 33ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 33ms · TTFT 33ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 32ms · TTFT 32ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 32ms · TTFT 32ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 32ms · TTFT 32ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 31ms · TTFT 31ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 31ms · TTFT 31ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 31ms · TTFT 30ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 30ms · TTFT 30ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 29ms · TTFT 28ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 28ms · TTFT 28ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 21ms · TTFT 20ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 19ms · TTFT 19ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 19ms · TTFT 19ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 18ms · TTFT 18ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 18ms · TTFT 18ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 18ms · TTFT 17ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 17ms · TTFT 17ms · IN 12 · OUT 8
+[16:07:55] 🟤 📊 DONE 17ms · TTFT 16ms · IN 12 · OUT 8

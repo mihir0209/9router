@@ -1,0 +1,56 @@
+[bench] tmp=/tmp/9r-bench-mQxmLc out=/devspace/Projects/9router/docs/benchmarks/runs/node-main-3
+[bench] fresh server for chat-ns-acl (pid 33, rss 369 MB after warm-up)
+[closed] chat-ns-acl        c=   1 run=1     240 req/s  p50=3.85 p99=10.75 max=20.5 err=0.00% srvCPU=1.03 genCPU=0.07 rss=437MB
+[closed] chat-ns-acl        c=   1 run=2     237 req/s  p50=3.99 p99=9.29 max=26.3 err=0.00% srvCPU=1.05 genCPU=0.06 rss=540MB
+[closed] chat-ns-acl        c=   1 run=3     263 req/s  p50=3.68 p99=8.27 max=9.1 err=0.00% srvCPU=1.01 genCPU=0.06 rss=542MB
+[closed] chat-ns-acl        c=   8 run=1     303 req/s  p50=25.16 p99=42.55 max=58.8 err=0.00% srvCPU=1.18 genCPU=0.06 rss=573MB
+[closed] chat-ns-acl        c=   8 run=2     322 req/s  p50=23.93 p99=34.45 max=65.0 err=0.00% srvCPU=1.08 genCPU=0.05 rss=586MB
+[closed] chat-ns-acl        c=   8 run=3     311 req/s  p50=24.71 p99=40.81 max=63.5 err=0.00% srvCPU=1.10 genCPU=0.05 rss=590MB
+[closed] chat-ns-acl        c=  32 run=1     332 req/s  p50=98.27 p99=134.24 max=163.3 err=0.00% srvCPU=1.08 genCPU=0.04 rss=600MB
+[closed] chat-ns-acl        c=  32 run=2     333 req/s  p50=99.02 p99=164.61 max=175.1 err=0.00% srvCPU=1.07 genCPU=0.04 rss=601MB
+[closed] chat-ns-acl        c=  32 run=3     346 req/s  p50=97.06 p99=116.75 max=132.3 err=0.00% srvCPU=1.08 genCPU=0.04 rss=603MB
+[closed] chat-ns-acl        c= 128 run=1     355 req/s  p50=334.81 p99=476.54 max=487.0 err=0.00% srvCPU=1.11 genCPU=0.05 rss=648MB
+[closed] chat-ns-acl        c= 128 run=2     342 req/s  p50=348.79 p99=520.52 max=573.1 err=0.00% srvCPU=1.10 genCPU=0.04 rss=650MB
+[closed] chat-ns-acl        c= 128 run=3     340 req/s  p50=347.10 p99=502.10 max=529.2 err=0.00% srvCPU=1.10 genCPU=0.04 rss=650MB
+[closed] chat-ns-acl        c= 512 run=1     354 req/s  p50=1401.20 p99=1995.64 max=2003.1 err=0.00% srvCPU=1.12 genCPU=0.05 rss=779MB
+[closed] chat-ns-acl        c= 512 run=2     311 req/s  p50=1494.79 p99=2361.43 max=2363.6 err=0.00% srvCPU=1.10 genCPU=0.04 rss=780MB
+[closed] chat-ns-acl        c= 512 run=3     327 req/s  p50=1439.61 p99=2012.07 max=2174.3 err=0.00% srvCPU=1.10 genCPU=0.04 rss=788MB
+[closed] chat-ns-acl        c=1024 run=1     355 req/s  p50=3096.96 p99=3172.16 max=3450.0 err=0.00% srvCPU=1.12 genCPU=0.04 rss=1064MB
+[closed] chat-ns-acl        c=1024 run=2     336 req/s  p50=2939.76 p99=4189.80 max=4199.8 err=0.00% srvCPU=1.12 genCPU=0.05 rss=1182MB
+[closed] chat-ns-acl        c=1024 run=3     355 req/s  p50=3100.73 p99=3217.34 max=3442.5 err=0.00% srvCPU=1.11 genCPU=0.04 rss=1185MB
+[bench] fresh server for chat-stream-acl (pid 50, rss 399 MB after warm-up)
+[closed] chat-stream-acl    c=   1 run=1     245 req/s  p50=3.88 p99=8.86 max=17.2 err=0.00% srvCPU=1.07 genCPU=0.07 rss=461MB
+[closed] chat-stream-acl    c=   1 run=2     231 req/s  p50=4.16 p99=9.15 max=26.7 err=0.00% srvCPU=1.08 genCPU=0.06 rss=537MB
+[closed] chat-stream-acl    c=   1 run=3     256 req/s  p50=3.75 p99=8.77 max=10.8 err=0.00% srvCPU=1.02 genCPU=0.06 rss=582MB
+[closed] chat-stream-acl    c=   8 run=1     264 req/s  p50=28.99 p99=46.66 max=53.8 err=0.00% srvCPU=1.17 genCPU=0.06 rss=589MB
+[closed] chat-stream-acl    c=   8 run=2     295 req/s  p50=26.08 p99=35.84 max=58.3 err=0.00% srvCPU=1.12 genCPU=0.06 rss=590MB
+[closed] chat-stream-acl    c=   8 run=3     278 req/s  p50=27.59 p99=42.86 max=72.1 err=0.00% srvCPU=1.09 genCPU=0.05 rss=589MB
+[closed] chat-stream-acl    c=  32 run=1     299 req/s  p50=113.03 p99=141.85 max=192.1 err=0.00% srvCPU=1.08 genCPU=0.05 rss=596MB
+[closed] chat-stream-acl    c=  32 run=2     303 req/s  p50=111.41 p99=129.92 max=132.0 err=0.00% srvCPU=1.07 genCPU=0.05 rss=598MB
+[closed] chat-stream-acl    c=  32 run=3     291 req/s  p50=110.52 p99=310.86 max=411.2 err=0.00% srvCPU=1.10 genCPU=0.05 rss=621MB
+[closed] chat-stream-acl    c= 128 run=1     279 req/s  p50=454.27 p99=627.83 max=640.3 err=0.00% srvCPU=1.10 genCPU=0.05 rss=624MB
+[closed] chat-stream-acl    c= 128 run=2     306 req/s  p50=379.18 p99=537.05 max=566.4 err=0.00% srvCPU=1.10 genCPU=0.05 rss=629MB
+[closed] chat-stream-acl    c= 128 run=3     311 req/s  p50=372.61 p99=520.01 max=526.9 err=0.00% srvCPU=1.11 genCPU=0.05 rss=632MB
+[closed] chat-stream-acl    c= 512 run=1     308 req/s  p50=1559.70 p99=2093.29 max=2095.5 err=0.00% srvCPU=1.10 genCPU=0.06 rss=721MB
+[closed] chat-stream-acl    c= 512 run=2     303 req/s  p50=1566.58 p99=2094.68 max=2098.4 err=0.00% srvCPU=1.13 genCPU=0.05 rss=851MB
+[closed] chat-stream-acl    c= 512 run=3     311 req/s  p50=1527.20 p99=2109.21 max=2125.9 err=0.00% srvCPU=1.10 genCPU=0.05 rss=852MB
+[closed] chat-stream-acl    c=1024 run=1     307 req/s  p50=3083.24 p99=4235.53 max=4237.5 err=0.00% srvCPU=1.12 genCPU=0.05 rss=1091MB
+[closed] chat-stream-acl    c=1024 run=2     306 req/s  p50=3016.29 p99=4101.35 max=4116.0 err=0.00% srvCPU=1.12 genCPU=0.05 rss=1170MB
+[closed] chat-stream-acl    c=1024 run=3     312 req/s  p50=3149.68 p99=4285.40 max=4369.0 err=0.00% srvCPU=1.11 genCPU=0.05 rss=1173MB
+[bench] fresh server for chat-ns-plain (pid 64, rss 379 MB after warm-up)
+[open]   chat-ns-plain      rate=  100 run=1 got 100 req/s p50=4.56 p99=8.42 p99.9=11.60 max=16.5 err=0.00% lagP99=1.06ms
+[open]   chat-ns-plain      rate=  100 run=2 got 100 req/s p50=4.62 p99=8.59 p99.9=10.39 max=11.3 err=0.00% lagP99=1.04ms
+[open]   chat-ns-plain      rate=  100 run=3 got 100 req/s p50=4.70 p99=11.32 p99.9=29.02 max=30.5 err=0.00% lagP99=1.06ms
+[open]   chat-ns-plain      rate=  200 run=1 got 200 req/s p50=4.25 p99=18.79 p99.9=70.24 max=74.2 err=0.00% lagP99=1.18ms
+[open]   chat-ns-plain      rate=  200 run=2 got 200 req/s p50=4.11 p99=12.84 p99.9=58.25 max=64.9 err=0.00% lagP99=1.33ms
+[open]   chat-ns-plain      rate=  200 run=3 got 200 req/s p50=4.07 p99=8.88 p99.9=10.16 max=10.6 err=0.00% lagP99=1.08ms
+[open]   chat-ns-plain      rate=  250 run=1 got 250 req/s p50=3.83 p99=27.81 p99.9=97.89 max=110.7 err=0.00% lagP99=1.04ms
+[open]   chat-ns-plain      rate=  250 run=2 got 250 req/s p50=3.98 p99=25.40 p99.9=98.09 max=106.3 err=0.00% lagP99=1.56ms
+[open]   chat-ns-plain      rate=  250 run=3 got 250 req/s p50=3.90 p99=23.22 p99.9=79.94 max=89.8 err=0.00% lagP99=1.46ms
+[open]   chat-ns-plain      rate=  280 run=1 got 280 req/s p50=4.02 p99=42.07 p99.9=117.17 max=142.6 err=0.00% lagP99=1.53ms
+[open]   chat-ns-plain      rate=  280 run=2 got 280 req/s p50=3.89 p99=38.74 p99.9=114.07 max=140.5 err=0.00% lagP99=1.56ms
+[open]   chat-ns-plain      rate=  280 run=3 got 280 req/s p50=3.88 p99=32.08 p99.9=107.91 max=133.3 err=0.00% lagP99=1.57ms
+[open]   chat-ns-plain      rate=  320 run=1 got 320 req/s p50=6.20 p99=65.34 p99.9=266.57 max=326.4 err=0.00% lagP99=1.66ms
+[open]   chat-ns-plain      rate=  320 run=2 got 320 req/s p50=5.31 p99=53.33 p99.9=204.19 max=263.9 err=0.00% lagP99=1.65ms
+[open]   chat-ns-plain      rate=  320 run=3 got 320 req/s p50=84.46 p99=6648.79 p99.9=7592.73 max=7688.7 err=0.00% lagP99=1.50ms
+[bench] done -> /devspace/Projects/9router/docs/benchmarks/runs/node-main-3

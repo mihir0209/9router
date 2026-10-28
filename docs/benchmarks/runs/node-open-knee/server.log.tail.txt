@@ -1,0 +1,59 @@
+[16:52:06] 🔴 📊 DONE 77ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 76ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 76ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 75ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 75ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 74ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 73ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 73ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 71ms · IN 12 · OUT 8
+[16:52:06] 🔴 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[16:52:06] 🔴 📊 DONE 73ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 73ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 72ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 72ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 71ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 70ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 70ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 69ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 68ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 68ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 67ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 63ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 56ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 47ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 46ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 45ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 44ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 44ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 43ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 42ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 42ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 41ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 41ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 40ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 39ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 39ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 38ms · IN 12 · OUT 8
+[16:52:06] 🔴 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[16:52:06] 🔴 📊 DONE 39ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 38ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 37ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 36ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 36ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 35ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 35ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 17ms · IN 12 · OUT 8
+[16:52:06] 🔴 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[16:52:06] 🔴 📊 DONE 5ms · IN 12 · OUT 8
+[16:52:06] 🔴 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[16:52:06] 🔴 📊 DONE 3ms · IN 12 · OUT 8
+[16:52:06] 🔴 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[16:52:06] 🔴 📊 DONE 2ms · IN 12 · OUT 8
+[16:52:06] 🔴 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[16:52:06] 🔴 📊 DONE 2ms · IN 12 · OUT 8
+[16:52:06] 🔴 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[16:52:06] 🔴 📊 DONE 2ms · IN 12 · OUT 8
+[16:52:06] 🔴 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[16:52:06] 🔴 📊 DONE 2ms · IN 12 · OUT 8
+[16:52:06] 🔴 📊 DONE 1ms · IN 12 · OUT 8

@@ -1,0 +1,21 @@
+[bench] tmp=/tmp/9r-bench-1cPRur out=/devspace/Projects/9router/docs/benchmarks/runs/node-open-knee
+[bench] fresh server for chat-ns-plain (pid 93, rss 384 MB after warm-up)
+[open]   chat-ns-plain      rate=  300 run=1 got 300 req/s p50=11.35 p99=112.48 p99.9=388.52 max=429.4 err=0.00% lagP99=1.52ms
+[open]   chat-ns-plain      rate=  300 run=2 got 300 req/s p50=8.41 p99=130.87 p99.9=349.12 max=410.8 err=0.00% lagP99=1.55ms
+[open]   chat-ns-plain      rate=  300 run=3 got 300 req/s p50=4.24 p99=44.03 p99.9=184.75 max=225.5 err=0.00% lagP99=1.63ms
+[open]   chat-ns-plain      rate=  340 run=1 got 340 req/s p50=369.51 p99=8665.72 p99.9=9781.64 max=9783.7 err=0.00% lagP99=1.22ms
+[open]   chat-ns-plain      rate=  340 run=2 got 340 req/s p50=361.47 p99=10775.87 p99.9=12156.77 max=12472.6 err=0.00% lagP99=1.26ms
+[open]   chat-ns-plain      rate=  340 run=3 got 340 req/s p50=1823.48 p99=16289.52 p99.9=16861.34 max=16975.2 err=0.00% lagP99=1.26ms
+[bench] WARNING: open run rate=380 run=1 INVALID (error rate 0.65%)
+[open]   chat-ns-plain      rate=  380 run=1 got 377 req/s p50=1736.53 p99=30036.44 p99.9=33453.00 max=34298.1 err=0.65% lagP99=1.35ms
+[bench] WARNING: open run rate=380 run=2 INVALID (error rate 0.16%)
+[open]   chat-ns-plain      rate=  380 run=2 got 379 req/s p50=2678.33 p99=19239.16 p99.9=21753.88 max=24977.7 err=0.16% lagP99=1.30ms
+[bench] WARNING: open run rate=380 run=3 INVALID (error rate 0.37%)
+[open]   chat-ns-plain      rate=  380 run=3 got 379 req/s p50=503.64 p99=33266.94 p99.9=38385.57 max=38395.7 err=0.37% lagP99=1.26ms
+[bench] WARNING: open run rate=420 run=1 INVALID (error rate 0.46%)
+[open]   chat-ns-plain      rate=  420 run=1 got 418 req/s p50=383.21 p99=16047.58 p99.9=17747.81 max=17770.3 err=0.46% lagP99=1.24ms
+[bench] WARNING: open run rate=420 run=2 INVALID (error rate 0.27%)
+[open]   chat-ns-plain      rate=  420 run=2 got 419 req/s p50=389.40 p99=17649.49 p99.9=19907.52 max=21927.7 err=0.27% lagP99=1.17ms
+[bench] WARNING: open run rate=420 run=3 INVALID (error rate 0.62%)
+[open]   chat-ns-plain      rate=  420 run=3 got 417 req/s p50=1407.79 p99=25261.96 p99.9=28213.25 max=28232.9 err=0.62% lagP99=1.17ms
+[bench] done -> /devspace/Projects/9router/docs/benchmarks/runs/node-open-knee

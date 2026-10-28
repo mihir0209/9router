@@ -1,0 +1,59 @@
+[15:29:06] 🟡 📊 DONE 36ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 35ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 33ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 33ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 32ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 31ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 30ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 28ms · IN 12 · OUT 8
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 📊 DONE 33ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 31ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 30ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 29ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 28ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 27ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 26ms · IN 12 · OUT 8
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 📊 DONE 33ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 32ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 33ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 31ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 31ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 30ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 28ms · IN 12 · OUT 8
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 📊 DONE 36ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 34ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 33ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 32ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 27ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 25ms · IN 12 · OUT 8
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 ▶ POST mock/mock-model → openai-compatible-mock/mock-model · FMT: openai→openai · JSON · 1 MSG · ACC:mock
+[15:29:06] 🟡 📊 DONE 21ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 20ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 19ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 18ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 16ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 15ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 14ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 8ms · IN 12 · OUT 8
+[15:29:06] 🟡 📊 DONE 7ms · IN 12 · OUT 8

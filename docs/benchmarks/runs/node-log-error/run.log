@@ -1,0 +1,28 @@
+[bench] tmp=/tmp/9r-bench-YwnI7Z out=/devspace/Projects/9router/docs/benchmarks/runs/node-log-error
+[bench] fresh server for health (pid 80, rss 432 MB after warm-up)
+[closed] health             c=   1 run=1    1659 req/s  p50=0.55 p99=1.09 max=22.8 err=0.00% srvCPU=1.18 genCPU=0.17 rss=530MB
+[closed] health             c=   1 run=2    1777 req/s  p50=0.52 p99=0.89 max=23.4 err=0.00% srvCPU=1.10 genCPU=0.16 rss=531MB
+[closed] health             c=   1 run=3    1818 req/s  p50=0.51 p99=0.90 max=21.5 err=0.00% srvCPU=1.09 genCPU=0.15 rss=529MB
+[closed] health             c=   8 run=1    1932 req/s  p50=3.38 p99=9.85 max=24.0 err=0.00% srvCPU=1.16 genCPU=0.16 rss=529MB
+[closed] health             c=   8 run=2    1945 req/s  p50=3.36 p99=10.01 max=32.4 err=0.00% srvCPU=1.16 genCPU=0.15 rss=529MB
+[closed] health             c=   8 run=3    1901 req/s  p50=3.50 p99=10.23 max=34.5 err=0.00% srvCPU=1.18 genCPU=0.15 rss=530MB
+[closed] health             c=  32 run=1    1940 req/s  p50=15.36 p99=30.38 max=37.4 err=0.00% srvCPU=1.16 genCPU=0.15 rss=535MB
+[closed] health             c=  32 run=2    1920 req/s  p50=15.41 p99=25.20 max=40.8 err=0.00% srvCPU=1.15 genCPU=0.17 rss=540MB
+[closed] health             c=  32 run=3    1935 req/s  p50=15.38 p99=29.79 max=37.7 err=0.00% srvCPU=1.17 genCPU=0.16 rss=542MB
+[closed] health             c= 128 run=1    1957 req/s  p50=66.86 p99=86.91 max=105.6 err=0.00% srvCPU=1.16 genCPU=0.16 rss=546MB
+[closed] health             c= 128 run=2    1903 req/s  p50=67.52 p99=88.20 max=102.7 err=0.00% srvCPU=1.16 genCPU=0.18 rss=546MB
+[closed] health             c= 128 run=3    1938 req/s  p50=66.92 p99=88.07 max=127.4 err=0.00% srvCPU=1.15 genCPU=0.16 rss=546MB
+[bench] fresh server for chat-ns-plain (pid 97, rss 456 MB after warm-up)
+[closed] chat-ns-plain      c=   1 run=1     417 req/s  p50=2.28 p99=6.53 max=22.2 err=0.00% srvCPU=1.10 genCPU=0.08 rss=588MB
+[closed] chat-ns-plain      c=   1 run=2     439 req/s  p50=2.15 p99=6.25 max=26.7 err=0.00% srvCPU=1.05 genCPU=0.08 rss=611MB
+[closed] chat-ns-plain      c=   1 run=3     502 req/s  p50=1.87 p99=5.73 max=25.2 err=0.00% srvCPU=1.12 genCPU=0.08 rss=623MB
+[closed] chat-ns-plain      c=   8 run=1     575 req/s  p50=13.21 p99=22.70 max=52.9 err=0.00% srvCPU=1.13 genCPU=0.07 rss=623MB
+[closed] chat-ns-plain      c=   8 run=2     583 req/s  p50=13.11 p99=19.38 max=45.3 err=0.00% srvCPU=1.11 genCPU=0.07 rss=620MB
+[closed] chat-ns-plain      c=   8 run=3     551 req/s  p50=13.71 p99=22.80 max=103.1 err=0.00% srvCPU=1.14 genCPU=0.07 rss=623MB
+[closed] chat-ns-plain      c=  32 run=1     599 req/s  p50=53.69 p99=74.90 max=108.9 err=0.00% srvCPU=1.12 genCPU=0.06 rss=636MB
+[closed] chat-ns-plain      c=  32 run=2     611 req/s  p50=53.27 p99=87.32 max=128.4 err=0.00% srvCPU=1.14 genCPU=0.06 rss=659MB
+[closed] chat-ns-plain      c=  32 run=3     612 req/s  p50=53.06 p99=74.90 max=109.5 err=0.00% srvCPU=1.11 genCPU=0.06 rss=661MB
+[closed] chat-ns-plain      c= 128 run=1     634 req/s  p50=187.83 p99=294.21 max=307.0 err=0.00% srvCPU=1.15 genCPU=0.09 rss=679MB
+[closed] chat-ns-plain      c= 128 run=2     642 req/s  p50=186.82 p99=279.85 max=314.4 err=0.00% srvCPU=1.14 genCPU=0.08 rss=685MB
+[closed] chat-ns-plain      c= 128 run=3     624 req/s  p50=192.38 p99=295.62 max=309.3 err=0.00% srvCPU=1.16 genCPU=0.07 rss=692MB
+[bench] done -> /devspace/Projects/9router/docs/benchmarks/runs/node-log-error
