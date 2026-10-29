@@ -336,7 +336,7 @@ event writes one). No supported API prunes it; no raw `DELETE` was run on live D
 
 ## Final live state (verified at the end of the session)
 
-See "Final state" at the end of this file.
+Not verified from the agent sandbox (no Cloudflare network). Run `scripts/smoke/live-state.sh` from your shell: it checks that `f323aa6a` is at 100 %, `/api/health` and `/login` are 200, and `/v1/models` without a key is 401, and tails 60 s for exceeded/exception outcomes. Read-only.
 
 ## Remaining risks
 
