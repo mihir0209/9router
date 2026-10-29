@@ -15,6 +15,18 @@ const cloudflareDriverPath = join(root, "src", "lib", "db", "driver.cloudflare.j
 const disabledDriverPath = join(root, "src", "lib", "db", "driver.js.cloudflare-disabled");
 const workerPath = join(root, ".open-next", "worker.js");
 
+// Optional alternative Wrangler config for the OpenNext build (for example wrangler.router.toml for a second
+// Worker). `--config <file>` or NINEROUTER_WRANGLER_CONFIG; unset keeps OpenNext's default lookup (wrangler.toml).
+// Nothing generated here depends on the Worker name: the cron tick uses the WORKER_SELF_REFERENCE binding.
+function wranglerConfigArg() {
+  const argv = process.argv.slice(2);
+  const i = argv.findIndex((a) => a === "--config" || a === "-c");
+  const fromArgv = i >= 0 ? argv[i + 1] : (argv.find((a) => a.startsWith("--config=")) || "").slice("--config=".length);
+  const value = fromArgv || process.env.NINEROUTER_WRANGLER_CONFIG || "";
+  if (value && !existsSync(join(root, value))) throw new Error(`Wrangler config ${value} does not exist`);
+  return value;
+}
+
 let swappedProxy = false;
 let swappedDriver = false;
 
@@ -528,6 +540,7 @@ try {
   // regular `npm run build` afterwards if you also serve locally.
   // A previous run that was killed (SIGKILL, timeout) leaves the source files swapped. Undo that first.
   recoverStaleSwaps(root, (message) => console.warn(`[build-cloudflare] ${message}`));
+  const wranglerConfig = wranglerConfigArg();   // validate before anything is deleted or swapped
 
   for (const dir of [join(root, ".next"), join(root, ".open-next")]) {
     rmSync(dir, { recursive: true, force: true });
@@ -550,7 +563,7 @@ try {
   renameSync(cloudflareDriverPath, driverPath);
   swappedDriver = true;
 
-  run("npx", ["opennextjs-cloudflare", "build"]);
+  run("npx", ["opennextjs-cloudflare", "build", ...(wranglerConfig ? ["--config", wranglerConfig] : [])]);
   await injectWorkerGuard();
   writeAssetHeaders();
 

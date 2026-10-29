@@ -1,0 +1,76 @@
+# Wrangler config for the Worker `router` (paid account). The personal free deployment keeps using
+# wrangler.toml unchanged. Build and deploy with: npm run deploy:router
+name = "router"
+main = ".open-next/worker.js"
+# Temporary test URL https://router.<account-subdomain>.workers.dev. Set to false once a custom domain
+# (with WAF rate limiting and Bot Fight Mode) is attached; zone rules do not cover workers.dev.
+workers_dev = true
+compatibility_date = "2024-12-30"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+# OpenNext hands wrangler an already whitespace-minified handler, and wrangler's own bundling
+# step re-expands it (about 21 MB raw / 4.05 MB gzip before this setting). minify brings the
+# upload back to the size OpenNext produced. keep_names stays at its default (true): Next and
+# some dependencies read function/class .name.
+minify = true
+
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+# The cron tick calls /api/cron/flush through this binding, never through a public hostname.
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "router"
+
+[vars]
+NODE_ENV = "production"
+NEXTJS_ENV = "production"
+NINEROUTER_RUNTIME = "cloudflare"
+# Cached model list: avoids a per-request fan-out to every provider (value taken from .env.deploy).
+MODELS_LIST_SOURCE = "cached"
+# Persistence profile: "extreme" (default on Cloudflare) or "standard". See docs/CLOUDFLARE_EXTREME_PROFILE.md.
+# NINEROUTER_D1_PROFILE = "extreme"
+# Body size limits (MB; 0 disables). Defaults on this runtime: JSON 20, uploads 32, upstream bodies read whole 32.
+# NINEROUTER_MAX_BODY_MB = "20"
+# NINEROUTER_MAX_UPLOAD_MB = "32"
+# NINEROUTER_MAX_RESPONSE_MB = "32"
+# NINEROUTER_STREAM_CAPTURE_MAX_BYTES = "65536"
+# LOG_LEVEL defaults to WARN on this runtime; set "info" to get per-request lines.
+# LOG_LEVEL = "warn"
+
+# Flush the in-memory analytics buffer + observability batch before isolate eviction.
+# Secrets (set with `wrangler secret put`, not here): JWT_SECRET, API_KEY_SECRET, MACHINE_ID_SALT,
+# ADMIN_API_TOKEN, INITIAL_PASSWORD, CRON_SECRET.
+[triggers]
+crons = ["*/10 * * * *"]
+
+[[durable_objects.bindings]]
+name = "GATEWAY_COORDINATOR"
+class_name = "GatewayCoordinator"
+
+[exports.GatewayCoordinator]
+type = "durable-object"
+storage = "sqlite"
+
+# Observability is billed per log/trace event on the Paid plan; head sampling is decided per
+# invocation BEFORE the request runs. Errors in unsampled invocations are still visible in
+# `wrangler tail`. Raise the rates temporarily while debugging.
+[observability]
+enabled = true
+head_sampling_rate = 0.05
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 0.05
+persist = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.01
+persist = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "router-db"
+# Filled in after `npx wrangler d1 create router-db` on the paid account.
+database_id = "00000000-0000-0000-0000-000000000000"

@@ -86,7 +86,7 @@ const OWNER = "smoke-test";
 const STAMP = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
 
 if (!/^https?:\/\//.test(BASE)) {
-  console.error("SMOKE_BASE_URL is required (for example https://mihir-router.example.workers.dev)");
+  console.error("SMOKE_BASE_URL is required (for example https://your-worker.example.workers.dev)");
   process.exit(2);
 }
 

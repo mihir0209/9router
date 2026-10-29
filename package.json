@@ -18,6 +18,8 @@
     "preview:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare preview",
     "build:cloudflare": "node scripts/build-cloudflare.mjs",
     "deploy:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare deploy",
+    "build:router": "node scripts/build-cloudflare.mjs --config wrangler.router.toml",
+    "deploy:router": "node scripts/build-cloudflare.mjs --config wrangler.router.toml && wrangler deploy --config wrangler.router.toml",
     "upload:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare upload",
     "db:init:cloudflare": "wrangler d1 create 9router-db"
   },
