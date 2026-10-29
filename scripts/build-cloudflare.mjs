@@ -2,6 +2,7 @@ import { renameSync, existsSync, readFileSync, writeFileSync, rmSync } from "nod
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 
 const root = process.cwd();
 const proxyPath = join(root, "src", "proxy.js");
@@ -69,7 +70,7 @@ function run(command, args) {
  * against a real Request and asserts the public paths pass and the guarded ones
  * do not, so a broken guard fails the build instead of the site.
  */
-function assertGuardDecidesCorrectly(guardSource) {
+function assertGuardDecidesCorrectly(guardSource, defaultMaxBodyMb) {
     const driver = `
 for (const path of ["/v1/models", "/v1/models/", "/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/embeddings"]) {
   const res = await guardCloudflareAdminRequest(new Request("https://w.test" + path), {});
@@ -81,9 +82,52 @@ for (const path of ["/v1/models", "/v1/models/", "/v1/chat/completions", "/v1/co
     );
   }
 }
+
+const assert = (cond, msg) => { if (!cond) throw new Error("guard check failed: " + msg); };
+const post = (headers, body) => new Request("https://w.test/v1/chat/completions", { method: "POST", headers, body });
+const auth = { authorization: "Bearer sk-test" };
+
+// Body limits: Content-Length is checked before anything else runs.
+const json = { ...auth, "content-type": "application/json" };
+const big = String(__DEFAULT_MAX_BODY_MB__ * 1048576 + 1);
+let res = await guardCloudflareAdminRequest(post({ ...json, "content-length": big }, "{}"), {});
+assert(res && res.status === 413, "oversized JSON body must be rejected with 413");
+const err = await res.json();
+assert(err.error && err.error.code === "request_too_large", "413 must carry an OpenAI-style error object");
+res = await guardCloudflareAdminRequest(post({ ...json, "content-length": "1024" }, "{}"), {});
+assert(res === null, "a small JSON body must pass the guard");
+res = await guardCloudflareAdminRequest(post({ ...json, "content-length": big }, "{}"), { NINEROUTER_MAX_BODY_MB: "0" });
+assert(res === null, "NINEROUTER_MAX_BODY_MB=0 must disable the limit");
+res = await guardCloudflareAdminRequest(post({ ...json, "content-length": "2097152" }, "{}"), { NINEROUTER_MAX_BODY_MB: "1" });
+assert(res && res.status === 413, "the env limit must override the default");
+res = await guardCloudflareAdminRequest(post({ ...auth, "content-type": "multipart/form-data; boundary=x", "content-length": big }, "x"), {});
+assert(res === null, "uploads use the (larger) upload limit, not the JSON limit");
+res = await guardCloudflareAdminRequest(post({ "content-type": "application/json", "content-length": big }, "{}"), {});
+assert(res && res.status === 401, "an unauthenticated oversized request is a 401, not a size oracle");
+
+// Downstream request: x-9r-real-ip handling and no body tee.
+let down = __9routerDownstreamRequest(post({ ...json, "x-9r-real-ip": "6.6.6.6" }, '{"a":1}'));
+assert(down.headers.get("x-9r-real-ip") === null, "a client-supplied x-9r-real-ip must be stripped without cf-connecting-ip");
+down = __9routerDownstreamRequest(post({ ...json, "x-9r-real-ip": "6.6.6.6", "cf-connecting-ip": "1.2.3.4" }, '{"a":1}'));
+assert(down.headers.get("x-9r-real-ip") === "1.2.3.4", "cf-connecting-ip must overwrite x-9r-real-ip");
+assert((await down.text()) === '{"a":1}', "the downstream request must still carry the body");
+const original = post({ ...json, "cf-connecting-ip": "1.2.3.4" }, "{}");
+let cloned = false;
+const origClone = original.clone.bind(original);
+original.clone = () => { cloned = true; return origClone(); };
+__9routerDownstreamRequest(original);
+assert(!cloned, "the body must not be cloned (clone() tees and buffers it)");
+
+// Env is copied once per isolate.
+delete process.env.__GUARD_PROBE;
+__9routerSyncEnv({ __GUARD_PROBE: "one" });
+assert(process.env.__GUARD_PROBE === "one", "env must be copied on the first request");
+delete process.env.__GUARD_PROBE;
+__9routerSyncEnv({ __GUARD_PROBE: "two" });
+assert(process.env.__GUARD_PROBE === undefined, "env must not be copied again on later requests");
 `;
   const tmp = join(tmpdir(), `9router-guard-check-${process.pid}.mjs`);
-  writeFileSync(tmp, guardSource + driver);
+  writeFileSync(tmp, guardSource + driver.replace(/__DEFAULT_MAX_BODY_MB__/g, String(defaultMaxBodyMb)));
   try {
     const result = spawnSync(process.execPath, [tmp], { encoding: "utf8" });
     if (result.status !== 0) {
@@ -91,6 +135,35 @@ for (const path of ["/v1/models", "/v1/models/", "/v1/chat/completions", "/v1/co
         `the generated auth guard does not behave correctly, refusing to deploy:\n` +
           `${(result.stderr || "").split("\n").slice(0, 6).join("\n")}`
       );
+    }
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/** The cron tick must use the service binding, never a hard-coded hostname. */
+function assertScheduledUsesBinding(source) {
+  const driver = `
+const calls = [];
+const binding = { fetch: async (req) => { calls.push({ url: req.url, method: req.method, auth: req.headers.get("authorization") }); return new Response("{}"); } };
+globalThis.fetch = async () => { throw new Error("scheduled must not use the public fetch when the binding exists"); };
+await __9ROUTER_SCHEDULED__({}, { WORKER_SELF_REFERENCE: binding, CRON_SECRET: "s3" }, null);
+if (calls.length !== 1 || !calls[0].url.endsWith("/api/cron/flush") || calls[0].method !== "POST" || calls[0].auth !== "Bearer s3") {
+  throw new Error("scheduled did not call the self binding correctly: " + JSON.stringify(calls));
+}
+let publicCalls = 0;
+globalThis.fetch = async (u) => { publicCalls++; return new Response("{}"); };
+await __9ROUTER_SCHEDULED__({}, {}, null);
+if (publicCalls !== 0) throw new Error("scheduled must not call any hard-coded hostname without a binding or ORIGIN");
+await __9ROUTER_SCHEDULED__({}, { ORIGIN: "https://example.test" }, null);
+if (publicCalls !== 1) throw new Error("scheduled must fall back to env.ORIGIN");
+`;
+  const tmp = join(tmpdir(), `9router-scheduled-check-${process.pid}.mjs`);
+  writeFileSync(tmp, source + driver);
+  try {
+    const result = spawnSync(process.execPath, [tmp], { encoding: "utf8" });
+    if (result.status !== 0) {
+      throw new Error(`the generated cron handler does not behave correctly:\n${(result.stderr || "").split("\n").slice(0, 6).join("\n")}`);
     }
   } finally {
     rmSync(tmp, { force: true });
@@ -121,12 +194,13 @@ function assertWorkerParses(source) {
   }
 }
 
-function injectWorkerGuard() {
+async function injectWorkerGuard() {
   if (!existsSync(workerPath)) throw new Error(`${workerPath} does not exist after OpenNext build`);
   const source = readFileSync(workerPath, "utf8");
   if (source.includes("__9ROUTER_CF_ADMIN_GUARD__")) return;   // already injected
 
-  const guard = String.raw`
+  const limits = await import(pathToFileURL(join(root, "open-sse", "config", "bodyLimits.js")).href);
+  const guardTemplate = String.raw`
 const __9ROUTER_CF_ADMIN_GUARD__ = true;
 const PUBLIC_CLOUDFLARE_PATHS = [
   "/api/health",
@@ -232,6 +306,70 @@ async function hasValidAdminToken(request, env) {
   return diff === 0;
 }
 
+// Copy the Worker env (vars and secrets) into process.env. Bindings and vars are
+// fixed for the life of an isolate, so this runs once, not on every request.
+let __9routerEnvSynced = false;
+function __9routerSyncEnv(env) {
+  if (__9routerEnvSynced || !env) return;
+  __9routerEnvSynced = true;
+  for (const [k, v] of Object.entries(env)) {
+    if (typeof v === "string" && !process.env[k]) process.env[k] = v;
+  }
+}
+
+// Body size limits. Defaults are stamped from open-sse/config/bodyLimits.js at
+// build time. 0 (or a non-positive env value) disables the limit.
+const __9ROUTER_DEFAULT_MAX_BODY_MB = __DEFAULT_MAX_BODY_MB__;
+const __9ROUTER_DEFAULT_MAX_UPLOAD_MB = __DEFAULT_MAX_UPLOAD_MB__;
+
+function __9routerLimitBytes(env, name, defaultMb) {
+  let raw = env && env[name] != null ? env[name] : undefined;
+  if (raw == null || raw === "") raw = typeof process !== "undefined" ? process.env[name] : undefined;
+  if (raw != null && raw !== "") {
+    const mb = Number(raw);
+    if (Number.isFinite(mb)) return mb > 0 ? Math.floor(mb * 1048576) : 0;
+  }
+  return Math.floor(defaultMb * 1048576);
+}
+
+// Cheap Content-Length check, before any database or Next work. A body without
+// a Content-Length (chunked) is counted by the handlers while they read it.
+function __9routerBodyTooLarge(request, env) {
+  if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return null;
+  const raw = request.headers.get("content-length");
+  if (raw == null || !/^\d+$/.test(raw.trim())) return null;
+  const declared = Number(raw);
+  const isJson = (request.headers.get("content-type") || "").toLowerCase().includes("json");
+  const limit = isJson
+    ? __9routerLimitBytes(env, "NINEROUTER_MAX_BODY_MB", __9ROUTER_DEFAULT_MAX_BODY_MB)
+    : __9routerLimitBytes(env, "NINEROUTER_MAX_UPLOAD_MB", __9ROUTER_DEFAULT_MAX_UPLOAD_MB);
+  if (!limit || declared <= limit) return null;
+  const mb = limit / 1048576;
+  return Response.json(
+    {
+      error: {
+        message: (isJson ? "request" : "upload") + " body exceeds the " + (Number.isInteger(mb) ? mb : mb.toFixed(2)) + " MB limit",
+        type: "invalid_request_error",
+        code: "request_too_large",
+      },
+    },
+    { status: 413, headers: { "Access-Control-Allow-Origin": "*" } }
+  );
+}
+
+// The request handed to Next. cf-connecting-ip is the only trusted client IP: it
+// overwrites any client-supplied x-9r-real-ip, and without it the header is
+// stripped. The body is never cloned: clone() tees the stream, and the branch
+// nobody reads buffers the whole body in memory. new Request(request, init)
+// moves the body to the new request instead.
+function __9routerDownstreamRequest(request) {
+  const headers = new Headers(request.headers);
+  const cfIp = request.headers.get("cf-connecting-ip");
+  if (cfIp) headers.set("x-9r-real-ip", cfIp);
+  else headers.delete("x-9r-real-ip");
+  return new Request(request, { headers });
+}
+
 async function guardCloudflareAdminRequest(request, env) {
   const url = new URL(request.url);
   const { pathname } = url;
@@ -247,8 +385,8 @@ async function guardCloudflareAdminRequest(request, env) {
 
 
   if (isPublicLlmApi(pathname)) {
-    if (hasApiKeyHeader(request, url)) return null;
-    return Response.json({ error: "API key required" }, { status: 401 });
+    if (!hasApiKeyHeader(request, url)) return Response.json({ error: "API key required" }, { status: 401 });
+    return __9routerBodyTooLarge(request, env);
   }
 
   if (pathname.startsWith("/api/admin") || pathname.startsWith("/api/observability")) {
@@ -265,16 +403,34 @@ async function guardCloudflareAdminRequest(request, env) {
 }
 `;
 
+  const guard = guardTemplate
+    .replace("__DEFAULT_MAX_BODY_MB__", String(limits.DEFAULT_CLOUDFLARE_MAX_BODY_MB))
+    .replace("__DEFAULT_MAX_UPLOAD_MB__", String(limits.DEFAULT_CLOUDFLARE_MAX_UPLOAD_MB));
+
+  // The cron tick runs the flush through the WORKER_SELF_REFERENCE service binding: the call
+  // never leaves Cloudflare's network, does not depend on the public hostname (a personal
+  // workers.dev name used to be hard-coded here) and is not subject to WAF/rate-limit rules
+  // written for public traffic. It is still one extra invocation of this Worker per tick, and it
+  // lands on an arbitrary isolate, so it can only flush that isolate's buffers (documented in
+  // docs/CLOUDFLARE_EXTREME_PROFILE.md). Without the binding, env.ORIGIN is the only fallback.
   const scheduled = `
 async function __9ROUTER_SCHEDULED__(event, env, ctx) {
-  if (env) { for (const [k, v] of Object.entries(env)) { if (typeof v === 'string' && !process.env[k]) process.env[k] = v; } }
+  __9routerSyncEnv(env);
   const secret = env.CRON_SECRET;
   const headers = { 'content-type': 'application/json' };
   if (secret) headers.authorization = 'Bearer ' + secret;
-  const target = (env.ORIGIN || 'https://mihir-router.themihir.workers.dev') + '/api/cron/flush';
+  const path = '/api/cron/flush';
   const run = (async () => {
     try {
-      const res = await fetch(target, { method: 'POST', headers });
+      let res;
+      if (env.WORKER_SELF_REFERENCE && typeof env.WORKER_SELF_REFERENCE.fetch === 'function') {
+        res = await env.WORKER_SELF_REFERENCE.fetch(new Request((env.ORIGIN || 'https://worker-self.internal') + path, { method: 'POST', headers }));
+      } else if (env.ORIGIN) {
+        res = await fetch(env.ORIGIN + path, { method: 'POST', headers });
+      } else {
+        console.log('[cron flush] skipped: no WORKER_SELF_REFERENCE binding and no ORIGIN var');
+        return;
+      }
       const body = await res.text();
       console.log('[cron flush]', res.status, body.slice(0, 400));
     } catch (err) {
@@ -292,14 +448,60 @@ async function __9ROUTER_SCHEDULED__(event, env, ctx) {
     .trim();
   const coordinatorRuntime = `import { DurableObject } from "cloudflare:workers";\n${coordinatorSource}\n`;
 
+    const guardMarker = "return runWithCloudflareRequestContext(request, env, ctx, async () => {";
+    if (!source.includes(guardMarker)) throw new Error("OpenNext worker no longer contains the request-context entry point; the guard cannot be injected");
     let withGuard = coordinatorRuntime + source.replace("export default {", `${guard}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
       .replace(
-      "return runWithCloudflareRequestContext(request, env, ctx, async () => {",
-      "if (env) { for (const [k, v] of Object.entries(env)) { if (typeof v === 'string' && !process.env[k]) process.env[k] = v; } }\n        const guardResponse = await guardCloudflareAdminRequest(request, env);\n        if (guardResponse) return guardResponse;\n        let __9ROUTER_DOWNSTREAM_REQUEST = request;\n        const __9ROUTER_CF_IP = request.headers.get('cf-connecting-ip');\n        if (__9ROUTER_CF_IP) { const __9ROUTER_HEADERS = new Headers(request.headers); __9ROUTER_HEADERS.set('x-9r-real-ip', __9ROUTER_CF_IP); __9ROUTER_DOWNSTREAM_REQUEST = new Request(request.clone(), { headers: __9ROUTER_HEADERS }); }\n        else { const __9ROUTER_HEADERS = new Headers(request.headers); __9ROUTER_HEADERS.delete('x-9r-real-ip'); __9ROUTER_DOWNSTREAM_REQUEST = new Request(request, { headers: __9ROUTER_HEADERS }); }\n        return runWithCloudflareRequestContext(__9ROUTER_DOWNSTREAM_REQUEST, env, ctx, async () => {"
-    );
+        guardMarker,
+        "__9routerSyncEnv(env);\n        const guardResponse = await guardCloudflareAdminRequest(request, env);\n        if (guardResponse) return guardResponse;\n        const __9ROUTER_DOWNSTREAM_REQUEST = __9routerDownstreamRequest(request);\n        return runWithCloudflareRequestContext(__9ROUTER_DOWNSTREAM_REQUEST, env, ctx, async () => {"
+      );
   assertWorkerParses(withGuard);
-  assertGuardDecidesCorrectly(guard);
+  assertGuardDecidesCorrectly(guard, limits.DEFAULT_CLOUDFLARE_MAX_BODY_MB);
+  assertScheduledUsesBinding(guard + scheduled);
   writeFileSync(workerPath, withGuard);
+}
+
+/**
+ * Cache headers for the static assets Cloudflare serves from the CDN, not the
+ * Worker. Workers Assets reads a `_headers` file at the root of the assets
+ * directory. It is written here, not placed in public/, so the Node build does
+ * not serve it as a file.
+ *
+ * Only /_next/static is immutable: its file names carry a content hash. The other
+ * directories use stable names, so they get a short lifetime and a deploy is
+ * visible within it. sw.js is revalidated every time so a new service worker
+ * is never stuck behind a cache.
+ */
+const ASSET_HEADERS = `# Generated by scripts/build-cloudflare.mjs. Do not edit.
+/_next/static/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/icons/*
+  Cache-Control: public, max-age=86400
+
+/providers/*
+  Cache-Control: public, max-age=86400
+
+/i18n/*
+  Cache-Control: public, max-age=3600
+
+/favicon.ico
+  Cache-Control: public, max-age=86400
+
+/favicon.svg
+  Cache-Control: public, max-age=86400
+
+/sw.js
+  Cache-Control: public, max-age=0, must-revalidate
+`;
+
+function writeAssetHeaders() {
+  const assetsDir = join(root, ".open-next", "assets");
+  if (!existsSync(assetsDir)) throw new Error(`${assetsDir} does not exist after OpenNext build`);
+  writeFileSync(join(assetsDir, "_headers"), ASSET_HEADERS, "utf8");
+  if (!existsSync(join(assetsDir, "_next", "static"))) {
+    throw new Error("assets/_next/static is missing; the immutable cache rule would match nothing");
+  }
 }
 
 try {
@@ -330,7 +532,8 @@ try {
   swappedDriver = true;
 
   run("npx", ["opennextjs-cloudflare", "build"]);
-  injectWorkerGuard();
+  await injectWorkerGuard();
+  writeAssetHeaders();
 
   // The OpenNext build also produced .next/standalone (the Node layout), but
   // with the Cloudflare driver/middleware compiled in. Left unmarked, that
