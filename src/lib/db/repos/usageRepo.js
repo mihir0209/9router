@@ -576,7 +576,9 @@ export async function saveRequestUsage(entry) {
     const completionTokens = tokens.completion_tokens || tokens.output_tokens || 0;
 
     let inserted = false;
-    const lowWrite = entry.lowWrite === false ? false : await shouldLowWrite().catch(() => false);
+    // A forcePersist entry is the budget ledger, not analytics: low-write mode skips analytics rows
+    // and must not skip the ledger, or a committed debit never reaches the spend the budget reads.
+    const lowWrite = entry.lowWrite === false || entry.forcePersist ? false : await shouldLowWrite().catch(() => false);
 
     if (lowWrite) {
       // In-memory stand-in for the SQL dedup below: same fingerprint fields,
@@ -610,7 +612,14 @@ export async function saveRequestUsage(entry) {
 
     // The transaction below reads and writes usageHistory/usageDaily; the
     // buffered path above never touches them, so it no longer loads them.
-    await db.ensureTables?.(["usageHistory", "usageDaily"]);
+    // A ledger row (forcePersist) is only appended, so it does not need the history resident;
+    // everything else that writes a history row dedups against it and does.
+    if (entry.forcePersist) {
+      await db.ensureTables?.(["usageDaily"]);
+      db.seedHistorySequence?.();
+    } else {
+      await db.ensureTables?.(["usageHistory", "usageDaily"]);
+    }
 
     // All writes in ONE transaction.
     // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.
@@ -619,7 +628,8 @@ export async function saveRequestUsage(entry) {
     // counter still land, so analytics keep working.
     db.transaction(() => {
       if (!lowWrite) {
-        const existing = db.get(
+        // Ledger rows are idempotent by commit id in budgetService; they skip the fingerprint dedup.
+        const existing = entry.forcePersist ? null : db.get(
           `SELECT id, endpoint FROM usageHistory
            WHERE timestamp = ?
              AND COALESCE(provider, '') = COALESCE(?, '')

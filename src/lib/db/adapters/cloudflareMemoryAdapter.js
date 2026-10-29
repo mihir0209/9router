@@ -121,6 +121,87 @@ export async function createCloudflareMemoryAdapter() {
     }
   }
 
+  // usageHistory on Cloudflare is the budget ledger (plus per-request rows only when low-write mode
+  // is explicitly off). A budget read used to load the WHOLE table, every key and every window, into
+  // the isolate heap and read it from D1 on each cold start; it grows with every debit, forever.
+  // Budget enforcement only needs one key's rows inside its current window, so that is all that is
+  // loaded. Two partial expression indexes make those selects read only the matching rows (D1 bills
+  // rows scanned, not rows returned); they are created lazily, once, the first time a budget key is read.
+  // Two index-driven selects (a single OR makes SQLite scan the whole table instead).
+  const HISTORY_SCOPE_SQL =
+    `SELECT table_name, data FROM ${D1_TABLE} WHERE table_name = 'usageHistory' ` +
+    `AND json_extract(data, '$.apiKeyId') = ? AND json_extract(data, '$.timestamp') >= ? ` +
+    `UNION SELECT table_name, data FROM ${D1_TABLE} WHERE table_name = 'usageHistory' ` +
+    `AND json_extract(data, '$.apiKey') = ? AND json_extract(data, '$.timestamp') >= ?`;
+  const HISTORY_COMMIT_SQL =
+    `SELECT table_name, data FROM ${D1_TABLE} WHERE table_name = 'usageHistory' ` +
+    `AND json_extract(data, '$.apiKeyId') = ? AND json_extract(data, '$.model') = ?`;
+  const HISTORY_INDEX_SQL = [
+    `CREATE INDEX IF NOT EXISTS idx_rows_usage_key_id_ts ON ${D1_TABLE}(json_extract(data, '$.apiKeyId'), json_extract(data, '$.timestamp')) WHERE table_name = 'usageHistory'`,
+    `CREATE INDEX IF NOT EXISTS idx_rows_usage_key_ts ON ${D1_TABLE}(json_extract(data, '$.apiKey'), json_extract(data, '$.timestamp')) WHERE table_name = 'usageHistory'`,
+  ];
+  let historyIndexes = null;
+  const loadedHistoryScopes = new Set();
+
+  function mergeHistoryRows(rows) {
+    for (const row of rows) {
+      const parsed = (() => { try { return JSON.parse(row.data); } catch { return null; } })();
+      if (!parsed) continue;
+      mergeFetched("usageHistory", [parsed]);
+    }
+  }
+
+  /**
+   * Give new usageHistory ids a base no other isolate is likely to share. Ids used to continue from the
+   * largest id in a fully loaded table; with the table only partly resident that maximum is unknown, and
+   * reusing a persisted id would overwrite another row of the ledger (the row key is the id). A
+   * millisecond clock plus a random offset puts every isolate's range far from the others; ids stay
+   * monotonic per isolate and above every id minted before.
+   */
+  function seedHistorySequence() {
+    if (loadedTables.has("usageHistory") || state.sequences.usageHistory >= HISTORY_SEQUENCE_FLOOR) return;
+    const base = Date.now() * 1000 + Math.floor(Math.random() * 1_000_000);
+    state.sequences.usageHistory = Math.max(state.sequences.usageHistory || 0, base);
+  }
+  const HISTORY_SEQUENCE_FLOOR = 1e15;
+
+  /** Make one key's in-window ledger rows resident (a no-op once the whole table is). */
+  async function ensureBudgetHistory({ apiKeyId, apiKey, since }) {
+    seedHistorySequence();
+    if (!d1 || loadedTables.has("usageHistory") || ops?.inTransaction()) return;
+    const scope = `${apiKeyId || ""}\u0000${apiKey || ""}\u0000${since}`;
+    if (loadedHistoryScopes.has(scope)) return;
+    loadedHistoryScopes.add(scope);
+    try {
+      if (!historyIndexes) {
+        historyIndexes = d1.batch(HISTORY_INDEX_SQL.map((sql) => d1.prepare(sql)));
+        historyIndexes.catch(() => { historyIndexes = null; });
+      }
+      try { await historyIndexes; } catch (error) { console.warn(`[DB] usageHistory index not created: ${error.message}`); }
+      const result = await d1.prepare(HISTORY_SCOPE_SQL).bind(apiKeyId || "", since, apiKey || "", since).all();
+      mergeHistoryRows(result.results || []);
+    } catch (error) {
+      loadedHistoryScopes.delete(scope);
+      throw error;   // budget enforcement fails closed: the caller must not assume zero spend
+    }
+  }
+
+  /** Make a key's ledger row for one commit id resident, whatever window it fell in (idempotent commits). */
+  const loadedCommits = new Set();
+  async function ensureBudgetCommit(apiKeyId, model) {
+    if (!d1 || loadedTables.has("usageHistory") || ops?.inTransaction()) return;
+    const id = `${apiKeyId}\u0000${model}`;
+    if (loadedCommits.has(id)) return;
+    loadedCommits.add(id);
+    try {
+      const result = await d1.prepare(HISTORY_COMMIT_SQL).bind(apiKeyId, model).all();
+      mergeHistoryRows(result.results || []);
+    } catch (error) {
+      loadedCommits.delete(id);
+      throw error;
+    }
+  }
+
   // `kv` holds reference data in independent scopes (modelAliases,
   // customModels, pricing, disabledModels, ...). customModels alone can be
   // thousands of rows, and a proxied request almost never needs it, so the
@@ -369,6 +450,9 @@ export async function createCloudflareMemoryAdapter() {
     resync: resyncFromD1,
     ensureTables,
     ensureKvScope,
+    ensureBudgetHistory,
+    ensureBudgetCommit,
+    seedHistorySequence,
     ensureRow,
     freshWithin,
     close: () => {},

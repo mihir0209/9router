@@ -34,6 +34,16 @@ async function withKeyLock(apiKey, operation) {
   }
 }
 
+// Cloudflare adapter: make just this key's rows inside its window resident. Other adapters hold the
+// whole table already (or load it in full).
+async function ensureBudgetRows(db, keyRecord, sinceIso) {
+  if (typeof db.ensureBudgetHistory === "function") {
+    await db.ensureBudgetHistory({ apiKeyId: keyRecord.id, apiKey: keyRecord.key, since: sinceIso });
+  } else {
+    await db.ensureTables?.(["usageHistory"]);
+  }
+}
+
 async function readBudgetState(keyRecord, now) {
   const limit = Number(keyRecord?.budgetUsd);
   if (!keyRecord || keyRecord.budgetUsd == null || !Number.isFinite(limit) || limit < 0) {
@@ -42,7 +52,7 @@ async function readBudgetState(keyRecord, now) {
 
   const { startsAt, resetsAt } = getWindow(keyRecord, now);
   const db = await getAdapter();
-  await db.ensureTables?.(["usageHistory"]);
+  await ensureBudgetRows(db, keyRecord, startsAt.toISOString());
   const byKey = db.get(
     `SELECT COALESCE(SUM(cost), 0) AS used
        FROM usageHistory
@@ -130,8 +140,9 @@ export async function debitBudget(apiKey, { requestId, reserveUsd, commitUsd }, 
     }
 
     const db = await getAdapter();
-    await db.ensureTables?.(["usageHistory"]);
     const model = `budget-commit:${requestId}`;
+    if (typeof db.ensureBudgetCommit === "function") await db.ensureBudgetCommit(keyRecord.id, model);
+    else await db.ensureTables?.(["usageHistory"]);
     const existingCommit = db.get(
       `SELECT cost FROM usageHistory WHERE apiKeyId = ? AND provider = 'budget' AND model = ? LIMIT 1`,
       [keyRecord.id, model]
