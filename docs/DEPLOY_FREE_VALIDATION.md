@@ -233,7 +233,7 @@ Run 1 (everything incl. 21 MB upload): 20 pass, 6 fail, 6 skip. Run 2 (after the
 | P12 21 MB body | run 1: client timeout at 45 s (slow uplink, the earlier session got 413 after 62 s; the 20 MB cap is also unit-tested). Not re-run |
 | D1 to D7 dashboard | **unverifiable**: password login is killed by the 10 ms limit (1102), password unknown, JWT secret unknown |
 | G1 key create via admin API | pass (needs 1 to 80 retries; creating a key costs about 290 to 740 ms CPU) |
-| G2 `/v1/models` + ETag, `If-None-Match` | **pass: 304 including through the edge's weak `W/` ETag** (run 1) |
+| G2 `/v1/models` + ETag, `If-None-Match` | **pass: 304 when the ETag is echoed exactly as the edge sent it** (run 1; the weak-ETag comparison is unit-tested in `models-if-none-match.test.js`; live `f323aa6a` fails this case, see below) |
 | C1 chat non-stream (real provider) | pass (8.8 s and 11.6 s cold) |
 | C2 stream | run 1 pass: 3 events, ends with a finish chunk; the smoke script accepts a stream with `[DONE]`. Run 2 skipped (503) |
 | K1 forceModel rewrite | run 1 pass (`openai/gpt-4o` served as `gemma4:31b-cloud`), run 2 500 (isolate error below) |
@@ -247,3 +247,94 @@ Isolate poisoning (new finding): after an invocation is killed for CPU while Nex
 `Cannot read properties of undefined (reading 'length')` for missing static paths, until it is evicted. A half-initialised module
 stays cached. This is triggered by a hard kill, which does not happen on the paid plan CPU limit under normal load, but it is a
 resilience risk after any exceeded-CPU event.
+
+## S5 bounded soak: new `449c180f` against old `f323aa6a`, equal traffic
+
+Both runs: `scripts/smoke/soak.mjs`, version pinned by the override header, one request every 3 s for 780 s (mix: health,
+`/v1/models`, `/v1/models` with `If-None-Match`, chat with an invalid key, `/login`, one static asset) plus a 20-request concurrent
+burst of `/v1/models` before and after, `wrangler tail --version-id` captured in the same command. 264 requests (new) and 177 (old;
+12 requests hung for 45 s each, so fewer fit in the window). Old: 16:14 to 16:28 UTC. New: 15:52 to 16:08 UTC.
+
+| | old `f323aa6a` | new `449c180f` |
+|---|---|---|
+| Worker invocations (Cloudflare analytics, whole window) | 149 | 275 |
+| `exceededResources` (Free 10 ms kill), Cloudflare outcome | 12 (**8.1 %**) | 45 (**16.4 %**) |
+| `clientDisconnected` / `canceled` (hung requests, client gave up) | **4 (6 in tail)** | 0 |
+| HTTP 500 from a poisoned isolate (`ComponentMod.handler is not a function`) | 0 | **143 + 37** (65 % of all answers) |
+| CPU ms p50 / p90 / p99, successful outcome (analytics) | 22.9 / 305 / 792 | 9.1 / 22 / 976 (p50 is low because most answers are cheap 500s) |
+| CPU ms p50 / p99 of killed invocations | 10 / 277 | 10 / 122 |
+| Tail CPU of completed 2xx/401 answers, p50 / p90 / p99 / max | 22 / 305 / 792 / 1,140 (n = 137) | 14 / 816 / 1,185 / 1,185 (n = 60, mostly cold: survivors only) |
+| Completed `/api/health` CPU p50 / p99 (tail) | 6 / 30 | 9 / 15 |
+| Completed `/v1/models` CPU p50 / p90 / p99 (tail) | 34 / 543 / 1,140 (n = 69) | 733 / 975 / 1,185 (n = 23, all cold; the warm ones die at 10 ms) |
+| Share of completed answers within 10 ms | 20 % | 37 % |
+| Wall time p50 / p99 (analytics, ms) | 83 / 6,254 | 10.7 / 4,496 |
+| Client-side latency, completed answers, p50 / p95 / p99 (ms) | 986 / 8,523 / 11,606 (n = 154) | 477 / 7,348 / 8,338 (n = 58) |
+| Client-side latency, all requests incl. hung, p50 / p95 / p99 | 1,003 / 45,000 / 45,001 | 403 / 6,363 / 7,348 |
+| Hung requests (45 s client timeout) | **12** (2 + 3 in the timed mix, 7 in the end burst) | **0** |
+| Cold isolates seen (`[DB] Driver` log lines) | 11 | 14 |
+| D1 (whole window) | 107 read queries, 32,339 rows read, 4 write queries, 4 rows written | 107 read queries, 63,803 rows read, 4 write queries, 7 rows written |
+| Durable Object requests | 173 (1 error) | 105 (0 errors) |
+
+How to read it:
+
+* **Free plan: not viable, and the new build is not better on it.** Every warm `/v1/models`, `/login` and chat request costs more than
+  10 ms, so the new build (kills 16 %) is no better than the old one (8 %) on Free. The 16 % vs 8 % gap is not a regression
+  proof either: the new run was dominated by the poisoning effect below and the old one by hung requests, and the two mixes differ after kills.
+* **Isolate poisoning (new finding).** Once an invocation is killed for CPU while Next is loading a route (`/v1/models`, `/login`,
+  chat), the same isolate answers every later request for that route with `500 TypeError: ComponentMod.handler is not a function`
+  (cheap, 4 to 19 ms CPU) for the rest of its life. It also affects the old build in principle but did not show in the old run. This needs a hard
+  kill, so it is a Free-plan artefact; on Paid it only happens after a 30 s CPU or memory termination. It is not in app code (OpenNext keeps the half-initialised
+  module in its cache). Mitigation if it ever shows on Paid: alert on `ComponentMod.handler` errors, and redeploy (a new version starts fresh isolates).
+* **Hung requests: improved.** The old build hangs under the concurrent cold burst (7 of 20 in the end burst, plus 5 in the timed mix, wall 75 s,
+  `canceled`/`clientDisconnected`, `waitUntil() tasks did not complete`). The new build had 0 hangs in 40 burst requests and 224 timed requests
+  (b31373eb: bounded D1 calls and request-safe shared work). One hang was seen in a separate smoke run (K6 rate limit check, run 2) and one
+  `clientDisconnected` (wall 75 s) in the first smoke: so not eliminated, but 1 in 3 in about 400 requests versus 12 in 177 before. Re-check on Paid.
+
+## Measured against claimed (session 2)
+
+| | Claimed | Measured | Verdict |
+|---|---|---|---|
+| Cold `/v1/models` D1 rows | 5,384 read / 6 queries (docs/CLOUDFLARE_EXTREME_PROFILE.md) | 63,803 rows over 14 cold isolates = about 4,560 per cold isolate, 107 read queries | **confirmed** (database has since lost 1 to 2 k kv rows, the order matches) |
+| Warm request D1 writes | 0 to 0.1 rows | 4 write queries and 7 rows for 275 requests (0.03 rows/request); the 4 writes include the throwaway key create and delete | **confirmed** |
+| Warm DO requests | about 0.05 per request | 105 DO requests / 275 requests = 0.38, but 14 cold isolates each poll and register (about 7 per cold isolate); the warm share could not be isolated because Free kills evict isolates | **not isolable**, upper bound 0.38 |
+| Cold CPU (Paid target: cold p99 well under 30 ms) | | **not achievable.** Cold `/v1/models` 500 ms CPU locally and 733 ms p50 / 1,185 ms max on Cloudflare, cold `/login` 121 to 401 ms, cold health about 35 ms, admin key create 290 to 740 ms. About 200 ms of the cold cost is V8 compiling the 11.5 MB bundle's lazy module bodies (profile: one anonymous frame `worker.js:1` with no app code), not app logic | claim **fails**; on Paid it is a latency cost (about 0.5 to 1 s on a cold isolate), not a failure: the CPU limit is 30 s |
+| Warm CPU | | `/api/health` 9 ms (p50, tail, new) vs 6 ms (old). `/v1/models` warm on new could not be measured on Free (dies at 10 ms); old warm 34 ms | partial |
+| Static assets without Worker invocation | yes | `/_next/static/*` hits: `cf-cache-status: HIT`, no invocation in the tails (the 37 `missing.js` requests in the new soak were a harness artefact: `/login` was killed so no real asset path was read, they were Worker invocations by design) | pass |
+| 413 cap | 413 above 20 MB | **21 MB upload to the new version: 413 JSON `request_too_large` after 90 s** (slow uplink). A forged `Content-Length` is rejected by the Cloudflare edge itself with 400 | pass |
+| Cron every 10 min through the service binding | yes | live `f323aa6a`: `[cron flush] 200` at the boundary (tail, 16:20 UTC) and earlier session lines. New build: scheduled handler run locally with `wrangler dev --test-scheduled` and a `CRON_SECRET`: calls `POST /api/cron/flush` through `WORKER_SELF_REFERENCE`, 200. Not runnable on Cloudflare for a 0 % version (cron runs the live version) | pass (local) / unverifiable remotely |
+| Log volume | small | Tail: WARN/ERROR only. Persisted Workers Logs not read (no token scope) | partial |
+| Memory outcomes | none | No `exceededMemory` outcome in either run; Cloudflare does not expose memory | no signal |
+
+## Fixes in this session (all committed, local)
+
+| Commit | What |
+|---|---|
+| a6c45cc8 | SSE ends with exactly one `[DONE]` |
+| b31373eb | request-safe shared work, bounded D1 calls, weak `If-None-Match` |
+| 6edbd167 | constant-time `CRON_SECRET` compare + tests |
+| f00cce08, 1ef60670 | `build:cloudflare` recovers a stale swap, drops the webpack cache |
+| a987e79a, 86e1fd75 | smoke: dashboard/session fallback, pin pair 400s, key CRUD, analytics flush, cold burst |
+| 9534a767 | smoke: policy checks retry a CPU-limit 503 and count the kills |
+| this session | `scripts/smoke/soak.mjs` (bounded soak with exact percentiles and burst phases) |
+
+No cold-path code change was made: the profile shows no cheap, safe app-level target (health is already trivial: the route returns a constant;
+the middleware does no I/O for public paths; the bulk is V8 compile and Next/OpenNext module evaluation). Lazy-loading more inside the single
+11.5 MB bundle would not change compile cost per isolate, and changes to the routing engine's import graph carry regression risk for no measured gain.
+
+## Old live version, same smoke (`f323aa6a`, 16:29 to 16:38 UTC)
+
+13 pass, 9 fail, 2 warn, 8 skip. Differences from the new version, all confirmed in data: `/_next/static` served with
+`cache-control: public, max-age=0, must-revalidate` (no immutable header: P5 fail), `/api/cron/flush` public (P11 warn),
+`If-None-Match` with the weak edge ETag does not give 304 (G2 warn), a forced `forceModel` pin to `openai/gpt-4o` is answered 404 "No active credentials for provider: openai"
+(K1 fail: the old build does not rewrite the model before the lookup), two requests hung 45 s (K2, K6), rest CPU kills (K4, K5, K7, X1).
+All throwaway keys removed afterwards (`apiKeys` 20 rows, none named `smoke-test`).
+
+## Audit noise left in the live database (read-only check, `d1 execute ... SELECT`)
+
+`auditLog` 226 rows (96 before session 1, 152+ at its end; this session added roughly 70: every admin-API key create/delete and dashboard key
+event writes one). No supported API prunes it; no raw `DELETE` was run on live D1. `apiKeys` 20 rows, 0 named `smoke-test`. `usageDaily` now has 5 rows
+(the forced analytics flush wrote), `usageHistory` 47, `requestDetails` 350 (unchanged: no per-request rows).
+
+## Final live state (verified at the end of the session)
+
+See "Final state" at the end of this file.
