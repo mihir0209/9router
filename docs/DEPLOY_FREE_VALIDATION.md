@@ -401,7 +401,7 @@ SQLite-backed class, no manual migration. Needs Workers Paid.
 `wrangler versions upload` cannot create a Worker, so the first deploy is a normal one. Keep it unreachable until secrets exist:
 ```bash
 # temporarily in wrangler.toml: workers_dev = false   (no route yet = no public URL)
-npm run build:cloudflare && npx wrangler deploy --dry-run --outdir /tmp/wr-dry    # raw/gzip, must stay < 10 MB on Paid
+npm run build:cloudflare && npx wrangler deploy --dry-run --outdir /tmp/wr-dry    # raw / gzip; the compressed size must stay under 10 MB on Paid
 npx wrangler deploy --message "first deploy, no public URL"
 cat > /tmp/secrets.json   # {"JWT_SECRET":"...","API_KEY_SECRET":"...","MACHINE_ID_SALT":"...","ADMIN_API_TOKEN":"...","INITIAL_PASSWORD":"...","CRON_SECRET":"<openssl rand -hex 32>"}
 npx wrangler secret bulk /tmp/secrets.json && shred -u /tmp/secrets.json
