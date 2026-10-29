@@ -114,9 +114,16 @@ Known pre-existing limits this work did not change (found while measuring):
 
 * `tokenLimitDaily` / `tokenLimitMonthly` sum `usageHistory`, which low-write mode on
   Cloudflare does not populate, so those limits only see budget-ledger rows there.
-* Budget reads load the whole `usageHistory` table on first use per isolate; it grows
-  with budget debits only, but it is unbounded.
-* The cron `*/10` self-fetch lands on an arbitrary isolate, so it can only flush that
+* ~~Budget reads load the whole `usageHistory` table on first use per isolate.~~ Fixed: a budget read now
+  loads only that key's rows inside its budget window (two lazy partial indexes on `ninerouter_rows` keep the
+  select index-driven), and ledger inserts take ids from a clock+random base instead of continuing a table
+  that is no longer fully resident. Cold budget read in the test dataset (4,031-row history): 4,082 to 81 D1
+  rows read. The dashboard usage views still load the whole table on demand. The table itself still grows
+  with every debit; nothing prunes it.
+* A budget commit (`forcePersist`) used to be skipped by low-write mode, which is the default on Cloudflare,
+  so a committed debit never reached the spend the budget reads. It is now always written.
+* The cron `*/10` tick calls the Worker through the `WORKER_SELF_REFERENCE` service binding (no public
+  hostname). It is one extra invocation and lands on an arbitrary isolate, so it can only flush that
   isolate's buffer.
 * After the first forced `resync(..., ["settings"])`, the unscoped 5-minute resync that
   would refresh `providerConnections`/`kv` never fires on a busy isolate, because scoped
@@ -174,3 +181,6 @@ meter: nothing was compared with a real `meta.rows_read`.
 | `NINEROUTER_COORDINATOR_FLUSH_MAX` | 500 | events that trigger an early flush |
 | `NINEROUTER_CONTROL_POLL_MS` | 10000 | control-version poll period |
 | `NINEROUTER_UNKNOWN_KEY_REFRESH_MS` | 30000 | min gap between forced apiKeys refreshes |
+
+Size and memory limits (request bodies, upstream bodies, stream capture, log level, outbound concurrency)
+are listed in `docs/CLOUDFLARE_COST_CHECKLIST.md`.
