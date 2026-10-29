@@ -203,3 +203,15 @@ Written stage by stage so an interrupted run loses nothing. Nothing is pushed; n
   (not authorized). The residual risk is unchanged from before: an unauthenticated, cheap invocation of the flush route.
 * The secret is applied only to versions under test (`d67367ae` has it, and later uploads inherit it from the latest version;
   verified in S3). For live, the user runs one command (see "Manual steps" at the end).
+
+## S3 build and upload (HEAD 1ef60670 + docs)
+
+* `npm run build:cloudflare`: assertions passed (48 s), `git status` clean afterwards (`src/proxy.js` present, no `src/middleware.js`,
+  no `*.cloudflare-disabled`). `wrangler deploy --dry-run`: **11,554.69 KiB raw / 2,816.70 KiB gzip** (< 3 MiB).
+* `wrangler versions upload --tag opt-v2` gave **`449c180f-df75-4bdb-b2a3-12f655d1d5ec`** (message "optimized-v2 candidate"), not deployed.
+  A new upload inherits the secret bindings of the latest *version* (here `d67367ae`), so `449c180f` already has `CRON_SECRET`.
+  I also ran `versions secret put CRON_SECRET` (stdin) which created `5aa6c6ea` (identical code and secrets, redundant, 0 %, unused).
+* The version-override header only works for versions that are part of the current deployment (a not-deployed version answers like
+  live). So `versions deploy f323aa6a@100 449c180f@0` was used; live traffic stays 100 % on `f323aa6a`. The old 0 % canary
+  `d67367ae` left the deployment. Check: anonymous `/api/cron/flush` is 401 on `449c180f` via override, 200 on live (live has no secret).
+* `npm run build` again afterwards: variant marker `node`, tree clean.
