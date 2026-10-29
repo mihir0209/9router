@@ -6,7 +6,7 @@
 //
 //   node scripts/bench/memory-check.mjs [--scenarios big-body,long-sse] [--node-args --max-old-space-size=128]
 //        [--env NINEROUTER_MAX_BODY_MB=20,NINEROUTER_STREAM_CAPTURE_MAX_BYTES=65536] [--label name]
-//        [--body-mb 50] [--sse-mb 200]
+//        [--body-mb 50] [--sse-mb 200] [--src ~/.9router/db/data.sqlite]
 //
 // Every scenario runs against a fresh server process (custom-server.js) on a credential-free temp
 // database with a local streaming mock upstream, so the peak is attributable to that one request.
@@ -39,7 +39,9 @@ fs.mkdirSync(homeDir, { recursive: true });
 const children = [];
 process.on("exit", () => { for (const c of children) { try { c.kill("SIGKILL"); } catch { /* gone */ } } fs.rmSync(tmp, { recursive: true, force: true }); });
 
-const setup = spawnSync("node", ["scripts/bench/setup-bench-db.mjs", "--out", dataDir, "--mock-url", `http://127.0.0.1:${mockPort}/v1`], { cwd: root, encoding: "utf8" });
+// setup-bench-db needs a database with a schema: copy (read-only) the developer's database, scrubbed.
+const src = arg("src", path.join(os.homedir(), ".9router", "db", "data.sqlite"));
+const setup = spawnSync("node", ["scripts/bench/setup-bench-db.mjs", "--out", dataDir, "--src", src, "--mock-url", `http://127.0.0.1:${mockPort}/v1`], { cwd: root, encoding: "utf8" });
 if (setup.status !== 0) { console.error(setup.stderr || setup.stdout); process.exit(1); }
 const key = JSON.parse(setup.stdout).keys.plain;
 
