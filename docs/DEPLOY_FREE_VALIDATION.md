@@ -175,3 +175,31 @@ SMOKE_BASE_URL=https://<worker>.workers.dev SMOKE_ENV_FILE=.env \
 ```
 
 `SMOKE_ENV_FILE` may point at the repo `.env` (it reads `ADMIN_API_TOKEN`); the script never prints secrets.
+
+---
+
+# Session 2 (2026-10-29, optimized-v2 candidate): progress log
+
+Written stage by stage so an interrupted run loses nothing. Nothing is pushed; nothing is promoted on the Free account.
+
+## S1 state (checked 2026-10-29 15:23 UTC)
+
+* Account `Mihir@cognixai.in's Account` (`60bf355a...`), OAuth scopes include workers/d1 write, no billing, no analytics.
+* Latest deployment: `f323aa6a-ff27-4ad0-8825-7645963667c8` **100 %** plus `d67367ae-3719-4403-9441-c345888a9884` **0 %** (message
+  "0% canary for version-override testing; live stays on f323aa6a"). `/api/health` 200, `/login` 200: healthy, no rollback needed.
+* Versions left by the earlier interrupted runs (not live, 0 % traffic):
+  `13cbbad1` (first optimized build), `695b1833` (tag `r2-fixes`: request-safe shared work, weak INM, DONE; **no** CRON_SECRET),
+  `d67367ae` ("CRON_SECRET for 0% testing", created with `versions secret put`: 695b1833 plus the secret binding).
+* `wrangler secret list` shows `CRON_SECRET` because it reads the latest version (`d67367ae`). Behaviour check: anonymous
+  `GET /api/cron/flush` returns **200 on live** (no secret), **200 on 695b1833**, **401 on d67367ae**.
+
+## S2 CRON_SECRET decision
+
+* The live build (`f323aa6a`, built 2026-10-01) already has the secret-aware code: its scheduled handler sends
+  `Authorization: Bearer $CRON_SECRET` when `env.CRON_SECRET` is set (present since 6194f0ca, 2026-09-24) and
+  `/api/cron/flush` compares it. So a secret on live would not break the 10-minute flush.
+* Not applied to live, deliberately: `wrangler secret put` cannot edit a secret in place. It creates a new version (same code
+  plus the secret) and deploys it at 100 %, so live would stop being `f323aa6a`, which is a promotion on the Free account
+  (not authorized). The residual risk is unchanged from before: an unauthenticated, cheap invocation of the flush route.
+* The secret is applied only to versions under test (`d67367ae` has it, and later uploads inherit it from the latest version;
+  verified in S3). For live, the user runs one command (see "Manual steps" at the end).
