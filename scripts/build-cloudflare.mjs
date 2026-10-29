@@ -571,4 +571,8 @@ try {
   process.exitCode = 1;
 } finally {
   restoreFiles();
+  // The webpack cache now holds modules compiled from the SWAPPED sources (the Cloudflare driver and
+  // proxy). A following `npm run build` reuses it and produces a "node" variant that still boots the
+  // ephemeral Cloudflare driver ("[DB] Driver: cloudflare-d1-backed-memory"). Drop it.
+  try { rmSync(join(root, ".next", "cache"), { recursive: true, force: true }); } catch { /* best effort */ }
 }
