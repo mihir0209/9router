@@ -4,6 +4,7 @@ import { getProviderModels, PROVIDER_ID_TO_ALIAS } from "open-sse/config/provide
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 import { pingModelByKind } from "@/app/api/models/test/ping";
+import { capOutboundConcurrency, mapLimited } from "@/lib/async/outboundConcurrency.js";
 
 /**
  * POST /api/providers/[id]/test-models
@@ -51,11 +52,13 @@ export async function POST(request, { params }) {
     const results = [{ modelId: first.id, name: first.name || first.id, ...firstResult }];
 
     if (rest.length > 0) {
-      const restResults = await Promise.all(
-        rest.map(async (model) => {
+      const restResults = await mapLimited(
+        rest,
+        async (model) => {
           const result = await pingModelByKind(`${alias}/${model.id}`, model.kind || model.type || "llm", baseUrl);
           return { modelId: model.id, name: model.name || model.id, ...result };
-        })
+        },
+        capOutboundConcurrency(rest.length)
       );
       results.push(...restResults);
     }

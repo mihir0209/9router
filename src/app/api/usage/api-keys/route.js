@@ -3,6 +3,7 @@ import { getUsageStats } from "@/lib/usageDb";
 import { getApiKeys } from "@/lib/localDb";
 import { hasValidAdminApiToken } from "@/lib/auth/adminApiToken";
 import { coordinatorCall } from "@/lib/coordinator/client.js";
+import { capOutboundConcurrency, mapLimited } from "@/lib/async/outboundConcurrency.js";
 
 export const dynamic = "force-dynamic";
 
@@ -114,7 +115,7 @@ export async function GET(request) {
 
     // Live rate-limit state per key (read-only peek: never burns budget).
     // Fail-open per key so one coordinator hiccup doesn't blank the tab.
-    await Promise.all(keys.map(async (entry) => {
+    await mapLimited(keys, async (entry) => {
       const full = allKeys.find((k) => k.id === entry.id);
       const limit = Number(full?.rateLimitRequests) || 0;
       if (!limit) {
@@ -137,7 +138,7 @@ export async function GET(request) {
       } catch {
         entry.rateLimit = { limited: true, limit, remaining: null };
       }
-    }));
+    }, capOutboundConcurrency(keys.length));
 
     // Summary totals
     const summary = {

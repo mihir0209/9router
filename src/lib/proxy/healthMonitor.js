@@ -1,5 +1,6 @@
 import { getProxyPools, updateProxyPool, deleteProxyPool, getSettings } from "@/lib/localDb";
 import { testProxyUrl } from "@/lib/network/proxyTest";
+import { capOutboundConcurrency } from "@/lib/async/outboundConcurrency.js";
 
 const DEFAULT_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
@@ -74,7 +75,7 @@ async function checkProxy(proxy, timeoutMs = 8000) {
 
 async function runHealthCheckForSource(source, proxies, timeoutMs) {
   const results = [];
-  const batchSize = 10;
+  const batchSize = capOutboundConcurrency(10);
 
   for (let i = 0; i < proxies.length; i += batchSize) {
     const batch = proxies.slice(i, i + batchSize);

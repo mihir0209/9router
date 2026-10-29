@@ -1,4 +1,5 @@
 import { testProxyUrl } from "@/lib/network/proxyTest";
+import { capOutboundConcurrency } from "@/lib/async/outboundConcurrency.js";
 
 const FETCH_TIMEOUT_MS = 30000;
 
@@ -36,7 +37,7 @@ export async function validateProxyList(proxies, config) {
 
   await Promise.all(
     Array.from(
-      { length: Math.min(config.validationConcurrency || 10, proxies.length) },
+      { length: Math.min(capOutboundConcurrency(config.validationConcurrency || 10), proxies.length) },
       worker
     )
   );

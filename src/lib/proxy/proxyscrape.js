@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { testProxyUrl } from "@/lib/network/proxyTest";
 import { getSettings, replaceProxyPoolsBySource, updateSettings } from "@/lib/localDb";
 import { originalFetch } from "../../../open-sse/utils/proxyFetch.js";
+import { capOutboundConcurrency } from "@/lib/async/outboundConcurrency.js";
 
 const FETCH_TIMEOUT_MS = 30000;
 
@@ -161,7 +162,7 @@ async function validateProxyList(proxies, config) {
     }
   };
 
-  await Promise.all(Array.from({ length: Math.min(config.validationConcurrency, proxies.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(capOutboundConcurrency(config.validationConcurrency), proxies.length) }, worker));
 
   const working = results.filter((entry) => entry?.validation?.ok);
   return {

@@ -2,6 +2,7 @@ import { getProvider, toPoolEntries } from "./providers/registry.js";
 import { validateProxyList } from "./validateProxies.js";
 import { getLowUsageCountryCodes } from "./geoTargets.js";
 import { replaceProxyPoolsBySource, getSettings, updateSettings } from "@/lib/localDb";
+import { capOutboundConcurrency, mapLimited } from "@/lib/async/outboundConcurrency.js";
 
 /**
  * Fetch proxies for a single provider, fanning out over low-usage target
@@ -22,9 +23,14 @@ async function fetchProviderProxies(provider, normalized) {
     );
   }
 
-  const settled = await Promise.allSettled(
-    targets.map((countryCode) => provider.fetch({ ...normalized, country: countryCode }))
-  );
+  // Same result shape as Promise.allSettled, with bounded outbound concurrency.
+  const settled = await mapLimited(targets, async (countryCode) => {
+    try {
+      return { status: "fulfilled", value: await provider.fetch({ ...normalized, country: countryCode }) };
+    } catch (reason) {
+      return { status: "rejected", reason };
+    }
+  }, capOutboundConcurrency(targets.length));
 
   const merged = [];
   const seenUrls = new Set();
