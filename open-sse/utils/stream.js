@@ -417,8 +417,9 @@ export function createSSEStream(options = {}) {
             reqLogger?.appendConvertedChunk?.(doneOutput);
             enqueueSse(controller, doneOutput);
           }
-          streamDoneSent = true;
-          if (keepsOpenAIResponsesFormat) openAIResponsesDoneSent = true;
+          // Only record a sentinel that was actually written. For every other format the upstream's
+          // own [DONE] is swallowed here, and flush() decides whether this client gets one.
+          if (keepsOpenAIResponsesFormat) { streamDoneSent = true; openAIResponsesDoneSent = true; }
           continue;
         }
 
@@ -641,6 +642,20 @@ export function createSSEStream(options = {}) {
           reqLogger?.appendConvertedChunk?.(doneOutput);
           enqueueSse(controller, doneOutput);
           openAIResponsesDoneSent = true;
+          streamDoneSent = true;
+        }
+
+        // A client that speaks Chat Completions always gets exactly one terminal sentinel.
+        // The translators only emit the final chunks; a [DONE] arriving from the upstream is
+        // swallowed in transform() (done:true is skipped), and a non-OpenAI upstream (Ollama
+        // NDJSON, Claude, Gemini, Kiro, ...) never sends one at all, so without this the stream
+        // simply ended after the finish_reason/usage chunks. enqueueSse() also guarantees that a
+        // sentinel which already went out is never repeated. Claude, Gemini and Responses
+        // clients are excluded: their formats have no [DONE] and some reject it.
+        if (sourceFormat === FORMATS.OPENAI && !streamDoneSent) {
+          const doneOutput = "data: [DONE]\n\n";
+          reqLogger?.appendConvertedChunk?.(doneOutput);
+          enqueueSse(controller, doneOutput);
           streamDoneSent = true;
         }
 
