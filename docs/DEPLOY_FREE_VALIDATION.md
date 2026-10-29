@@ -215,3 +215,35 @@ Written stage by stage so an interrupted run loses nothing. Nothing is pushed; n
   live). So `versions deploy f323aa6a@100 449c180f@0` was used; live traffic stays 100 % on `f323aa6a`. The old 0 % canary
   `d67367ae` left the deployment. Check: anonymous `/api/cron/flush` is 401 on `449c180f` via override, 200 on live (live has no secret).
 * `npm run build` again afterwards: variant marker `node`, tree clean.
+
+## S4 smoke on `449c180f` (0 %, version-override header), 2026-10-29 15:33 to 15:47 UTC
+
+Credentials: admin API token from `.env` (accepted). Dashboard: the `.env` password and `123456` were tried (with the earlier
+`.env.deploy` attempt that makes three distinct passwords, the budget is used up); the Worker's `JWT_SECRET` is not the one in
+`.env.deploy` (signed cookie rejected, 401). **Password login is killed by the Free CPU limit** (`bcryptjs.compare` in pure JS: error 1102 every
+time on this plan), so a correct password could not have succeeded here either. Dashboard cases D1 to D7 are therefore unverifiable on Free.
+
+Run 1 (everything incl. 21 MB upload): 20 pass, 6 fail, 6 skip. Run 2 (after the harness retried CPU-limit kills, 9534a767): 18 pass,
+6 fail, 8 skip. Failures are in every case a Cloudflare 503/1102 (non-JSON body) or a client-side timeout on a CPU-killed invocation, plus D1.
+
+| Case | Result on 449c180f |
+|---|---|
+| P1 to P7, P9, P10 | pass (P8 chat with an invalid key: 503 once in run 2, 401 in run 1) |
+| P11 cron route | **pass: 401 without the secret, 200 with it** |
+| P12 21 MB body | run 1: client timeout at 45 s (slow uplink, the earlier session got 413 after 62 s; the 20 MB cap is also unit-tested). Not re-run |
+| D1 to D7 dashboard | **unverifiable**: password login is killed by the 10 ms limit (1102), password unknown, JWT secret unknown |
+| G1 key create via admin API | pass (needs 1 to 80 retries; creating a key costs about 290 to 740 ms CPU) |
+| G2 `/v1/models` + ETag, `If-None-Match` | **pass: 304 including through the edge's weak `W/` ETag** (run 1) |
+| C1 chat non-stream (real provider) | pass (8.8 s and 11.6 s cold) |
+| C2 stream | run 1 pass: 3 events, ends with a finish chunk; the smoke script accepts a stream with `[DONE]`. Run 2 skipped (503) |
+| K1 forceModel rewrite | run 1 pass (`openai/gpt-4o` served as `gemma4:31b-cloud`), run 2 500 (isolate error below) |
+| K2 forceProvider 403, K3 ACL 403, K4 blocked 403, K5 pin/blocked conflict 400, K7 disabled 401 | pass (each at least once on a retry past a CPU kill) |
+| K6 rate limit | run 1 pass (404,404,404,429,429, Retry-After 52); run 2 client timeout on a hung request |
+| A1 forced analytics flush with the secret | run 1 pass (`ok:true`, `buffering:true`); run 2 503 |
+| X1 throwaway keys | run 1 pass (7 deleted); run 2 list was killed, cleaned up by hand afterwards: no `smoke-test` key left |
+
+Isolate poisoning (new finding): after an invocation is killed for CPU while Next is loading a route, that isolate keeps answering
+**500 `TypeError: ComponentMod.handler is not a function`** (143 events in the soak, `/v1/models`, `/login`, chat) and
+`Cannot read properties of undefined (reading 'length')` for missing static paths, until it is evicted. A half-initialised module
+stays cached. This is triggered by a hard kill, which does not happen on the paid plan CPU limit under normal load, but it is a
+resilience risk after any exceeded-CPU event.
