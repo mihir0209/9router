@@ -30,3 +30,16 @@ Progress log, written stage by stage. No secret values appear in this file. Noth
   `scripts/build-cloudflare.mjs`, `src/`, `open-sse/`, `open-next.config.ts`, `next.config.mjs` contain no worker name or workers.dev host; the cron handler uses the service binding and falls back to `env.ORIGIN` only. The built worker is grepped again after the build (P3).
 * `scripts/build-cloudflare.mjs` accepts `--config <file>` (or `NINEROUTER_WRANGLER_CONFIG`) and passes it to `opennextjs-cloudflare build`, which reads the Wrangler config. Without it nothing changes.
 * New npm scripts: `build:router` (build only) and `deploy:router` (`build-cloudflare.mjs --config wrangler.router.toml && wrangler deploy --config wrangler.router.toml`; the build runs once).
+## P2 D1: BLOCKED (permissions), stopped before any write
+
+* `npx wrangler d1 create router-db` on account `1da22c19...` failed: **`Authentication error [code: 10000]`** on `POST /accounts/1da22c19.../d1/database`.
+  Nothing was created: `d1 list` is empty, Worker `router` does not exist, no secret was set, no deploy was attempted.
+* Cause (read-only checks with the wrangler login): the login is `mihir@cognixai.in`, which is only a **member** of `R8devsin@gmail.com's Account`
+  with roles Zone Settings Read/Admin, AI Gateway Admin, OAuth App Registrations R/W, IP Addressing R/W, Page Rules R/Admin, Resource Library Admin, Zone Versioning, Minimal Account Access,
+  HTTP Applications, Trust and Safety, DNS and **Administrator Read Only**. The membership permission map shows `worker: edit=false` and has no `d1` entry
+  (the OAuth scopes themselves include `workers (write)` and `d1 (write)`, so the account role is what blocks the write). The same login is Super Administrator on the personal account.
+  Wrangler printed "Contact account super admin to change your permissions".
+* Existing Workers on the paid account (not touched, not mine): `lordr`, `my-portfolio-on-cf`.
+* To continue, one of: (a) `npx wrangler logout && npx wrangler login` as `R8devsin@gmail.com` itself; (b) the account owner gives `mihir@cognixai.in` the roles
+  *Workers Platform Admin* and *D1 Admin* (or Administrator) in Manage Account, Members; (c) an API token of that account with Workers Scripts Edit, D1 Edit, Account Settings Read
+  exported as `CLOUDFLARE_API_TOKEN` (and `CLOUDFLARE_ACCOUNT_ID=1da22c19548115accf1b98ab7c562b2c`).
