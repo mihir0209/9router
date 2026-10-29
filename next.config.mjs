@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
@@ -8,7 +9,11 @@ const isCloudflareBuild = process.env.NINEROUTER_RUNTIME === "cloudflare";
 const tracingRoot = process.env.NEXT_TRACING_ROOT_MODE === "workspace"
   ? join(projectRoot, "..")
   : projectRoot;
-const proxyClientMaxBodySize = process.env.NINEROUTER_PROXY_CLIENT_MAX_BODY_SIZE || "128mb";
+// Next clones and buffers every request body that passes the proxy/middleware, up to this
+// size, and silently truncates past it. 128mb equals a Worker isolate's whole memory, so the
+// Cloudflare build buffers at most the largest accepted upload (32 MB, see
+// open-sse/config/bodyLimits.js; the worker guard answers 413 above the limits first).
+const proxyClientMaxBodySize = process.env.NINEROUTER_PROXY_CLIENT_MAX_BODY_SIZE || (isCloudflareBuild ? "32mb" : "128mb");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -53,6 +58,44 @@ const nextConfig = {
         ...config.resolve.fallback,
         fs: false,
         path: false,
+      };
+    }
+    // Bundle analysis: NINEROUTER_WEBPACK_STATS=/path/stats.json writes a per-module size report
+    // of the server compilation (docs/CLOUDFLARE_WORKER_SPLIT.md explains how it is used).
+    if (process.env.NINEROUTER_WEBPACK_STATS && isServer) {
+      config.plugins.push({
+        apply(compiler) {
+          compiler.hooks.done.tap("NineRouterStats", (stats) => {
+            const json = stats.toJson({ all: false, modules: true, nestedModules: true, reasons: false, chunks: false, assets: false });
+            const rows = [];
+            const walk = (mods) => {
+              for (const m of mods || []) {
+                if (m.modules && m.modules.length) walk(m.modules);
+                else rows.push({ name: m.name, size: m.size });
+              }
+            };
+            walk(json.modules);
+            writeFileSync(process.env.NINEROUTER_WEBPACK_STATS + "." + (compiler.name || "server"), JSON.stringify(rows));
+          });
+        },
+      });
+    }
+    // Cloudflare Worker bundle diet (Free plan: 3 MB compressed, Paid: 10 MB). These packages are
+    // dead weight on Workers: native-only, filesystem/CLI-only, or replaced by the runtime's
+    // fetch. Each is aliased to a stub that throws only if something really touches it.
+    if (isCloudflareBuild && isServer) {
+      const stub = (name) => join(projectRoot, "src", "cloudflare", "stubs", name);
+      config.resolve.alias = {
+        ...config.resolve.alias,
+        "node-forge$": stub("node-forge.cjs"),
+        "@node-saml/node-saml$": stub("node-saml.cjs"),
+        "@aws-sdk/credential-providers$": stub("aws-credential-providers.cjs"),
+        undici$: stub("undici.cjs"),
+        "socks-proxy-agent$": stub("socks-proxy-agent.cjs"),
+        // Client-only: reached solely through next/dynamic({ ssr: false }), which never runs on the
+        // server, but webpack still compiles the lazy chunk into the server bundle.
+        recharts$: stub("client-only.cjs"),
+        "@xyflow/react$": stub("client-only.cjs"),
       };
     }
     // Exclude non-source dirs from watcher to reduce inotify load

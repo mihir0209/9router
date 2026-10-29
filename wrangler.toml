@@ -3,6 +3,11 @@ main = ".open-next/worker.js"
 workers_dev = true
 compatibility_date = "2024-12-30"
 compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+# OpenNext hands wrangler an already whitespace-minified handler, and wrangler's own bundling
+# step re-expands it (about 21 MB raw / 4.05 MB gzip before this setting). minify brings the
+# upload back to the size OpenNext produced. keep_names stays at its default (true): Next and
+# some dependencies read function/class .name.
+minify = true
 
 [assets]
 directory = ".open-next/assets"
