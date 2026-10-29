@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
+import { recoverStaleSwaps } from "./lib/swap-recovery.mjs";
 
 const root = process.cwd();
 const proxyPath = join(root, "src", "proxy.js");
@@ -525,6 +526,9 @@ try {
   // SQLite driver), poisoning the worker bundle with unresolvable natives
   // like bun:sqlite. NOTE: this deletes the local .next output — rerun the
   // regular `npm run build` afterwards if you also serve locally.
+  // A previous run that was killed (SIGKILL, timeout) leaves the source files swapped. Undo that first.
+  recoverStaleSwaps(root, (message) => console.warn(`[build-cloudflare] ${message}`));
+
   for (const dir of [join(root, ".next"), join(root, ".open-next")]) {
     rmSync(dir, { recursive: true, force: true });
   }
