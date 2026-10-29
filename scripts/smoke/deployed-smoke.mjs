@@ -181,11 +181,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // (about 10 s) or the unknown-key refresh window (30 s) described in docs/CLOUDFLARE_EXTREME_PROFILE.md.
 // Rejections with 401 before that are expected, not counted by rate limits, and do not reach a provider.
 const visibility = [];
+let cpuKills = 0; // retried invocations that Cloudflare killed (503/1102 non-JSON), see whenVisible
 async function whenVisible(label, key, send) {
   const started = Date.now();
   let r = await send();
-  while (r.res.status === 401 && Date.now() - started < KEY_WAIT_MS) {
-    await sleep(4000);
+  // 401 = the serving isolate has not seen the new key yet. 503 / 1102 from Cloudflare (not from the app) = the invocation was
+  // killed by a CPU limit; the policy under test was not evaluated, so it is retried on a fresh invocation and counted.
+  const killed = (x) => x.res.status === 503 && !(x.res.headers.get("content-type") || "").includes("json");
+  while ((r.res.status === 401 || killed(r)) && Date.now() - started < KEY_WAIT_MS) {
+    if (killed(r)) cpuKills++;
+    await sleep(r.res.status === 401 ? 4000 : 1500);
     r = await send();
   }
   if (Date.now() - started > 1500) visibility.push({ label, seconds: Math.round((Date.now() - started) / 1000) });
@@ -544,7 +549,13 @@ async function gatewayCases() {
   await check("K7", "a disabled key is 401", async () => {
     const k = await createKey("disabled", { isActive: false });
     expect(k.status === 201, `create ${k.status}`);
-    const r = await http("chat-disabled", "/v1/chat/completions", { method: "POST", headers: jsonHeaders(bearer(k.key)), body: chatBody(CHAT_MODEL) });
+    let r;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      r = await http("chat-disabled", "/v1/chat/completions", { method: "POST", headers: jsonHeaders(bearer(k.key)), body: chatBody(CHAT_MODEL) });
+      if (r.res.status !== 503 || (r.res.headers.get("content-type") || "").includes("json")) break;
+      cpuKills++; // Cloudflare CPU-limit kill, the app did not decide: retry
+      await sleep(1500);
+    }
     expect(r.res.status === 401, `status ${r.res.status}`);
   });
 }
@@ -637,6 +648,7 @@ for (const [label, s] of Object.entries(latency)) {
 }
 const tally = cases.reduce((a, c) => ((a[c.status] = (a[c.status] || 0) + 1), a), {});
 if (visibility.length) log(`new-key visibility delays (401 until visible to the serving isolate): ${visibility.map((v) => `${v.label}=${v.seconds}s`).join(", ")}`);
+if (cpuKills) log(`retried ${cpuKills} policy request(s) that Cloudflare answered with a non-JSON 503 (CPU limit kill) before the app could decide`);
 log(`\nresult: ${JSON.stringify(tally)}  requests=${samples.length}  realProviderCalls=${realCalls}`);
 if (REPORT) {
   fs.writeFileSync(REPORT, redact(JSON.stringify({ base: BASE, at: new Date().toISOString(), cases, latency, visibility, samples: samples.map((s) => ({ ...s, ms: Math.round(s.ms * 10) / 10 })), realCalls }, null, 2)));
