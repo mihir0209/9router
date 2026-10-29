@@ -11,7 +11,17 @@ function isAuthorized(request) {
   if (!secret) return true;
   const header = request.headers.get("authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : request.headers.get("x-cron-secret") || "";
-  return token === secret;
+  return safeEqual(token, secret);
+}
+
+// Compare without an early exit so the response time does not reveal how much of a guess matched.
+function safeEqual(a, b) {
+  const left = String(a);
+  const right = String(b);
+  let diff = left.length ^ right.length;
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i++) diff |= (left.charCodeAt(i) || 0) ^ (right.charCodeAt(i) || 0);
+  return diff === 0;
 }
 
 async function runFlush() {
