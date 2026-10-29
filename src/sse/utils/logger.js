@@ -11,7 +11,10 @@ const LOG_LEVELS = {
   ERROR: 3
 };
 
-const LEVEL = LOG_LEVELS[process.env.LOG_LEVEL?.toUpperCase?.()] ?? LOG_LEVELS.INFO;
+// Workers bill and sample every console line, so the default there is WARN. An
+// explicit LOG_LEVEL always wins; other runtimes keep INFO.
+const DEFAULT_LEVEL = process.env.NINEROUTER_RUNTIME === "cloudflare" ? LOG_LEVELS.WARN : LOG_LEVELS.INFO;
+const LEVEL = LOG_LEVELS[process.env.LOG_LEVEL?.toUpperCase?.()] ?? DEFAULT_LEVEL;
 
 function formatTime() {
   return formatNow();
@@ -99,17 +102,20 @@ export function error(tag, message, data) {
 }
 
 export function request(method, path, extra) {
+  if (LEVEL > LOG_LEVELS.INFO) return;
   const dataStr = extra ? ` ${formatData(extra)}` : "";
   console.log(`\x1b[36m[${formatTime()}] 📥 ${method} ${path}${dataStr}\x1b[0m`);
 }
 
 export function response(status, duration, extra) {
+  if (LEVEL > LOG_LEVELS.INFO) return;
   const icon = status < 400 ? "📤" : "💥";
   const dataStr = extra ? ` ${formatData(extra)}` : "";
   console.log(`[${formatTime()}] ${icon} ${status} (${duration}ms)${dataStr}`);
 }
 
 export function stream(event, data) {
+  if (LEVEL > LOG_LEVELS.INFO) return;
   const dataStr = data ? ` ${formatData(data)}` : "";
   console.log(`[${formatTime()}] 🌊 [STREAM] ${event}${dataStr}`);
 }

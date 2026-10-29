@@ -4,6 +4,7 @@
 
 import { FORMATS } from "../translator/formats.js";
 import { hhmmss } from "./timeString.js";
+import { isInfoLogEnabled } from "./logLevel.js";
 
 // Legacy per-chunk usage console line; off by default (superseded by "📊 done")
 const DEBUG_USAGE = process.env.LOG_USAGE_VERBOSE === "1";
@@ -477,5 +478,5 @@ export function logUsage(provider, usage, model = null, connectionId = null, api
   const reasoning = usage.reasoning_tokens;
   if (reasoning) msg += ` | reasoning=${reasoning}`;
 
-  console.log(msg);
+  if (isInfoLogEnabled()) console.log(msg);
 }

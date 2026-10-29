@@ -34,6 +34,7 @@ import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
+import { isInfoLogEnabled } from "../utils/logLevel.js";
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -118,7 +119,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (providerThinking?.mode && providerThinking.mode !== "auto") {
     const mode = providerThinking.mode;
     if (mode === "on" && !body.thinking) {
-      console.log("Injecting provider-level thinking config override: on");
+      if (isInfoLogEnabled()) console.log("Injecting provider-level thinking config override: on");
       body = { ...body, thinking: { type: "enabled", budget_tokens: 10000 } };
     } else if (mode === "off" && !body.thinking) {
       body = { ...body, thinking: { type: "disabled" } };
@@ -140,7 +141,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     ? compressMessages(body, tokenSaverEnabled && rtkEnabled)
     : null;
   const preTranslateRtkLine = formatRtkLog(preTranslateRtk);
-  if (preTranslateRtkLine) console.log(preTranslateRtkLine);
+  if (preTranslateRtkLine && isInfoLogEnabled()) console.log(preTranslateRtkLine);
 
   const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
   const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true;

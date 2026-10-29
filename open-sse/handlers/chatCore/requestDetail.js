@@ -2,6 +2,7 @@ import { saveRequestUsage, appendRequestLog, saveRequestDetail } from "@/lib/usa
 import { COLORS } from "../../utils/stream.js";
 import { canonicalizeUsage } from "../../utils/usageTracking.js";
 import { hhmmss } from "../../utils/timeString.js";
+import { isInfoLogEnabled } from "../../utils/logLevel.js";
 
 const OPTIONAL_PARAMS = [
   "temperature", "top_p", "top_k",
@@ -134,7 +135,7 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
 
   if (inTokens === 0 && outTokens === 0) return;
 
-  if (!silent) {
+  if (!silent && isInfoLogEnabled()) {
     const time = hhmmss();
     const accountSuffix = connectionId ? ` | account=${connectionId.slice(0, 8)}...` : "";
     console.log(`${COLORS.green}[${time}] 📊 [${label}] ${provider.toUpperCase()} | in=${inTokens} | out=${outTokens}${accountSuffix}${COLORS.reset}`);

@@ -82,6 +82,10 @@ function appendLine(line) {
 
 export function initConsoleLogCapture() {
   if (state.patched) return;
+  // On Workers the buffer is per isolate (the dashboard log view would show one
+  // arbitrary isolate), while the patch stringifies and retains every console
+  // line on the request path. Opt in with NINEROUTER_CONSOLE_CAPTURE=1.
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare" && process.env.NINEROUTER_CONSOLE_CAPTURE !== "1") return;
 
   for (const level of consoleLevels) {
     state.originals[level] = console[level];

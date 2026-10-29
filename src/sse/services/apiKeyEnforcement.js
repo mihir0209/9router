@@ -5,6 +5,7 @@ import { getApiKeyTokenUsage } from "@/lib/db/repos/usageRepo.js";
 import { checkBudget } from "@/lib/budgetService.js";
 import { coordinatorCall } from "@/lib/coordinator/client.js";
 import { ipMatchesAny, trustedClientIp } from "@/lib/auth/clientIp.js";
+import { isInfoLogEnabled } from "open-sse/utils/logLevel.js";
 
 function endpointFamily(pathname) {
   const path = String(pathname || "").replace(/^\/api(?=\/v1(?:\/|$))/, "");
@@ -107,7 +108,7 @@ export async function enforceApiKeyRestrictions(apiKey, request, body) {
   const forceModel = String(keyRecord.forceModel || "").trim();
   let routedModel = null;
   if (forceModel && body && typeof body === "object" && String(body.model || "").trim() !== forceModel) {
-    console.log(`[apiKey] force routing: asked="${body.model}" -> "${forceModel}"`);
+    if (isInfoLogEnabled()) console.log(`[apiKey] force routing: asked="${body.model}" -> "${forceModel}"`);
     body.model = forceModel;
     routedModel = forceModel;
   }

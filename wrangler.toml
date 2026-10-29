@@ -20,6 +20,14 @@ NINEROUTER_RUNTIME = "cloudflare"
 # Cloudflare) or "standard" (previous per-request behaviour). See
 # docs/CLOUDFLARE_EXTREME_PROFILE.md for the knobs.
 # NINEROUTER_D1_PROFILE = "extreme"
+# Body size limits (MB; 0 disables). Defaults on this runtime: JSON 20, uploads 32,
+# upstream bodies read whole 32. Stream capture for request details: 64 KB.
+# NINEROUTER_MAX_BODY_MB = "20"
+# NINEROUTER_MAX_UPLOAD_MB = "32"
+# NINEROUTER_MAX_RESPONSE_MB = "32"
+# NINEROUTER_STREAM_CAPTURE_MAX_BYTES = "65536"
+# LOG_LEVEL defaults to WARN on this runtime; set "info" to get per-request lines.
+# LOG_LEVEL = "warn"
 
 # Flush in-memory analytics buffer + observability batch before isolate eviction.
 [triggers]
@@ -33,18 +41,27 @@ class_name = "GatewayCoordinator"
 type = "durable-object"
 storage = "sqlite"
 
+# Observability is billed per log/trace event on the Paid plan (Workers Logs: a
+# monthly allotment, then per million events) and head sampling is decided per
+# invocation BEFORE the request runs. The previous 0.25 / 0.1 meant a quarter of
+# all requests produced persisted log lines. 0.05 / 0.01 keeps a usable sample
+# for spotting trends.
+# Trade-off: an error in an UNSAMPLED invocation is not persisted in Workers Logs
+# (wrangler tail and the dashboard's real-time logs still show it, and only WARN
+# and ERROR lines are emitted by default on this runtime, see LOG_LEVEL in
+# src/sse/utils/logger.js). Raise the rates temporarily while debugging.
 [observability]
 enabled = true
-head_sampling_rate = 0.25
+head_sampling_rate = 0.05
 
 [observability.logs]
 enabled = true
-head_sampling_rate = 0.25
+head_sampling_rate = 0.05
 persist = true
 
 [observability.traces]
 enabled = true
-head_sampling_rate = 0.1
+head_sampling_rate = 0.01
 persist = true
 
 [[d1_databases]]
