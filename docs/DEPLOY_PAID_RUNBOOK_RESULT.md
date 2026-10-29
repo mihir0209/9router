@@ -43,3 +43,30 @@ Progress log, written stage by stage. No secret values appear in this file. Noth
 * To continue, one of: (a) `npx wrangler logout && npx wrangler login` as `R8devsin@gmail.com` itself; (b) the account owner gives `mihir@cognixai.in` the roles
   *Workers Platform Admin* and *D1 Admin* (or Administrator) in Manage Account, Members; (c) an API token of that account with Workers Scripts Edit, D1 Edit, Account Settings Read
   exported as `CLOUDFLARE_API_TOKEN` (and `CLOUDFLARE_ACCOUNT_ID=1da22c19548115accf1b98ab7c562b2c`).
+
+## P3 offline pre-validation (no Cloudflare write)
+
+Because the deploy is blocked, the parts that need no account access were run so the next attempt starts from a verified state:
+
+* `npm run build:router` (`build-cloudflare.mjs --config wrangler.router.toml`): all build assertions passed (47 s); afterwards `git status` clean, `src/proxy.js` present, no `src/middleware.js`, no `*.cloudflare-disabled`.
+* `wrangler deploy --config wrangler.router.toml --dry-run --outdir /tmp/wr-dry`: **11,557.80 KiB raw / 2,818.88 KiB gzip** (Paid limit 10 MiB compressed, so ample). Bindings resolved: `GATEWAY_COORDINATOR` (DO), `DB` (`router-db`, placeholder id until D1 exists), `WORKER_SELF_REFERENCE` -> `router`, `ASSETS`, vars NODE_ENV / NEXTJS_ENV / NINEROUTER_RUNTIME / MODELS_LIST_SOURCE.
+* The generated `.open-next/worker.js` and the wrangler bundle contain **no** `mihir`, `themihir` or `antideploy` string.
+* `npm run build` afterwards: `.next/standalone/.9router-build-variant` = `node`, tree clean.
+* The `database_id` in `wrangler.router.toml` is still the all-zero placeholder and MUST be replaced after `wrangler d1 create router-db`.
+
+## Status
+
+Stopped at P2. Not done: D1 create/import, secrets, deploy, smoke, soak, Cloudflare analytics, vitest run (nothing in `src/` changed; only the build script, config, npm scripts and smoke helper).
+
+## Commands to resume once the login has write access to the paid account
+
+```bash
+export CLOUDFLARE_ACCOUNT_ID=1da22c19548115accf1b98ab7c562b2c
+npx wrangler d1 create router-db                       # copy database_id into wrangler.router.toml
+npx wrangler d1 execute router-db --remote --file .agents/backups/mihir-router-db-pre-deploy.sql --yes
+npx wrangler d1 execute router-db --remote --command "SELECT table_name, COUNT(*) n FROM ninerouter_rows GROUP BY 1"
+# secrets BEFORE the first deploy (wrangler offers to create the Worker `router` for them): JWT_SECRET, API_KEY_SECRET, MACHINE_ID_SALT,
+# ADMIN_API_TOKEN, INITIAL_PASSWORD from .env.deploy, CRON_SECRET from .agents/secrets/router-cron-secret.txt (stdin or `secret bulk`)
+npm run deploy:router                                   # build once, then wrangler deploy --config wrangler.router.toml
+LIVE_STATE_CONFIG=wrangler.router.toml scripts/smoke/live-state.sh https://router.genzzz.workers.dev <version prefix>
+```
