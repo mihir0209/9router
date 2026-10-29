@@ -117,6 +117,11 @@ const origClone = original.clone.bind(original);
 original.clone = () => { cloned = true; return origClone(); };
 __9routerDownstreamRequest(original);
 assert(!cloned, "the body must not be cloned (clone() tees and buffers it)");
+const abortable = new AbortController();
+const withSignal = new Request("https://w.test/v1/chat/completions", { method: "POST", headers: json, body: "{}", signal: abortable.signal });
+const downWithSignal = __9routerDownstreamRequest(withSignal);
+abortable.abort();
+assert(downWithSignal.signal.aborted, "a client disconnect must still abort the downstream request (it stops the upstream fetch)");
 
 // Env is copied once per isolate.
 delete process.env.__GUARD_PROBE;
@@ -367,7 +372,7 @@ function __9routerDownstreamRequest(request) {
   const cfIp = request.headers.get("cf-connecting-ip");
   if (cfIp) headers.set("x-9r-real-ip", cfIp);
   else headers.delete("x-9r-real-ip");
-  return new Request(request, { headers });
+  return new Request(request, { headers, signal: request.signal, ...(request.cf ? { cf: request.cf } : {}) });
 }
 
 async function guardCloudflareAdminRequest(request, env) {
@@ -448,12 +453,22 @@ async function __9ROUTER_SCHEDULED__(event, env, ctx) {
     .trim();
   const coordinatorRuntime = `import { DurableObject } from "cloudflare:workers";\n${coordinatorSource}\n`;
 
-    const guardMarker = "return runWithCloudflareRequestContext(request, env, ctx, async () => {";
-    if (!source.includes(guardMarker)) throw new Error("OpenNext worker no longer contains the request-context entry point; the guard cannot be injected");
-    let withGuard = coordinatorRuntime + source.replace("export default {", `${guard}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
+    // OpenNext's fetch handler reads the incoming request through the parameter name `request`
+    // everywhere (middleware, Next handler, request.signal). The guard renames the parameter,
+    // checks the ORIGINAL request, and rebinds `request` to the downstream copy (x-9r-real-ip
+    // rewritten, body moved rather than cloned), so the handler really runs on the rewritten
+    // request. Passing it only to runWithCloudflareRequestContext, as before, left the headers
+    // and a teed, fully buffered body behind.
+    const fetchMarkerAlt = "async fetch(request, env, ctx) {";
+    const ctxMarker = "return runWithCloudflareRequestContext(request, env, ctx, async () => {";
+    if (!source.includes(fetchMarkerAlt) || !source.includes(ctxMarker)) {
+      throw new Error("OpenNext worker no longer contains the fetch entry point; the guard cannot be injected");
+    }
+    let withGuard = coordinatorRuntime + source
+      .replace("export default {", `${guard}\n${scheduled}\nexport default {\n    scheduled: __9ROUTER_SCHEDULED__,`)
       .replace(
-        guardMarker,
-        "__9routerSyncEnv(env);\n        const guardResponse = await guardCloudflareAdminRequest(request, env);\n        if (guardResponse) return guardResponse;\n        const __9ROUTER_DOWNSTREAM_REQUEST = __9routerDownstreamRequest(request);\n        return runWithCloudflareRequestContext(__9ROUTER_DOWNSTREAM_REQUEST, env, ctx, async () => {"
+        fetchMarkerAlt,
+        "async fetch(__9ROUTER_ORIGINAL_REQUEST, env, ctx) {\n        __9routerSyncEnv(env);\n        const guardResponse = await guardCloudflareAdminRequest(__9ROUTER_ORIGINAL_REQUEST, env);\n        if (guardResponse) return guardResponse;\n        const request = __9routerDownstreamRequest(__9ROUTER_ORIGINAL_REQUEST);"
       );
   assertWorkerParses(withGuard);
   assertGuardDecidesCorrectly(guard, limits.DEFAULT_CLOUDFLARE_MAX_BODY_MB);
