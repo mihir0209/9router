@@ -287,8 +287,7 @@ How to read it:
   module in its cache). Mitigation if it ever shows on Paid: alert on `ComponentMod.handler` errors, and redeploy (a new version starts fresh isolates).
 * **Hung requests: improved.** The old build hangs under the concurrent cold burst (7 of 20 in the end burst, plus 5 in the timed mix, wall 75 s,
   `canceled`/`clientDisconnected`, `waitUntil() tasks did not complete`). The new build had 0 hangs in 40 burst requests and 224 timed requests
-  (b31373eb: bounded D1 calls and request-safe shared work). One hang was seen in a separate smoke run (K6 rate limit check, run 2) and one
-  `clientDisconnected` (wall 75 s) in the first smoke: so not eliminated, but 1 in 3 in about 400 requests versus 12 in 177 before. Re-check on Paid.
+  (b31373eb: bounded D1 calls and request-safe shared work). One hang was seen in a separate smoke run (K6 rate limit check, run 2; analytics shows it as one `clientDisconnected`, wall 75 s): so not eliminated, but 1 in about 400 requests versus 12 in 177 before. Re-check on Paid.
 
 ## Measured against claimed (session 2)
 
@@ -338,3 +337,111 @@ event writes one). No supported API prunes it; no raw `DELETE` was run on live D
 ## Final live state (verified at the end of the session)
 
 See "Final state" at the end of this file.
+
+## Remaining risks
+
+1. Free plan cannot host this Worker (both versions: about 8 to 16 % of invocations killed, every warm `/v1/models`, `/login`, chat and admin write above 10 ms).
+2. Isolate poisoning after any hard termination (see S5). Alert on `ComponentMod.handler is not a function`; a new version deploy clears it.
+3. Hung concurrent cold requests reduced to about 1 in 400 on the new build (12 in 177 on the old one) but not proven absent. Re-run the burst on Paid.
+4. Cold request cost 0.5 to 1.2 s CPU. Fine under a 30 s limit; it is billed CPU time and first-byte latency, not a failure.
+5. Password login (`bcryptjs`, pure JS) is CPU heavy (about 100 ms or more). Fine on Paid.
+6. New API keys take 2 to 19 s to become visible to every isolate (documented 10 s poll, 30 s unknown-key window).
+7. `auditLog` grows with admin use and has no prune API.
+8. Dashboard cases D1 to D7 and the analytics-in-dashboard check were not run against a real session (password unknown, 3 distinct attempts used, Worker JWT secret unknown). They are covered by the unit tests, and `scripts/smoke/deployed-smoke.mjs` runs them as soon as `SMOKE_DASHBOARD_PASSWORD` (or `SMOKE_JWT_SECRET`) is the right one.
+9. Persisted Workers Logs volume and memory use are not readable with the CLI's OAuth scopes. Read them in the dashboard during the Paid soak.
+10. Provider connections in the stored database: `cloudflare-ai` and Ollama `h` return 401 upstream (stale credentials), unchanged from session 1; not touched.
+
+## GO / NO-GO
+
+* **Free account: NO-GO.** Live stays on `f323aa6a` at 100 %. Do not promote `449c180f` here.
+* **Paid account: GO, conditional.** The conditions from session 1 are now met except the ones that need Paid or the dashboard password:
+  met: `[DONE]` always once, weak `If-None-Match` 304, `CRON_SECRET` enforced and constant-time, bounded D1 calls and request-safe
+  shared work (hangs 12 in 177 down to 1 in about 400), 413 cap on the deployed build, build recovers from a killed swap, local cron path with a secret,
+  smoke + soak harness with exact percentiles. Not met until done on Paid: a 20-minute soak with 0 hung requests and 0 exceeded outcomes, the dashboard
+  cases with the real password, per-request D1/DO figures at warm state, memory outcomes.
+
+## Paid account deployment runbook (ready to run, nothing below has been executed)
+
+Work from a clean checkout of `master` (HEAD includes everything above). `$OLD` = the free account, `$NEW` = the paid account.
+
+### 0. Prepare
+```bash
+cd /devspace/Projects/9router
+git status --short                                   # must be empty
+npx wrangler logout && npx wrangler login            # log in as the PAID account
+npx wrangler whoami                                  # check the account name and id
+```
+In the Cloudflare dashboard of the paid account: Workers & Pages, Plans, confirm **Workers Paid**. Add a billing / usage notification
+(Notifications, "Usage-based billing" for Workers, D1 and Durable Objects).
+
+### 1. Export the data while logged in to `$OLD` (do this first, with the old login)
+```bash
+npx wrangler d1 export mihir-router-db --remote --output ~/9router-d1-export.sql    # old account
+# older fallback: .agents/backups/mihir-router-db-pre-deploy.sql (2026-10-29 morning, 4,136 rows)
+```
+Also write down the OLD Worker secrets. They cannot be read back from Cloudflare. `API_KEY_SECRET` and `MACHINE_ID_SALT`
+**must be identical** on the new Worker, or existing API keys stop validating (the key CRC is an HMAC with `API_KEY_SECRET`
+over the machine id). `JWT_SECRET` should stay the same to keep dashboard sessions; `ADMIN_API_TOKEN`, `INITIAL_PASSWORD` as before.
+If you do not have them, generate new ones and re-create the API keys in the dashboard afterwards.
+
+### 2. Create D1 and import (paid account)
+```bash
+npx wrangler d1 create mihir-router-db               # prints database_id
+# put the new database_id into wrangler.toml [[d1_databases]] (do not commit it to a shared repo)
+npx wrangler d1 execute mihir-router-db --remote --file ~/9router-d1-export.sql
+npx wrangler d1 execute mihir-router-db --remote --command "SELECT table_name, count(*) n FROM ninerouter_rows GROUP BY 1 ORDER BY 2 DESC"
+```
+Expect `ninerouter_rows` only; compare the counts with the old database (about 4,100 rows).
+
+### 3. Durable Object
+`wrangler.toml` already declares `[exports.GatewayCoordinator] type = "durable-object", storage = "sqlite"`; the first deploy creates the
+SQLite-backed class, no manual migration. Needs Workers Paid.
+
+### 4. First deploy (creates the Worker; this one activates at 100 %)
+`wrangler versions upload` cannot create a Worker, so the first deploy is a normal one. Keep it unreachable until secrets exist:
+```bash
+# temporarily in wrangler.toml: workers_dev = false   (no route yet = no public URL)
+npm run build:cloudflare && npx wrangler deploy --dry-run --outdir /tmp/wr-dry    # raw/gzip, must stay < 10 MB on Paid
+npx wrangler deploy --message "first deploy, no public URL"
+cat > /tmp/secrets.json   # {"JWT_SECRET":"...","API_KEY_SECRET":"...","MACHINE_ID_SALT":"...","ADMIN_API_TOKEN":"...","INITIAL_PASSWORD":"...","CRON_SECRET":"<openssl rand -hex 32>"}
+npx wrangler secret bulk /tmp/secrets.json && shred -u /tmp/secrets.json
+```
+(`CRON_SECRET` may be taken from `.agents/secrets/cron-secret.txt`.) Then turn on a test URL: either `workers_dev = true` plus a `deploy`,
+or better a custom domain below. Secrets are per Worker; they do not move with a deploy.
+
+### 5. Every later release: upload, 0 %, smoke, soak, promote
+```bash
+npm run build:cloudflare
+npx wrangler versions upload --message "release X" --tag release-x           # prints the Version ID, 0 % traffic
+npx wrangler versions deploy <PREVIOUS>@100 <NEW>@0 -y --message "0% canary"  # makes the override header usable
+SMOKE_BASE_URL=https://<host> SMOKE_ENV_FILE=<file with ADMIN_API_TOKEN, SMOKE_CRON_SECRET, SMOKE_DASHBOARD_PASSWORD> \
+  SMOKE_VERSION_OVERRIDE=<NEW> SMOKE_CHAT_MODEL=<cheap model> SMOKE_OVERSIZE=1 node scripts/smoke/deployed-smoke.mjs
+SMOKE_BASE_URL=... SMOKE_ENV_FILE=... SMOKE_VERSION_OVERRIDE=<NEW> SOAK_SECONDS=1200 SOAK_INTERVAL_MS=2000 \
+  node scripts/smoke/soak.mjs      # run `npx wrangler tail --version-id <NEW> --format json` in a second terminal
+```
+Go criteria: 0 hung, 0 `exceededResources`/`exceededCpu`/`exceededMemory`, 0 `ComponentMod.handler` errors, all smoke cases pass.
+Promote gradually:
+```bash
+npx wrangler versions deploy <PREVIOUS>@90 <NEW>@10 -y     # watch 10 to 15 minutes (errors, CPU p99, D1 rows, DO requests)
+npx wrangler versions deploy <NEW>@100 -y
+```
+Rollback (instant): `npx wrangler rollback <PREVIOUS_VERSION_ID> -y`, then check `/api/health` and `/login`.
+
+### 6. Dashboard actions (cannot be done from the repo)
+1. Custom domain: Workers & Pages, the Worker, Settings, Domains & Routes, add a domain on a zone you control.
+2. On that zone: Security, WAF, Rate limiting rules: for example `/v1/*` and `/api/auth/login` per IP (login: 10 per minute), and turn on **Bot Fight Mode**.
+3. After the custom domain works: set `workers_dev = false` in `wrangler.toml` and deploy (removes the open `workers.dev` URL that the zone's WAF does not cover).
+4. Optional `[limits] cpu_ms = 5000` (or another ceiling below the 30 s default) in `wrangler.toml` to bound a runaway request; leave unset first.
+5. `[placement] mode = "smart"` is unmeasured; try it as a 0 % version and compare wall time before enabling.
+6. Observability: keep sampling at `0.05` / `0.01`; check the monthly log/trace event count after the first week.
+7. Set a D1 usage notification; check row reads per day against the estimate of about 4.5 k rows per cold isolate.
+8. Rotate the dashboard password in Settings after the first login, and review the provider connections whose credentials are stale.
+
+## Manual steps for the user (free account)
+
+* Nothing is required to keep the free deployment healthy: `f323aa6a` serves 100 %.
+* Optional hardening of the live Free Worker (this is a promotion, so it was not done): `npx wrangler versions secret put CRON_SECRET` then
+  `npx wrangler versions deploy <current>@100` (creates and deploys a copy of `f323aa6a` with the secret; the 10-minute cron already sends
+  the header). Or accept that `/api/cron/flush` stays a cheap public route on Free.
+* Old leftovers on the free account (uploaded, never promoted, unused): `13cbbad1`, `695b1833`, `d67367ae`, `5aa6c6ea`, `449c180f` (0 % canary). To remove the
+  canary: `npx wrangler versions deploy f323aa6a-ff27-4ad0-8825-7645963667c8@100 -y`.
