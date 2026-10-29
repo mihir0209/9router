@@ -8,6 +8,7 @@ import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE, ensureStream
 import { restoreToolNames } from "./opencodeFingerprint.js";
 import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
+import { getStreamCaptureMaxBytes, STREAM_CAPTURE_TRUNCATION_MARKER } from "../config/bodyLimits.js";
 
 import { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER } from "./sseConstants.js";
 
@@ -29,6 +30,28 @@ const STREAM_MODE = {
 // that saw finish_reason without usage must not hold the client's terminal event
 // forever when the upstream stalls with no usage trailer and no [DONE].
 const PENDING_COMPLETION_FLUSH_MS = 3000;
+
+/**
+ * Accumulates streamed text up to `max` characters (0 = unbounded). Past the cap
+ * further text is dropped and text() ends with a truncation marker. Characters,
+ * not bytes: the cap is a memory guard, not an exact byte budget.
+ */
+export function createTextCapture(max) {
+  let value = "";
+  let truncated = false;
+  return {
+    add(chunk) {
+      if (truncated) return;
+      if (!max) { value += chunk; return; }
+      const room = max - value.length;
+      if (chunk.length <= room) { value += chunk; return; }
+      if (room > 0) value += chunk.slice(0, room);
+      truncated = true;
+    },
+    text() { return truncated ? value + STREAM_CAPTURE_TRUNCATION_MARKER : value; },
+    get truncated() { return truncated; },
+  };
+}
 
 /**
  * Create unified SSE transform stream
@@ -84,8 +107,11 @@ export function createSSEStream(options = {}) {
     : null;
 
   let totalContentLength = 0;
-  let accumulatedContent = "";
-  let accumulatedThinking = "";
+  // Text kept only for onStreamComplete (request details). Capped on Cloudflare so a
+  // long stream does not grow the isolate heap; totalContentLength stays exact.
+  const captureMax = getStreamCaptureMaxBytes();
+  const accumulatedContent = createTextCapture(captureMax);
+  const accumulatedThinking = createTextCapture(captureMax);
   let ttftAt = null;
   let sseLineCount = 0;
   let sseEmittedCount = 0;
@@ -163,8 +189,8 @@ export function createSSEStream(options = {}) {
 
     if (onStreamComplete) {
       onStreamComplete({
-        content: accumulatedContent,
-        thinking: accumulatedThinking
+        content: accumulatedContent.text(),
+        thinking: accumulatedThinking.text()
       }, finalUsage, ttftAt);
     }
   };
@@ -296,11 +322,11 @@ export function createSSEStream(options = {}) {
               const reasoning = delta?.reasoning_content;
               if (content && typeof content === "string") {
                 totalContentLength += content.length;
-                accumulatedContent += content;
+                accumulatedContent.add(content);
               }
               if (reasoning && typeof reasoning === "string") {
                 totalContentLength += reasoning.length;
-                accumulatedThinking += reasoning;
+                accumulatedThinking.add(reasoning);
               }
 
               const extracted = extractUsage(parsed);
@@ -399,23 +425,23 @@ export function createSSEStream(options = {}) {
         // Claude format - content
         if (parsed.delta?.text) {
           totalContentLength += parsed.delta.text.length;
-          accumulatedContent += parsed.delta.text;
+          accumulatedContent.add(parsed.delta.text);
         }
         // Claude format - thinking
         if (parsed.delta?.thinking) {
           totalContentLength += parsed.delta.thinking.length;
-          accumulatedThinking += parsed.delta.thinking;
+          accumulatedThinking.add(parsed.delta.thinking);
         }
         
         // OpenAI format - content
         if (parsed.choices?.[0]?.delta?.content) {
           totalContentLength += parsed.choices[0].delta.content.length;
-          accumulatedContent += parsed.choices[0].delta.content;
+          accumulatedContent.add(parsed.choices[0].delta.content);
         }
         // OpenAI format - reasoning
         if (parsed.choices?.[0]?.delta?.reasoning_content) {
           totalContentLength += parsed.choices[0].delta.reasoning_content.length;
-          accumulatedThinking += parsed.choices[0].delta.reasoning_content;
+          accumulatedThinking.add(parsed.choices[0].delta.reasoning_content);
         }
         
         // Gemini format
@@ -425,9 +451,9 @@ export function createSSEStream(options = {}) {
               totalContentLength += part.text.length;
               // Check if this is thinking content
               if (part.thought === true) {
-                accumulatedThinking += part.text;
+                accumulatedThinking.add(part.text);
               } else {
-                accumulatedContent += part.text;
+                accumulatedContent.add(part.text);
               }
             }
           }
