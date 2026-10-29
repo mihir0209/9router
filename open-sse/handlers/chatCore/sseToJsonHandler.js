@@ -12,6 +12,8 @@ import { extractReasoningText } from "../../translator/concerns/reasoning.js";
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
 import { saveRequestDetail, appendRequestLog } from "@/lib/usageDb.js";
+import { readTextLimited, readJsonLimited, isBodyTooLarge } from "../../utils/bodyLimit.js";
+import { getMaxResponseBodyBytes } from "../../config/bodyLimits.js";
 
 function textFromResponsesMessageItem(item) {
   if (!item?.content || !Array.isArray(item.content)) return "";
@@ -301,7 +303,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
   // Standard Chat Completions SSE path
   try {
-    const sseText = await providerResponse.text();
+    const sseText = await readTextLimited(providerResponse, getMaxResponseBodyBytes(), "upstream response");
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     if (parsed.error) {

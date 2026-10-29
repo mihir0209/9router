@@ -17,6 +17,8 @@ import { saveRequestUsage } from "@/lib/usageDb.js";
 import { stripRequestUser } from "@/lib/requestPrivacy.js";
 import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
 import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
+import { readJsonLimited, isBodyTooLarge, payloadTooLargeResponse } from "open-sse/utils/bodyLimit.js";
+import { getMaxJsonBodyBytes } from "open-sse/config/bodyLimits.js";
 
 function exactEmbeddingUsage(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.estimated === true) return null;
@@ -36,8 +38,9 @@ function exactEmbeddingUsage(raw) {
 export async function handleEmbeddings(request) {
   let body;
   try {
-    body = await request.json();
-  } catch {
+    body = await readJsonLimited(request, getMaxJsonBodyBytes());
+  } catch (err) {
+    if (isBodyTooLarge(err)) return payloadTooLargeResponse(err);
     log.warn("EMBEDDINGS", "Invalid JSON body");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }

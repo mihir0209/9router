@@ -3,6 +3,8 @@ import { HTTP_STATUS, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.j
 import { getExecutor } from "../executors/index.js";
 import { refreshWithRetry } from "../services/tokenRefresh.js";
 import { getEmbeddingAdapter } from "./embeddingProviders/index.js";
+import { readTextLimited, readJsonLimited, isBodyTooLarge } from "../utils/bodyLimit.js";
+import { getMaxResponseBodyBytes } from "../config/bodyLimits.js";
 
 /**
  * Core embeddings handler — orchestrator only. Provider-specific URL/headers/body/normalize
@@ -119,8 +121,9 @@ export async function handleEmbeddingsCore({
 
   let responseBody;
   try {
-    responseBody = await providerResponse.json();
-  } catch {
+    responseBody = await readJsonLimited(providerResponse, getMaxResponseBodyBytes(), "upstream response");
+  } catch (err) {
+    if (isBodyTooLarge(err)) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `${provider}: ${err.message}`);
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Invalid JSON response from ${provider}`);
   }
 

@@ -4,6 +4,8 @@ import { refreshWithRetry } from "../services/tokenRefresh.js";
 import { getExecutor } from "../executors/index.js";
 import { getImageAdapter } from "./imageProviders/index.js";
 import { urlToBase64 } from "./imageProviders/_base.js";
+import { readTextLimited, readJsonLimited, isBodyTooLarge } from "../utils/bodyLimit.js";
+import { getMaxResponseBodyBytes } from "../config/bodyLimits.js";
 
 function serializeRequestBody(requestBody) {
   if (typeof FormData !== "undefined" && requestBody instanceof FormData) return requestBody;
@@ -184,7 +186,7 @@ export async function handleImageGenerationCore({
         return { success: true, response: parsed.sseResponse };
       }
     } else {
-      parsed = await providerResponse.json();
+      parsed = await readJsonLimited(providerResponse, getMaxResponseBodyBytes(), "upstream response");
     }
   } catch (parseError) {
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, parseError.message || `Invalid response from ${provider}`);

@@ -21,6 +21,7 @@ import { CLAUDE_EVENT, CLAUDE_DELTA, RESPONSES_EVENT, RESPONSES_EVENT_PREFIX } f
 import { toOpenAIFinish } from "../translator/concerns/finishReason.js";
 import { FORMATS } from "../translator/formats.js";
 import { EMPTY_PEEK_DEADLINE_MS } from "../config/runtimeConfig.js";
+import { getEmptyPeekMaxBytes } from "../config/bodyLimits.js";
 import { parseSSELine } from "../utils/streamHelpers.js";
 
 // OpenAI chat content test. A chunk counts as content only if it carries
@@ -147,16 +148,17 @@ export function isNoRetryFinish(finishReason) {
 }
 
 // Peek a streaming Response body: read frames until the first content frame (→ "content"),
-// the stream ends (→ "empty"), or the deadline elapses (→ "content", fail-open: never hold a
+// the stream ends (→ "empty"), the head reaches `maxBytes` (→ "content", fail-open), or the deadline elapses (→ "content", fail-open: never hold a
 // possibly-valid slow stream). Returns the decision, the buffered head bytes, the live reader,
 // and — if the deadline fired mid-read — the still-pending read() (`pendingRead`) so the caller
 // can resume from it WITHOUT abandoning the chunk it will deliver.
-export async function peekStreamForContent(body, { deadlineMs = EMPTY_PEEK_DEADLINE_MS } = {}) {
+export async function peekStreamForContent(body, { deadlineMs = EMPTY_PEEK_DEADLINE_MS, maxBytes = getEmptyPeekMaxBytes() } = {}) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   const headChunks = [];
   const state = { sawContent: false, finishReason: null };
   let textBuf = "";
+  let headBytes = 0;
 
   // Clamp: 0 / NaN / negative would otherwise disable the timeout and let a stalled-but-open
   // upstream hang the request forever in the hot path. There is no "disable" via this value.
@@ -189,11 +191,19 @@ export async function peekStreamForContent(body, { deadlineMs = EMPTY_PEEK_DEADL
       return settle({ outcome: state.sawContent ? "content" : "empty", timedOut: false, head: headChunks, reader, pendingRead: null, finishReason: state.finishReason });
     }
     headChunks.push(value);
+    headBytes += value.byteLength;
     textBuf += decoder.decode(value, { stream: true });
     scanSSEBuffer(textBuf, state);
     textBuf = state.pending; // only the not-yet-complete line carries over
     if (state.sawContent) {
       return settle({ outcome: "content", timedOut: false, head: headChunks, reader, pendingRead: null, finishReason: state.finishReason });
+    }
+    // Byte cap: the deadline bounds the hold by time, this bounds it by memory. A fast upstream
+    // that sends only non-content frames (keep-alives, role/usage frames) could otherwise pile up
+    // head bytes for the whole deadline. Commit fail-open exactly like the deadline path. No read
+    // is outstanding here (the last one resolved), so pendingRead is null and nothing is dropped.
+    if (maxBytes > 0 && headBytes >= maxBytes) {
+      return settle({ outcome: "content", timedOut: false, byteCapped: true, head: headChunks, reader, pendingRead: null, finishReason: state.finishReason });
     }
   }
 }

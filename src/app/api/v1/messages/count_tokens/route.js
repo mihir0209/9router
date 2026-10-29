@@ -1,3 +1,6 @@
+import { readJsonLimited, isBodyTooLarge, payloadTooLargeResponse } from "open-sse/utils/bodyLimit.js";
+import { getMaxJsonBodyBytes } from "open-sse/config/bodyLimits.js";
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -75,8 +78,9 @@ export function estimateAnthropicInputTokens(body = {}) {
 export async function POST(request) {
   let body;
   try {
-    body = await request.json();
-  } catch {
+    body = await readJsonLimited(request, getMaxJsonBodyBytes());
+  } catch (err) {
+    if (isBodyTooLarge(err)) return payloadTooLargeResponse(err);
     return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
       status: 400,
       headers: { "Content-Type": "application/json", ...CORS_HEADERS }

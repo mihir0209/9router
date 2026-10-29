@@ -16,6 +16,8 @@ import { updateProviderCredentials, checkAndRefreshToken } from "../services/tok
 import { handleComboChat, getComboModelsFromData } from "open-sse/services/combo.js";
 import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
 import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
+import { readJsonLimited, isBodyTooLarge, payloadTooLargeResponse } from "open-sse/utils/bodyLimit.js";
+import { getMaxJsonBodyBytes } from "open-sse/config/bodyLimits.js";
 
 /**
  * Handle web search request for the SSE/Next.js server.
@@ -26,8 +28,9 @@ import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/
 export async function handleSearch(request) {
   let body;
   try {
-    body = await request.json();
-  } catch {
+    body = await readJsonLimited(request, getMaxJsonBodyBytes());
+  } catch (err) {
+    if (isBodyTooLarge(err)) return payloadTooLargeResponse(err);
     log.warn("SEARCH", "Invalid JSON body");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }

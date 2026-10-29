@@ -4,6 +4,8 @@
 
 import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
 import { unavailableResponse } from "../utils/error.js";
+import { readTextPrefix } from "../utils/bodyLimit.js";
+import { COMBO_PEEK_JSON_MAX_BYTES, UPSTREAM_ERROR_READ_MAX_BYTES } from "../config/bodyLimits.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { parseModel } from "./model.js";
@@ -544,8 +546,11 @@ export async function handleComboChat({
             const contentType = result.headers?.get?.("content-type") || "";
             if (contentType.includes("application/json")) {
               try {
-                const peekBody = await result.clone().json();
-                if (isZeroContentResponse(peekBody)) {
+                // A zero-content reply is tiny. Read a bounded prefix of the clone: a body past the
+                // cap clearly has content, so it is not parsed (and not buffered a second time).
+                const { text: peekText, truncated: peekTruncated } = await readTextPrefix(result.clone(), COMBO_PEEK_JSON_MAX_BYTES);
+                const peekBody = peekTruncated ? null : JSON.parse(peekText);
+                if (peekBody && isZeroContentResponse(peekBody)) {
                   log.warn("COMBO", `Model ${modelStr} returned HTTP 200 with zero usable content, falling back to next model`);
                   if (comboStrategy === "smart" && sessionId && modelStr === activeStickyModel) {
                     clearStickyComboSession(comboName, sessionId);
@@ -599,7 +604,9 @@ export async function handleComboChat({
       let errorText = result.statusText || "";
       let retryAfter = null;
       try {
-        const errorBody = await result.clone().json();
+        const { text: errorText0, truncated: errorTruncated } = await readTextPrefix(result.clone(), UPSTREAM_ERROR_READ_MAX_BYTES);
+        if (errorTruncated) throw new Error("error body too large to parse");
+        const errorBody = JSON.parse(errorText0);
         errorText = errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
         retryAfter = errorBody?.retryAfter || null;
       } catch {

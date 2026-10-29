@@ -14,6 +14,8 @@ import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
 import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 import { checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
+import { limitRequestBody, isBodyTooLarge, payloadTooLargeResponse } from "open-sse/utils/bodyLimit.js";
+import { getMaxUploadBodyBytes } from "open-sse/config/bodyLimits.js";
 
 // Providers requiring credentials for STT
 const CREDENTIALED_PROVIDERS = new Set(
@@ -42,8 +44,9 @@ async function resolveCustomModelTransport(provider, model) {
 export async function handleStt(request) {
   let formData;
   try {
-    formData = await request.formData();
-  } catch {
+    formData = await limitRequestBody(request, getMaxUploadBodyBytes(), "audio upload").formData();
+  } catch (err) {
+    if (isBodyTooLarge(err)) return payloadTooLargeResponse(err);
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid multipart form data");
   }
 

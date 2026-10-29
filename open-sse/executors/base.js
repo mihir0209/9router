@@ -2,6 +2,8 @@ import { HTTP_STATUS, DEFAULT_RETRY_CONFIG, resolveRetryEntry, FETCH_CONNECT_TIM
 import { shouldRefreshCredentials } from "../services/oauthCredentialManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { dbg } from "../utils/debugLog.js";
+import { readTextPrefix } from "../utils/bodyLimit.js";
+import { UPSTREAM_ERROR_READ_MAX_BYTES } from "../config/bodyLimits.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE } from "../providers/shared.js";
 import {
   resolveRetryPlugin,
@@ -226,7 +228,8 @@ export class BaseExecutor {
         // Plugin text rules: plain-text match on error body → same-account HTTP retry
         if (response.status >= 400) {
           let errBody = "";
-          try { errBody = await response.clone().text(); } catch { /* ignore */ }
+          // Bounded: a multi-MB error page is read for its first N KB only and the rest is cancelled.
+          try { errBody = (await readTextPrefix(response.clone(), UPSTREAM_ERROR_READ_MAX_BYTES)).text; } catch { /* ignore */ }
           // DEBUG: dump upstream error response when KIRO_DEBUG is set
           if (process.env.KIRO_DEBUG && this.provider === "kiro") {
             try {

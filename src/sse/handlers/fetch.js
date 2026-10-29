@@ -17,6 +17,8 @@ import { handleComboChat, getComboModelsFromData, createComboMemberResolver } fr
 import { assertPublicUrlResolved } from "@/shared/utils/ssrfGuard.js";
 import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
 import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
+import { readJsonLimited, isBodyTooLarge, payloadTooLargeResponse } from "open-sse/utils/bodyLimit.js";
+import { getMaxJsonBodyBytes } from "open-sse/config/bodyLimits.js";
 
 /**
  * Handle web fetch (URL extraction) request for the SSE/Next.js server.
@@ -27,8 +29,9 @@ import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/
 export async function handleFetch(request) {
   let body;
   try {
-    body = await request.json();
-  } catch {
+    body = await readJsonLimited(request, getMaxJsonBodyBytes());
+  } catch (err) {
+    if (isBodyTooLarge(err)) return payloadTooLargeResponse(err);
     log.warn("FETCH", "Invalid JSON body");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }

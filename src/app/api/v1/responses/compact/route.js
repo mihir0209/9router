@@ -1,3 +1,5 @@
+import { readJsonLimited, isBodyTooLarge, payloadTooLargeResponse } from "open-sse/utils/bodyLimit.js";
+import { getMaxJsonBodyBytes } from "open-sse/config/bodyLimits.js";
 import { handleChat } from "@/sse/handlers/chat.js";
 import { initTranslators } from "open-sse/translator/index.js";
 
@@ -26,7 +28,13 @@ export async function OPTIONS() {
  */
 export async function POST(request) {
   await ensureInitialized();
-  const body = await request.json();
+  let body;
+  try {
+    body = await readJsonLimited(request, getMaxJsonBodyBytes());
+  } catch (err) {
+    if (isBodyTooLarge(err)) return payloadTooLargeResponse(err);
+    throw err;
+  }
   body._compact = true;
   const newRequest = new Request(request.url, {
     method: "POST",

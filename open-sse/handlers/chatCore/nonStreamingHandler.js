@@ -13,6 +13,8 @@ import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
+import { readTextLimited, readJsonLimited, isBodyTooLarge } from "../../utils/bodyLimit.js";
+import { getMaxResponseBodyBytes } from "../../config/bodyLimits.js";
 
 /**
  * Convert an OpenAI Chat Completions non-streaming response body into the
@@ -240,7 +242,14 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   let responseBody;
 
   if (contentType.includes("text/event-stream")) {
-    const sseText = await providerResponse.text();
+    let sseText;
+    try {
+      sseText = await readTextLimited(providerResponse, getMaxResponseBodyBytes(), "upstream response");
+    } catch (err) {
+      if (!isBodyTooLarge(err)) throw err;
+      appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `${provider}: ${err.message}`);
+    }
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
@@ -249,9 +258,10 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     responseBody = parsed;
   } else {
     try {
-      responseBody = await providerResponse.json();
+      responseBody = await readJsonLimited(providerResponse, getMaxResponseBodyBytes(), "upstream response");
     } catch (err) {
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+      if (isBodyTooLarge(err)) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `${provider}: ${err.message}`);
       console.error(`[ChatCore] Failed to parse JSON from ${provider}:`, err.message);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Invalid JSON response from ${provider}`);
     }

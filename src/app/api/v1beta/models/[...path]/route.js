@@ -10,6 +10,8 @@ import { validateAndEnforceApiKey } from "@/sse/services/validateApiKey.js";
 import { getSettings } from "@/lib/localDb";
 import { PROVIDER_MODELS } from "@/shared/constants/models";
 import { GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
+import { readJsonLimited, isBodyTooLarge, payloadTooLargeResponse } from "open-sse/utils/bodyLimit.js";
+import { getMaxJsonBodyBytes } from "open-sse/config/bodyLimits.js";
 import { initTranslators } from "open-sse/translator/index.js";
 
 let initialized = false;
@@ -84,7 +86,13 @@ export async function POST(request, { params }) {
         .replace(":generateContent", "");
     }
 
-    const body = await request.json();
+    let body;
+    try {
+      body = await readJsonLimited(request, getMaxJsonBodyBytes());
+    } catch (err) {
+      if (isBodyTooLarge(err)) return payloadTooLargeResponse(err);
+      throw err;
+    }
 
     if (isGeminiNativeTtsRequest(model, body)) {
       return await forwardGeminiNativeRequest(request, body, model, action);

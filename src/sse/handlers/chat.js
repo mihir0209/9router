@@ -33,6 +33,8 @@ import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
 import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { resolveSmartChoice } from "../services/systemoneRouter.js";
+import { readJsonLimited, isBodyTooLarge, payloadTooLargeResponse } from "open-sse/utils/bodyLimit.js";
+import { getMaxJsonBodyBytes } from "open-sse/config/bodyLimits.js";
 
 /**
  * Handle chat completion request
@@ -56,8 +58,9 @@ async function getComboMemberResolver(requiredCapabilities, models) {
 export async function handleChat(request, clientRawRequest = null) {
   let body;
   try {
-    body = await request.json();
-  } catch {
+    body = await readJsonLimited(request, getMaxJsonBodyBytes());
+  } catch (err) {
+    if (isBodyTooLarge(err)) return payloadTooLargeResponse(err);
     log.warn("CHAT", "Invalid JSON body");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }

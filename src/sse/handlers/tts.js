@@ -13,6 +13,8 @@ import { handleComboChat } from "open-sse/services/combo.js";
 import * as log from "../utils/logger.js";
 import { guardApiKeyResponse } from "../services/apiKeyStreamGuard.js";
 import { credentialsErrorResponse, byokUpstreamErrorResponse } from "@/lib/auth/byokError.js";
+import { readJsonLimited, isBodyTooLarge, payloadTooLargeResponse } from "open-sse/utils/bodyLimit.js";
+import { getMaxJsonBodyBytes } from "open-sse/config/bodyLimits.js";
 
 // Derived from providers.js: any TTS provider not noAuth requires stored credentials
 const CREDENTIALED_PROVIDERS = new Set(
@@ -24,8 +26,9 @@ const CREDENTIALED_PROVIDERS = new Set(
 export async function handleTts(request) {
   let body;
   try {
-    body = await request.json();
-  } catch {
+    body = await readJsonLimited(request, getMaxJsonBodyBytes());
+  } catch (err) {
+    if (isBodyTooLarge(err)) return payloadTooLargeResponse(err);
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }
 

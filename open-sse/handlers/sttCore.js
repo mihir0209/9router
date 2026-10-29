@@ -47,11 +47,11 @@ async function transcribeDeepgram(cfg, file, model, token, formData) {
   if (typeof lang === "string" && lang.trim()) url.searchParams.set("language", lang.trim());
   else url.searchParams.set("detect_language", "true");
 
-  const buf = await file.arrayBuffer();
+  // The Blob is handed to fetch as is: no second in-memory copy of the audio.
   const res = await fetch(url, {
     method: "POST",
     headers: { ...buildAuthHeaders(cfg, token), "Content-Type": resolveAudioContentType(file) },
-    body: buf,
+    body: file,
   });
   if (!res.ok) return upstreamError(res);
   const data = await res.json();
@@ -62,9 +62,8 @@ async function transcribeDeepgram(cfg, file, model, token, formData) {
 // AssemblyAI: upload → submit → poll (max 120s)
 async function transcribeAssemblyAI(cfg, file, model, token) {
   const auth = buildAuthHeaders(cfg, token);
-  const buf = await file.arrayBuffer();
   const up = await fetch("https://api.assemblyai.com/v2/upload", {
-    method: "POST", headers: { ...auth, "Content-Type": "application/octet-stream" }, body: buf,
+    method: "POST", headers: { ...auth, "Content-Type": "application/octet-stream" }, body: file,
   });
   if (!up.ok) return upstreamError(up);
   const { upload_url } = await up.json();
@@ -216,11 +215,11 @@ function textResponse(body) {
 async function transcribeHuggingFace(cfg, file, model, token) {
   if (model.includes("..") || model.includes("//")) return createErrorResult(400, "Invalid model ID");
   const url = `${cfg.baseUrl.replace(/\/+$/, "")}/${model}`;
-  const buf = await file.arrayBuffer();
+  // The Blob is handed to fetch as is: no second in-memory copy of the audio.
   const res = await fetch(url, {
     method: "POST",
     headers: { ...buildAuthHeaders(cfg, token), "Content-Type": resolveAudioContentType(file) },
-    body: buf,
+    body: file,
   });
   if (!res.ok) return upstreamError(res);
   const data = await res.json();

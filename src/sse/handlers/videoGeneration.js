@@ -11,6 +11,8 @@ import { getModelInfo } from "../services/model.js";
 import { handleVideoProxyCore, getVideoConfig, sanitizeSecrets } from "open-sse/handlers/videoCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
+import { readTextLimited, readBytesLimited, isBodyTooLarge, payloadTooLargeResponse } from "open-sse/utils/bodyLimit.js";
+import { getMaxUploadBodyBytes, getMaxJsonBodyBytes } from "open-sse/config/bodyLimits.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 
 const NO_AUTH_VIDEO_PROVIDERS = new Set(["veoaifree-web"]);
@@ -75,7 +77,13 @@ function finishKeyResponse(response, keyCheck) {
 async function readForwardableBody(request) {
   const contentType = request.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
-    const raw = await request.text();
+    let raw;
+    try {
+      raw = await readTextLimited(request, getMaxJsonBodyBytes());
+    } catch (err) {
+      if (isBodyTooLarge(err)) return { error: payloadTooLargeResponse(err) };
+      throw err;
+    }
     let parsed;
     try {
       parsed = JSON.parse(raw);
@@ -86,7 +94,17 @@ async function readForwardableBody(request) {
   }
   // Multipart (or any other content type): forward the exact bytes — parsing
   // and re-encoding FormData would change the multipart boundary.
-  const buf = Buffer.from(await request.arrayBuffer());
+  let bytes;
+  try {
+    bytes = await readBytesLimited(request, getMaxUploadBodyBytes(), "video upload");
+  } catch (err) {
+    if (isBodyTooLarge(err)) return { error: payloadTooLargeResponse(err) };
+    throw err;
+  }
+  // Wrap the bytes without copying them (Buffer.from(Uint8Array) would copy).
+  const buf = bytes instanceof ArrayBuffer
+    ? Buffer.from(bytes)
+    : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   return { raw: buf, parsed: null, contentType };
 }
 
