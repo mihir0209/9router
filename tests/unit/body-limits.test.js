@@ -155,4 +155,26 @@ describe("handlers answer 413 before parsing", () => {
       expect((await handler(req)).status).toBe(413);
     }
   });
+
+  it("handleStt and handleVideoCreate enforce the upload limit", async () => {
+    vi.resetModules();
+    clear();
+    process.env.NINEROUTER_MAX_UPLOAD_MB = "1";
+    // The video handler checks the API key before it reads the body; let it through.
+    vi.doMock("../../src/sse/services/validateApiKey.js", () => ({
+      validateAndEnforceApiKey: async () => ({ allowed: true, keyRecord: null, release: () => {} }),
+    }));
+    const { handleStt } = await import("../../src/sse/handlers/stt.js");
+    const { handleVideoCreate } = await import("../../src/sse/handlers/videoGeneration.js");
+    const mk = (headers) => postStream(chunkedBody(["x"]), { "content-type": "multipart/form-data; boundary=zz", ...headers });
+    const declared = { "content-length": String(3 * 1024 * 1024) };
+    expect((await handleStt(mk(declared))).status).toBe(413);
+    expect((await handleVideoCreate(mk(declared), "generations")).status).toBe(413);
+    // chunked (no Content-Length): counted while reading
+    const chunk = "a".repeat(512 * 1024);
+    const chunked = () => postStream(chunkedBody(Array(6).fill(chunk)), { "content-type": "application/octet-stream" });
+    expect((await handleVideoCreate(chunked(), "generations")).status).toBe(413);
+    const sttChunked = postStream(chunkedBody(Array(6).fill(chunk)), { "content-type": "multipart/form-data; boundary=zz" });
+    expect((await handleStt(sttChunked)).status).toBe(413);
+  });
 });
