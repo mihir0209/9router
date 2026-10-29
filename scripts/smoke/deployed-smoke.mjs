@@ -29,6 +29,15 @@
 //   SMOKE_WORKER_NAME       script name for that header (default: first label of the host name)
 //   SMOKE_REPORT            write the JSON result (cases + latency samples) to this path
 //   SMOKE_KEEP_KEYS=1       do not delete the throwaway keys (debugging only)
+//   SMOKE_JWT_SECRET        the Worker's JWT_SECRET (JWT_SECRET in the env file is accepted too). Used ONLY when the password
+//                           login is missing or rejected: the script then signs its own short-lived `auth_token` session cookie
+//                           (HS256, the same claims the app issues), in memory, for this run. Never printed, never written.
+//                           Use it only against your own deployment.
+//   SMOKE_DASHBOARD_PASSWORD_2 / _3  further candidate passwords, tried (once each, 30 s apart) after the first is rejected
+//
+// Audit noise: every admin-API key create and delete writes one auditLog row (a full run creates about 7 keys, so about 14
+// rows) and the dashboard key CRUD case adds a few. There is no supported API to prune auditLog.
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,7 +63,6 @@ const pick = (...names) => {
 
 const BASE = pick("SMOKE_BASE_URL").replace(/\/+$/, "");
 const ADMIN_TOKEN = pick("SMOKE_ADMIN_TOKEN", "ADMIN_API_TOKEN");
-const PASSWORD = pick("SMOKE_DASHBOARD_PASSWORD");
 const GIVEN_KEY = pick("SMOKE_API_KEY");
 const CRON_SECRET = pick("SMOKE_CRON_SECRET");
 const CHAT_MODEL = pick("SMOKE_CHAT_MODEL") || "cf/@cf/meta/llama-3.2-1b-instruct";
@@ -70,6 +78,8 @@ const OVERSIZE = pick("SMOKE_OVERSIZE") === "1";
 const KEEP_KEYS = pick("SMOKE_KEEP_KEYS") === "1";
 const REPORT = pick("SMOKE_REPORT");
 const VERSION_OVERRIDE = pick("SMOKE_VERSION_OVERRIDE");
+const PASSWORDS = [pick("SMOKE_DASHBOARD_PASSWORD"), pick("SMOKE_DASHBOARD_PASSWORD_2"), pick("SMOKE_DASHBOARD_PASSWORD_3")].filter(Boolean);
+const JWT_SECRET = process.env.SMOKE_JWT_SECRET || fileEnv.SMOKE_JWT_SECRET || fileEnv.JWT_SECRET || "";
 const WORKER_NAME = pick("SMOKE_WORKER_NAME") || new URL(BASE || "http://x").hostname.split(".")[0];
 const baseHeaders = VERSION_OVERRIDE ? { "cloudflare-workers-version-overrides": `${WORKER_NAME}="${VERSION_OVERRIDE}"` } : {};
 const OWNER = "smoke-test";
@@ -81,13 +91,14 @@ if (!/^https?:\/\//.test(BASE)) {
 }
 
 // ---------- output helpers ----------
-const secrets = new Set([ADMIN_TOKEN, PASSWORD, GIVEN_KEY, CRON_SECRET].filter((s) => s && s.length >= 6));
+const secrets = new Set([ADMIN_TOKEN, ...PASSWORDS, JWT_SECRET, GIVEN_KEY, CRON_SECRET].filter((s) => s && s.length >= 6));
 const createdKeySecrets = new Set();
 function redact(text) {
   let out = String(text);
-  for (const s of [...secrets, ...createdKeySecrets]) out = out.split(s).join("<redacted>");
-  return out.replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<redacted>").replace(/Bearer\s+[A-Za-z0-9._-]{16,}/g, "Bearer <redacted>");
+  for (const s of [...secrets, ...createdKeySecrets, ...sessionSecrets]) out = out.split(s).join("<redacted>");
+  return out.replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "<jwt-redacted>").replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<redacted>").replace(/Bearer\s+[A-Za-z0-9._-]{16,}/g, "Bearer <redacted>");
 }
+const sessionSecrets = new Set();
 const log = (...a) => console.log(redact(a.join(" ")));
 
 const cases = [];
@@ -262,23 +273,61 @@ async function publicCases() {
   }
 }
 
+// Session cookie signed like src/lib/auth/dashboardSession.js: HS256 JWT {authenticated:true, iat, exp}, cookie `auth_token`.
+function mintSessionCookie(secret) {
+  const b64 = (o) => Buffer.from(typeof o === "string" ? o : JSON.stringify(o)).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const head = b64({ alg: "HS256" });
+  const body = b64({ authenticated: true, iat: now, exp: now + 3600 });
+  const sig = crypto.createHmac("sha256", secret).update(`${head}.${body}`).digest("base64url");
+  const token = `${head}.${body}.${sig}`;
+  sessionSecrets.add(token);
+  return `auth_token=${token}`;
+}
+
+let dashCookie = "";          // session used by the dashboard cases
+let dashAuthMethod = "none";  // "password" | "jwt-cookie" | "none"
+const dashKeyIds = [];        // keys created through the dashboard API, removed in cleanup
+const dashApi = (label, p, init = {}) => http(label, p, { ...init, headers: { cookie: dashCookie, ...(init.headers || {}) } });
+
 async function dashboardCases() {
-  if (!PASSWORD) {
-    for (const [id, name] of [["D1", "dashboard login"], ["D2", "dashboard pages behind login"], ["D3", "logout"]]) record(id, name, "skip", "SMOKE_DASHBOARD_PASSWORD not provided");
+  if (!PASSWORDS.length && !JWT_SECRET) {
+    for (const [id, name] of [["D1", "dashboard login"], ["D2", "dashboard pages behind login"], ["D3", "logout"]]) record(id, name, "skip", "no dashboard password and no JWT secret provided");
     return;
   }
   let cookie = "";
-  await check("D1", "POST /api/auth/login with the password sets a session", async () => {
-    const r = await http("login", "/api/auth/login", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ password: PASSWORD }) });
-    expect(r.res.status === 200, `status ${r.res.status} ${r.text.slice(0, 100)}`);
-    cookie = (r.res.headers.getSetCookie?.() || []).map((c) => c.split(";")[0]).join("; ");
-    expect(cookie, "no Set-Cookie");
+  let loginDetail = "";
+  let attempted = 0;
+  let sessionOk = false;
+  for (const candidate of PASSWORDS) {
+    if (attempted > 0) await sleep(31000); // never hammer the login limiter
+    attempted++;
+    const r = await http("login", "/api/auth/login", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ password: candidate }) });
+    if (r.res.status === 200) {
+      cookie = (r.res.headers.getSetCookie?.() || []).map((c) => c.split(";")[0]).join("; ");
+      if (cookie) { dashAuthMethod = "password"; loginDetail = `password #${attempted} accepted`; break; }
+    }
+    loginDetail = `password #${attempted} rejected (HTTP ${r.res.status})`;
+    if (r.res.status === 429) break; // locked out: stop immediately
+  }
+  if (!cookie && JWT_SECRET) {
+    cookie = mintSessionCookie(JWT_SECRET);
+    dashAuthMethod = "jwt-cookie";
+    loginDetail = `${loginDetail ? loginDetail + "; " : ""}fell back to a locally signed session cookie (Worker JWT secret)`;
+  }
+  await check("D1", "dashboard authentication (password login, else signed session cookie)", async () => {
+    expect(cookie, `no session: ${loginDetail || "no credentials"}`);
+    // The cookie must actually be accepted by the Worker, otherwise the secret is not the Worker's.
+    const probe = await http("session-probe", "/api/keys", { headers: { cookie } });
+    sessionOk = probe.res.status === 200;
+    expect(probe.res.status === 200, `session rejected by the Worker: GET /api/keys -> ${probe.res.status} (${loginDetail})`);
+    return { detail: `method=${dashAuthMethod}; ${loginDetail}` };
   });
-  if (!cookie) {
-    record("D2", "dashboard pages behind login", "skip", "no session");
-    record("D3", "logout", "skip", "no session");
+  if (!sessionOk) {
+    for (const id of ["D2", "D3", "D4", "D5", "D6", "D7"]) record(id, "dashboard case", "skip", "no valid session");
     return;
   }
+  dashCookie = cookie;
   await check("D2", "dashboard pages return 200 behind login", async () => {
     const bad = [];
     for (const p of ["/dashboard", "/dashboard/endpoint", "/dashboard/providers", "/dashboard/usage", "/dashboard/profile"]) {
@@ -292,9 +341,71 @@ async function dashboardCases() {
     }
     expect(!bad.length, bad.join(", "));
   });
-  await check("D3", "logout invalidates the session", async () => {
+  await check("D4", "dashboard APIs behind login: /api/keys, /api/providers, /api/usage/*", async () => {
+    const keys = await dashApi("dash-api:keys", "/api/keys");
+    expect(keys.res.status === 200, `/api/keys ${keys.res.status}`);
+    const providers = await dashApi("dash-api:providers", "/api/providers");
+    expect(providers.res.status === 200, `/api/providers ${providers.res.status}`);
+    const chart = await dashApi("dash-api:usage-chart", "/api/usage/chart?period=7d");
+    expect(chart.res.status === 200, `/api/usage/chart ${chart.res.status}`);
+    const usageKeys = await dashApi("dash-api:usage-keys", "/api/usage/api-keys?period=7d");
+    expect(usageKeys.res.status === 200, `/api/usage/api-keys ${usageKeys.res.status}`);
+    const conns = (providers.json()?.connections || []).map((c) => `${c.provider}/${c.name || c.id}:${c.testStatus || "?"}`);
+    return { detail: `${(keys.json()?.keys || []).length} key(s); connections (names and test status only): ${conns.join(", ") || "none"}` };
+  });
+  await check("D5", "POST /api/keys: mismatched forceProvider/forceModel pair is 400, bare pin vs prefixed blocked entry is 400", async () => {
+    const mismatch = await dashApi("dash-keys:post-mismatch", "/api/keys", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ name: `smoke-test-DELETE-ME-${STAMP}-mismatch`, forceProvider: OTHER_PROVIDER, forceModel: CHAT_MODEL }) });
+    if (mismatch.res.status === 201) { const j = mismatch.json(); if (j?.id) dashKeyIds.push(j.id); }
+    expect(mismatch.res.status === 400, `mismatched pair: status ${mismatch.res.status} ${mismatch.text.slice(0, 120)}`);
+    const bare = await dashApi("dash-keys:post-blocked", "/api/keys", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ name: `smoke-test-DELETE-ME-${STAMP}-blocked`, forceModel: MODEL_LEAF, blockedModels: [CHAT_MODEL] }) });
+    if (bare.res.status === 201) { const j = bare.json(); if (j?.id) dashKeyIds.push(j.id); }
+    expect(bare.res.status === 400, `bare pin covered by prefixed blocked entry: status ${bare.res.status} ${bare.text.slice(0, 120)}`);
+    return { detail: `mismatch -> 400 "${String(mismatch.json()?.error || "").slice(0, 90)}"` };
+  });
+  await check("D6", "dashboard key CRUD: create, PUT mismatch is 400, PUT valid is 200, listed, deleted", async () => {
+    const chatProvider = CHAT_MODEL.slice(0, CHAT_MODEL.indexOf("/"));
+    const created = await dashApi("dash-keys:create", "/api/keys", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ name: `smoke-test-DELETE-ME-${STAMP}-dash`, forceProvider: chatProvider, forceModel: CHAT_MODEL }) });
+    expect(created.res.status === 201, `create ${created.res.status} ${created.text.slice(0, 120)}`);
+    const id = created.json()?.id;
+    expect(id, "no id in create response");
+    dashKeyIds.push(id);
+    createdKeySecrets.add(created.json()?.key);
+    const badPut = await dashApi("dash-keys:put-mismatch", `/api/keys/${encodeURIComponent(id)}`, { method: "PUT", headers: jsonHeaders(), body: JSON.stringify({ forceProvider: OTHER_PROVIDER }) });
+    expect(badPut.res.status === 400, `PUT mismatched pair: status ${badPut.res.status} ${badPut.text.slice(0, 120)}`);
+    const okPut = await dashApi("dash-keys:put", `/api/keys/${encodeURIComponent(id)}`, { method: "PUT", headers: jsonHeaders(), body: JSON.stringify({ description: "smoke test" }) });
+    expect(okPut.res.status === 200, `PUT valid: status ${okPut.res.status} ${okPut.text.slice(0, 120)}`);
+    const list = await dashApi("dash-keys:list", "/api/keys");
+    expect((list.json()?.keys || []).some((k) => k.id === id), "created key is not listed");
+    const del = await dashApi("dash-keys:delete", `/api/keys/${encodeURIComponent(id)}`, { method: "DELETE" });
+    expect([200, 204].includes(del.res.status), `DELETE status ${del.res.status}`);
+    dashKeyIds.splice(dashKeyIds.indexOf(id), 1);
+    const after = await dashApi("dash-keys:list", "/api/keys");
+    expect(!(after.json()?.keys || []).some((k) => k.id === id), "deleted key is still listed");
+  });
+  await check("D3", "logout clears the session cookie", async () => {
     const r = await http("logout", "/api/auth/logout", { method: "POST", headers: { cookie } });
     expect(r.res.status === 200, `status ${r.res.status}`);
+  });
+}
+
+// Analytics flush: force the buffer to D1 through the cron route and read the usage endpoints back.
+async function analyticsFlushCase() {
+  await check("A1", "POST /api/cron/flush flushes the analytics buffer; usage endpoints answer afterwards", async () => {
+    const headers = CRON_SECRET ? bearer(CRON_SECRET) : {};
+    const r = await http("cron-flush", "/api/cron/flush", { method: "POST", headers });
+    expect(r.res.status === 200, `status ${r.res.status} ${r.text.slice(0, 100)}`);
+    const j = r.json();
+    expect(j?.ok === true, `body ${r.text.slice(0, 120)}`);
+    let usage = "usage endpoints not read (no dashboard session)";
+    if (dashCookie) {
+      const chart = await dashApi("dash-api:usage-chart", "/api/usage/chart?period=today");
+      expect(chart.res.status === 200, `usage chart ${chart.res.status}`);
+      const keysUsage = await dashApi("dash-api:usage-keys", "/api/usage/api-keys?period=today");
+      expect(keysUsage.res.status === 200, `usage api-keys ${keysUsage.res.status}`);
+      const points = Array.isArray(chart.json()) ? chart.json() : (chart.json()?.data || chart.json()?.chart || []);
+      usage = `chart(today) ${Array.isArray(points) ? points.length : "?"} point(s)`;
+    }
+    return { detail: `buffering=${j.buffering} analytics before=${j.analytics?.before} after=${j.analytics?.after}; ${usage}` };
   });
 }
 
@@ -465,6 +576,15 @@ async function soak() {
 }
 
 async function cleanup() {
+  if (dashCookie && dashKeyIds.length && !KEEP_KEYS) {
+    for (const id of dashKeyIds.splice(0)) {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const r = await dashApi("dash-keys:delete", `/api/keys/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => null);
+        if (r && [200, 204, 404].includes(r.res.status)) break;
+        await sleep(2000 * (attempt + 1));
+      }
+    }
+  }
   if (!createdKeys.length) return;
   if (KEEP_KEYS) { record("X1", "throwaway keys deleted", "skip", "SMOKE_KEEP_KEYS=1"); return; }
   await check("X1", "throwaway keys deleted and gone from the key list", async () => {
@@ -497,11 +617,12 @@ async function cleanup() {
 }
 
 // ---------- main ----------
-log(`smoke target ${BASE}${VERSION_OVERRIDE ? "  version override " + VERSION_OVERRIDE.slice(0, 8) : ""}  (admin token: ${ADMIN_TOKEN ? "set" : "no"}, dashboard password: ${PASSWORD ? "set" : "no"}, api key: ${GIVEN_KEY ? "given" : "throwaway"})`);
+log(`smoke target ${BASE}${VERSION_OVERRIDE ? "  version override " + VERSION_OVERRIDE.slice(0, 8) : ""}  (admin token: ${ADMIN_TOKEN ? "set" : "no"}, dashboard password: ${PASSWORDS.length ? PASSWORDS.length + " candidate(s)" : "no"}, jwt secret: ${JWT_SECRET ? "set" : "no"}, api key: ${GIVEN_KEY ? "given" : "throwaway"})`);
 try {
   await publicCases();
   await dashboardCases();
   await gatewayCases();
+  await analyticsFlushCase();
   await soak();
 } finally {
   await cleanup();
