@@ -1,4 +1,5 @@
 import { getApiKeyByKey } from "@/lib/localDb";
+import { createFlightGroup } from "open-sse/utils/flight.js";
 
 // Auth and response policy for the /v1/models family.
 //
@@ -124,18 +125,17 @@ export function unauthorizedModelsResponse(error, status) {
  * Keyed by `cacheId` so a restricted caller's build is never handed to an
  * unrestricted caller, or the reverse.
  */
-const inflight = new Map();
+// The in-flight entry is shared through a request-safe flight group
+// (open-sse/utils/flight.js), not a bare Map<key, Promise>. On Cloudflare Workers a
+// promise started by one request never settles if that request is cancelled or
+// CPU-killed, and a follower awaiting it (with the entry never cleared) hangs for
+// minutes. A follower now waits at most 2 s on a timer of its own and
+// then builds the list itself (NINEROUTER_FLIGHT_WAIT_MS overrides the wait).
+const flights = createFlightGroup({ followerWaitMs: 2000, staleMs: 15000 });
 
 export async function coalesceModelsBuild(cacheId, build) {
-  const existing = inflight.get(cacheId);
-  if (existing) return { value: await existing, coalesced: true };
-  const pending = (async () => build())();
-  inflight.set(cacheId, pending);
-  try {
-    return { value: await pending, coalesced: false };
-  } finally {
-    if (inflight.get(cacheId) === pending) inflight.delete(cacheId);
-  }
+  const { value, shared } = await flights.run(cacheId, () => build());
+  return { value, coalesced: shared };
 }
 
 // ── hash-gated catalogue ──────────────────────────────────────────────────────
@@ -183,38 +183,42 @@ function etagOf(fingerprint) {
 export async function withCatalog({ request, cacheKey, resolve, project }) {
   // The read and the projection are shared: concurrent callers for the same
   // identity do one of each. Coalescing only the projection would still leave
-  // every caller re-reading the database, which is most of the work.
-  let pending = inflight.get(cacheKey);
-  if (!pending) {
-    pending = (async () => {
-      const { inputs, fingerprint } = await resolve();
-      const etag = etagOf(fingerprint);
-      const slot = catalogSlot(cacheKey);
-      if (slot.etag === fingerprint && Date.now() - slot.ts < CATALOG_TTL_MS && slot.body) {
-        return { body: slot.body, etag, source: "hash" };
-      }
-      const body = await project(inputs);
-      slot.etag = fingerprint;
-      slot.body = body;
-      slot.ts = Date.now();
-      return { body, etag, source: "project" };
-    })();
-    inflight.set(cacheKey, pending);
-    // Detach the cleanup from the returned promise so a rejected build does not
-    // surface as an unhandled rejection, while still clearing the slot.
-    pending.then(clear, clear);
-    function clear() {
-      if (inflight.get(cacheKey) === pending) inflight.delete(cacheKey);
+  // every caller re-reading the database, which is most of the work. Followers
+  // never wait unboundedly on another request's work (see flights above).
+  const { value: result } = await flights.run(cacheKey, async () => {
+    const { inputs, fingerprint } = await resolve();
+    const etag = etagOf(fingerprint);
+    const slot = catalogSlot(cacheKey);
+    if (slot.etag === fingerprint && Date.now() - slot.ts < CATALOG_TTL_MS && slot.body) {
+      return { body: slot.body, etag, source: "hash" };
     }
-  }
-
-  const result = await pending;
+    const body = await project(inputs);
+    slot.etag = fingerprint;
+    slot.body = body;
+    slot.ts = Date.now();
+    return { body, etag, source: "project" };
+  });
 
   // Whether to answer 304 is per-request: two callers can share a build and only
   // one of them hold the body.
-  const inm = request?.headers?.get("if-none-match");
-  if (inm && inm.split(",").some((tag) => tag.trim() === result.etag)) {
+  if (ifNoneMatchSatisfied(request?.headers?.get("if-none-match"), result.etag)) {
     return { body: "", etag: result.etag, notModified: true, source: "not-modified" };
   }
   return { ...result, notModified: false };
+}
+
+/**
+ * RFC 9110 section 13.1.2: If-None-Match uses the WEAK comparison. Cloudflare's edge
+ * rewrites a strong ETag to W/"..." when it compresses the body, so a client echoing
+ * what it received sends the weak form. Handles `*`, comma-separated lists and the
+ * W/ prefix on either side.
+ */
+export function ifNoneMatchSatisfied(header, etag) {
+  if (!header || !etag) return false;
+  const value = String(header).trim();
+  if (value === "*") return true;
+  const opaque = (tag) => String(tag).trim().replace(/^W\//i, "");
+  const target = opaque(etag);
+  const tags = value.match(/(?:W\/)?"[^"]*"/gi) || value.split(",");
+  return tags.some((tag) => opaque(tag) === target);
 }

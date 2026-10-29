@@ -4,11 +4,11 @@ import {
   refreshTokenByProvider,
 } from "./tokenRefresh.js";
 import { PROVIDER_OAUTH } from "../providers/index.js";
+import { createFlightGroup } from "../utils/flight.js";
 
 // Single source: codex.oauth.maxRefreshAgeMs (8 days) — proactive refresh window
 export const CODEX_MAX_REFRESH_AGE_MS = PROVIDER_OAUTH["codex"]?.maxRefreshAgeMs;
 
-const refreshLocks = new Map();
 
 function parseTimeMs(value) {
   if (value === undefined || value === null || value === "") return null;
@@ -131,19 +131,15 @@ function getRefreshLockKey(provider, credentials) {
   return `${provider}:${stableId}`;
 }
 
+// Refresh tokens can be single-use, so a follower waits longer than other shared work before it
+// gives up on the leader and refreshes itself. The wait is still bounded, on the follower's own
+// timer, because a refresh started by a cancelled Workers request never settles.
+const refreshFlights = createFlightGroup({ followerWaitMs: 15000, staleMs: 30000 });
+
 export async function withCredentialRefreshLock(provider, credentials, refreshFn) {
   const key = getRefreshLockKey(provider, credentials);
-  const existing = refreshLocks.get(key);
-  if (existing) return existing;
-
-  const pending = Promise.resolve()
-    .then(refreshFn)
-    .finally(() => {
-      refreshLocks.delete(key);
-    });
-
-  refreshLocks.set(key, pending);
-  return pending;
+  const { value } = await refreshFlights.run(key, refreshFn);
+  return value;
 }
 
 export async function refreshProviderCredentials(provider, credentials, log) {

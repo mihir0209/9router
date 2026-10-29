@@ -14,6 +14,7 @@
  */
 
 import { isExtremeProfile, extremeTunables } from "@/lib/db/writeProfile.js";
+import { createFlightGroup } from "open-sse/utils/flight.js";
 
 const POLL_INTERVAL_MS = 2_000;
 const SCOPE = "control";
@@ -28,6 +29,12 @@ export function pollIntervalMs() {
 }
 
 const domains = new Map();
+
+// Concurrent callers share one coordinator call only through a request-safe flight:
+// a promise owned by a cancelled Workers request never settles, and the old shared
+// `pending` entry then hung every authenticated request of the isolate.
+// The wait is bounded by a timer the FOLLOWER owns (open-sse/utils/flight.js).
+const flights = createFlightGroup({ followerWaitMs: 2000, staleMs: 10000 });
 
 function isCloudflare() {
   return process.env.NINEROUTER_RUNTIME === "cloudflare";
@@ -50,13 +57,12 @@ export async function bumpControlVersion(domain) {
 /**
  * Current version for `domain`, or the last known version when the coordinator
  * is unreachable. Throttled to one Durable Object call per domain per interval;
- * concurrent callers share the in-flight request instead of stampeding.
+ * concurrent callers share the in-flight request (bounded, request-safe) instead of stampeding.
  */
 export async function getControlVersion(domain) {
   if (!isCloudflare()) return null;
 
   const entry = domains.get(domain);
-  if (entry?.pending) return await entry.pending;
   if (entry && Date.now() - entry.ts < pollIntervalMs()) return entry.version;
 
   // Extreme profile: refresh every known domain with ONE coordinator call
@@ -65,26 +71,25 @@ export async function getControlVersion(domain) {
   if (isExtremeProfile()) return await pollDomains(domain);
 
   const known = entry?.version ?? null;
-  const pending = coordinatorCall("getVersion", { domain })
-    .then((result) => {
+  const { value } = await flights.run(`v:${domain}`, async () => {
+    try {
+      const result = await coordinatorCall("getVersion", { domain });
       const version = result?.version ?? null;
       domains.set(domain, { version, ts: Date.now() });
       return version;
-    })
-    .catch(() => {
+    } catch {
       // Keep serving the cached value and retry on the next interval.
       domains.set(domain, { version: known, ts: Date.now() });
       return known;
-    });
-
-  domains.set(domain, { version: known, ts: entry?.ts ?? 0, pending });
-  return await pending;
+    }
+  });
+  return value;
 }
 
 async function pollDomains(requested) {
   const names = [...new Set([...domains.keys(), requested])];
   const known = new Map(names.map((name) => [name, domains.get(name)?.version ?? null]));
-  const pending = (async () => {
+  const { value } = await flights.run(`poll:${requested}`, async () => {
     try {
       const result = await coordinatorCall("getVersions", { domains: names });
       const versions = result?.versions || {};
@@ -98,12 +103,8 @@ async function pollDomains(requested) {
       }
     }
     return domains.get(requested)?.version ?? null;
-  })();
-  for (const name of names) {
-    const entry = domains.get(name);
-    domains.set(name, { version: known.get(name), ts: entry?.ts ?? 0, pending });
-  }
-  return await pending;
+  });
+  return value;
 }
 
-export const __test__ = { POLL_INTERVAL_MS, pollIntervalMs, reset: () => domains.clear() };
+export const __test__ = { POLL_INTERVAL_MS, pollIntervalMs, reset: () => { domains.clear(); flights.clear(); } };

@@ -1,3 +1,4 @@
+import { createFlightGroup } from "../../../open-sse/utils/flight.js";
 // Cloudflare Workers cannot bundle native/local SQLite adapters.
 // This keeps Worker builds on an ephemeral JS adapter until D1 support is added.
 if (!global._dbAdapter) global._dbAdapter = { instance: null, initPromise: null, logged: false };
@@ -13,10 +14,21 @@ async function initAdapter() {
   return adapter;
 }
 
+// Adapter creation is shared between concurrent callers only through a request-safe
+// flight (open-sse/utils/flight.js): on Workers a plain shared promise hangs every later
+// request of the isolate when the request that started it is cancelled or CPU-killed.
+// A failed or abandoned init is retried by the next caller instead of being cached forever.
+const initFlights = createFlightGroup({ followerWaitMs: 5000, staleMs: 30000 });
+
 export async function getAdapter() {
   if (state.instance) return state.instance;
-  if (!state.initPromise) state.initPromise = initAdapter().then((a) => { state.instance = a; return a; });
-  return state.initPromise;
+  const { value } = await initFlights.run("adapter", async () => {
+    if (state.instance) return state.instance;
+    const adapter = await initAdapter();
+    if (!state.instance) state.instance = adapter;
+    return state.instance;
+  });
+  return value;
 }
 
 export function getAdapterSync() {

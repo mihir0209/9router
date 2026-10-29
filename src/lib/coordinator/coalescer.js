@@ -18,12 +18,18 @@
 //     exposure the analytics buffer already has). They feed adaptive scoring
 //     and observability only, never enforcement.
 //
+import { createFlightGroup, withOwnTimeout } from "../../../open-sse/utils/flight.js";
+
 // The module is runtime-agnostic: `call(method, payload, scope)` is injected,
 // and `waitUntil` is optional.
 
+const FLUSH_STALE_MS = 15_000;
+const FLUSH_JOIN_MS = 3_000;
+
 export function createCoalescer({ call, now = () => Date.now(), tunables, waitUntil = null, onError = () => {} }) {
   const cache = new Map(); // key -> { value, expires, scope }
-  const inflight = new Map();
+  const reads = createFlightGroup({ followerWaitMs: 1500, staleMs: 8000 });
+  let flushingSince = 0;
   const CACHE_CAP = 1000;
 
   // pending aggregates
@@ -44,17 +50,15 @@ export function createCoalescer({ call, now = () => Date.now(), tunables, waitUn
     const hit = cache.get(key);
     const t = now();
     if (hit && hit.expires > t) return hit.value;
-    if (inflight.has(key)) return inflight.get(key);
-    const promise = Promise.resolve()
-      .then(loader)
-      .then((value) => {
-        if (cache.size >= CACHE_CAP) cache.delete(cache.keys().next().value);
-        cache.set(key, { value, expires: now() + ttl, scope });
-        return value;
-      })
-      .finally(() => inflight.delete(key));
-    inflight.set(key, promise);
-    return promise;
+    // Request-safe sharing: a follower waits on a timer of its own, then loads itself
+    // (a read started by a cancelled Workers request never settles).
+    const { value } = await reads.run(key, async () => {
+      const loaded = await loader();
+      if (cache.size >= CACHE_CAP) cache.delete(cache.keys().next().value);
+      cache.set(key, { value: loaded, expires: now() + ttl, scope });
+      return loaded;
+    });
+    return value;
   }
 
   /** Drop cached reads for a coordinator scope (after this isolate changed that state). */
@@ -122,7 +126,10 @@ export function createCoalescer({ call, now = () => Date.now(), tunables, waitUn
 
   /** Send everything pending. Safe to call concurrently; failures requeue nothing (best effort). */
   async function flush() {
-    if (flushing) return flushing;
+    if (flushing && now() - flushingSince < FLUSH_STALE_MS) {
+      // A flush started by a cancelled request never settles; do not wait on it forever.
+      try { return await withOwnTimeout(flushing, FLUSH_JOIN_MS, "coordinator flush"); } catch { return { sent: 0, joined: false }; }
+    }
     if (timer) { clearTimeout(timer); timer = null; }
     if (!outcomes.size && !metrics.size) { pendingEvents = 0; firstEventAt = null; return { sent: 0 }; }
     const outcomeItems = [...outcomes.values()];
@@ -133,7 +140,8 @@ export function createCoalescer({ call, now = () => Date.now(), tunables, waitUn
     pendingEvents = 0;
     firstEventAt = null;
 
-    flushing = (async () => {
+    flushingSince = now();
+    const current = (async () => {
       const byProvider = new Map();
       for (const item of outcomeItems) {
         if (!byProvider.has(item.provider)) byProvider.set(item.provider, []);
@@ -147,8 +155,9 @@ export function createCoalescer({ call, now = () => Date.now(), tunables, waitUn
       const results = await Promise.allSettled(calls);
       for (const r of results) if (r.status === "rejected") onError(r.reason);
       return { sent: sentEvents, rpcs: calls.length };
-    })().finally(() => { flushing = null; });
-    return flushing;
+    })().finally(() => { if (flushing === current) flushing = null; });
+    flushing = current;
+    return current;
   }
 
   return {

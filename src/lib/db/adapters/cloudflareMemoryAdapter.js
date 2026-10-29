@@ -14,9 +14,37 @@ import {
   createInMemoryOps,
 } from "./memoryEngine.js";
 import { TABLES } from "../schema.js";
+import { createFlightGroup, withOwnTimeout } from "../../../../open-sse/utils/flight.js";
 
 const D1_TABLE = "ninerouter_rows";
 
+
+// Every D1 call is bounded. A D1 query that never answers (or whose request was cancelled)
+// must not hold a request for minutes: the timer is armed by the caller, in its own request
+// context. Auth and enforcement paths treat the rejection as fail-closed (they already do for
+// any D1 error); writes warn and are retried by the next flush.
+const D1_TIMEOUT_MS = () => {
+  const n = Number(process.env.NINEROUTER_D1_TIMEOUT_MS);
+  return Number.isFinite(n) && n >= 0 ? n : 8000;
+};
+
+export function guardD1(raw, getMs = D1_TIMEOUT_MS) {
+  if (!raw) return raw;
+  const unwrap = (stmt) => (stmt && stmt.__raw ? stmt.__raw : stmt);
+  const wrapStmt = (stmt) => ({
+    __raw: stmt,
+    bind: (...args) => wrapStmt(stmt.bind(...args)),
+    all: (...args) => withOwnTimeout(stmt.all(...args), getMs(), "D1 query"),
+    run: (...args) => withOwnTimeout(stmt.run(...args), getMs(), "D1 query"),
+    first: (...args) => withOwnTimeout(stmt.first(...args), getMs(), "D1 query"),
+    raw: (...args) => withOwnTimeout(stmt.raw(...args), getMs(), "D1 query"),
+  });
+  return {
+    prepare: (sql) => wrapStmt(raw.prepare(sql)),
+    batch: (stmts) => withOwnTimeout(raw.batch((stmts || []).map(unwrap)), getMs(), "D1 batch"),
+    exec: (sql) => withOwnTimeout(raw.exec(sql), getMs(), "D1 exec"),
+  };
+}
 
 async function getD1Context() {
   try {
@@ -31,7 +59,21 @@ async function getD1Context() {
 export async function createCloudflareMemoryAdapter() {
   const state = createState();
   const context = await getD1Context();
-  const d1 = context?.env?.DB || null;
+  const d1 = guardD1(context?.env?.DB || null);
+  // waitUntil of the CURRENT request. The context captured at boot belongs to the request that
+  // happened to create the adapter; once that request has finished, its waitUntil no longer
+  // keeps later writes alive.
+  let cfModule = null;
+  try { cfModule = await import("@opennextjs/cloudflare"); } catch { /* not on Workers */ }
+  function keepAlive(task) {
+    try {
+      const current = cfModule?.getCloudflareContext?.();
+      if (current?.ctx?.waitUntil) { current.ctx.waitUntil(task); return; }
+    } catch { /* outside a request: fall back to the boot context */ }
+    try { context?.ctx?.waitUntil?.(task); } catch { /* best effort */ }
+  }
+  // Loads shared between concurrent requests are request-safe flights (see open-sse/utils/flight.js).
+  const loadFlights = createFlightGroup({ followerWaitMs: 3000, staleMs: 20000 });
   // Row-level dirty tracking inside transactions: table -> Map(rowKey, "upsert"|"delete").
   // Commit persists ONLY touched rows. Previously every transaction rewrote each
   // touched table wholesale (DELETE all + re-INSERT all), so a kv model sync
@@ -85,18 +127,28 @@ export async function createCloudflareMemoryAdapter() {
     for (const row of rows) if (!known.has(primaryKeyFor(table, row))) resident.push(row);
   }
 
-  /** Load a lazy table from D1 once, on first touch. Safe to call concurrently. */
+  /**
+   * Load a lazy table from D1 once, on first touch. Safe to call concurrently.
+   * A table counts as loaded only after its rows are resident (it used to be marked before the
+   * await, so a concurrent request proceeded on an empty table). Concurrent callers share one load
+   * through a flight and never wait on it unboundedly.
+   */
   async function ensureTables(names) {
     if (!d1) return;
     const wanted = (Array.isArray(names) ? names : [names]).filter((n) => LAZY_TABLES.has(n) && !loadedTables.has(n));
     if (!wanted.length || ops?.inTransaction()) return;
-    // Mark before awaiting so a concurrent caller cannot double-load.
-    for (const table of wanted) loadedTables.add(table);
     try {
-      const fresh = await fetchTablesFromD1(wanted);
-      for (const table of wanted) mergeFetched(table, fresh[table] || []);
+      await loadFlights.run(`tables:${[...wanted].sort().join(",")}`, async () => {
+        const todo = wanted.filter((table) => !loadedTables.has(table));
+        if (!todo.length) return;
+        const fresh = await fetchTablesFromD1(todo);
+        for (const table of todo) {
+          if (loadedTables.has(table)) continue;
+          mergeFetched(table, fresh[table] || []);
+          loadedTables.add(table);
+        }
+      });
     } catch (error) {
-      for (const table of wanted) loadedTables.delete(table);
       console.warn(`[DB] lazy load failed for ${wanted.join(",")}: ${error.message}`);
     }
   }
@@ -107,16 +159,17 @@ export async function createCloudflareMemoryAdapter() {
     if (!d1 || !LAZY_TABLES.has(table) || loadedTables.has(table) || ops?.inTransaction()) return;
     const id = `${table}\u0000${rowKey}`;
     if (loadedRows.has(id)) return;
-    loadedRows.add(id);
     try {
-      const result = await d1.prepare(`SELECT table_name, data FROM ${D1_TABLE} WHERE table_name = ? AND row_key = ?`).bind(table, rowKey).all();
-      const rows = [];
-      for (const row of result.results || []) {
-        try { rows.push(JSON.parse(row.data)); } catch { /* corrupt row: skip */ }
-      }
-      mergeFetched(table, rows);
+      await loadFlights.run(`row:${id}`, async () => {
+        const result = await d1.prepare(`SELECT table_name, data FROM ${D1_TABLE} WHERE table_name = ? AND row_key = ?`).bind(table, rowKey).all();
+        const rows = [];
+        for (const row of result.results || []) {
+          try { rows.push(JSON.parse(row.data)); } catch { /* corrupt row: skip */ }
+        }
+        mergeFetched(table, rows);
+        loadedRows.add(id);
+      });
     } catch (error) {
-      loadedRows.delete(id);
       console.warn(`[DB] row load failed for ${table}/${rowKey}: ${error.message}`);
     }
   }
@@ -140,7 +193,6 @@ export async function createCloudflareMemoryAdapter() {
     `CREATE INDEX IF NOT EXISTS idx_rows_usage_key_id_ts ON ${D1_TABLE}(json_extract(data, '$.apiKeyId'), json_extract(data, '$.timestamp')) WHERE table_name = 'usageHistory'`,
     `CREATE INDEX IF NOT EXISTS idx_rows_usage_key_ts ON ${D1_TABLE}(json_extract(data, '$.apiKey'), json_extract(data, '$.timestamp')) WHERE table_name = 'usageHistory'`,
   ];
-  let historyIndexes = null;
   const loadedHistoryScopes = new Set();
 
   function mergeHistoryRows(rows) {
@@ -165,25 +217,31 @@ export async function createCloudflareMemoryAdapter() {
   }
   const HISTORY_SEQUENCE_FLOOR = 1e15;
 
-  /** Make one key's in-window ledger rows resident (a no-op once the whole table is). */
+  /**
+   * Make one key's in-window ledger rows resident (a no-op once the whole table is).
+   * A scope counts as loaded only after its rows are merged; a concurrent request therefore never
+   * enforces a budget against rows that are still on their way (it used to be marked before the await).
+   */
+  let historyIndexesDone = false;
   async function ensureBudgetHistory({ apiKeyId, apiKey, since }) {
     seedHistorySequence();
     if (!d1 || loadedTables.has("usageHistory") || ops?.inTransaction()) return;
     const scope = `${apiKeyId || ""}\u0000${apiKey || ""}\u0000${since}`;
     if (loadedHistoryScopes.has(scope)) return;
-    loadedHistoryScopes.add(scope);
-    try {
-      if (!historyIndexes) {
-        historyIndexes = d1.batch(HISTORY_INDEX_SQL.map((sql) => d1.prepare(sql)));
-        historyIndexes.catch(() => { historyIndexes = null; });
+    // budget enforcement fails closed: a failed or timed-out load rejects, the caller must not assume zero spend
+    await loadFlights.run(`history:${scope}`, async () => {
+      if (!historyIndexesDone) {
+        try {
+          await d1.batch(HISTORY_INDEX_SQL.map((sql) => d1.prepare(sql)));
+          historyIndexesDone = true;
+        } catch (error) {
+          console.warn(`[DB] usageHistory index not created: ${error.message}`);
+        }
       }
-      try { await historyIndexes; } catch (error) { console.warn(`[DB] usageHistory index not created: ${error.message}`); }
       const result = await d1.prepare(HISTORY_SCOPE_SQL).bind(apiKeyId || "", since, apiKey || "", since).all();
       mergeHistoryRows(result.results || []);
-    } catch (error) {
-      loadedHistoryScopes.delete(scope);
-      throw error;   // budget enforcement fails closed: the caller must not assume zero spend
-    }
+      loadedHistoryScopes.add(scope);
+    });
   }
 
   /** Make a key's ledger row for one commit id resident, whatever window it fell in (idempotent commits). */
@@ -192,14 +250,11 @@ export async function createCloudflareMemoryAdapter() {
     if (!d1 || loadedTables.has("usageHistory") || ops?.inTransaction()) return;
     const id = `${apiKeyId}\u0000${model}`;
     if (loadedCommits.has(id)) return;
-    loadedCommits.add(id);
-    try {
+    await loadFlights.run(`commit:${id}`, async () => {
       const result = await d1.prepare(HISTORY_COMMIT_SQL).bind(apiKeyId, model).all();
       mergeHistoryRows(result.results || []);
-    } catch (error) {
-      loadedCommits.delete(id);
-      throw error;
-    }
+      loadedCommits.add(id);
+    });
   }
 
   // `kv` holds reference data in independent scopes (modelAliases,
@@ -207,31 +262,27 @@ export async function createCloudflareMemoryAdapter() {
   // thousands of rows, and a proxied request almost never needs it, so the
   // table is hydrated per scope: a request reads only the scopes it touches.
   // ensureTables(["kv"]) still loads everything (export/import need that).
-  const loadedKvScopes = new Map(); // scope -> Promise<void> | true
+  const loadedKvScopes = new Set(); // scopes fully resident
   const KV_SCOPE_SELECT = `SELECT table_name, data FROM ${D1_TABLE} WHERE table_name = 'kv' AND row_key >= ? AND row_key < ?`;
 
   async function ensureKvScope(scope) {
     if (!d1 || !scope || loadedTables.has("kv") || ops?.inTransaction()) return;
-    const existing = loadedKvScopes.get(scope);
-    if (existing) { if (existing !== true) await existing; return; }
-    // Row keys are `scope:<scope>|key:<key>`; '|' (0x7C) + 1 = '}' bounds the prefix.
-    const task = (async () => {
-      try {
+    if (loadedKvScopes.has(scope)) return;
+    try {
+      await loadFlights.run(`kv:${scope}`, async () => {
+        // Row keys are `scope:<scope>|key:<key>`; '|' (0x7C) + 1 = '}' bounds the prefix.
         const result = await d1.prepare(KV_SCOPE_SELECT).bind(`scope:${scope}|`, `scope:${scope}}`).all();
         const rows = [];
         for (const row of result.results || []) {
           try { rows.push(JSON.parse(row.data)); } catch { /* corrupt row: skip, adapter is fail-open */ }
         }
         mergeFetched("kv", rows);
-        loadedKvScopes.set(scope, true);
+        loadedKvScopes.add(scope);
         fetchedAt.set(`kv:${scope}`, Date.now());
-      } catch (error) {
-        loadedKvScopes.delete(scope);
-        console.warn(`[DB] kv scope load failed for ${scope}: ${error.message}`);
-      }
-    })();
-    loadedKvScopes.set(scope, task);
-    await task;
+      });
+    } catch (error) {
+      console.warn(`[DB] kv scope load failed for ${scope}: ${error.message}`);
+    }
   }
 
   /**
@@ -357,7 +408,7 @@ export async function createCloudflareMemoryAdapter() {
         ));
       }
     })().catch((error) => console.warn(`[DB] D1 persist failed for ${table}: ${error.message}`));
-    context?.ctx?.waitUntil?.(task);
+    keepAlive(task);
   }
 
   function persistRow(table, row) {
@@ -369,7 +420,7 @@ export async function createCloudflareMemoryAdapter() {
       `ON CONFLICT(table_name, row_key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`
     ).bind(table, primaryKeyFor(table, row), JSON.stringify(row)).run()
       .catch((error) => console.warn(`[DB] D1 row persist failed for ${table}: ${error.message}`));
-    context?.ctx?.waitUntil?.(task);
+    keepAlive(task);
   }
 
   function deletePersistedRows(table, rows) {
@@ -382,7 +433,7 @@ export async function createCloudflareMemoryAdapter() {
       d1.prepare(`DELETE FROM ${D1_TABLE} WHERE table_name = ? AND row_key = ?`)
         .bind(table, primaryKeyFor(table, row))
     )).catch((error) => console.warn(`[DB] D1 row delete failed for ${table}: ${error.message}`));
-    context?.ctx?.waitUntil?.(task);
+    keepAlive(task);
   }
 
   // Shared in-memory engine. D1 supplies only the persistence hooks; the SQL
@@ -437,7 +488,7 @@ export async function createCloudflareMemoryAdapter() {
         ));
       }
     })().catch((error) => console.warn(`[DB] D1 persist failed for ${table}: ${error.message}`));
-    context?.ctx?.waitUntil?.(task);
+    keepAlive(task);
   }
 
   return {
