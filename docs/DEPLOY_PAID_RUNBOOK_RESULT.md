@@ -70,3 +70,9 @@ npx wrangler d1 execute router-db --remote --command "SELECT table_name, COUNT(*
 npm run deploy:router                                   # build once, then wrangler deploy --config wrangler.router.toml
 LIVE_STATE_CONFIG=wrangler.router.toml scripts/smoke/live-state.sh https://router.genzzz.workers.dev <version prefix>
 ```
+
+---
+## P2 D1 (resumed after the user granted the roles)
+
+* `whoami`: still `mihir@cognixai.in`, account **R8devsin@gmail.com's Account** (`1da22c19...`) only; `d1 list` worked (empty) and `d1 create router-db` succeeded (region APAC).
+* D1 `router-db`, id `3bc7cca5-54f8-454f-bcdf-87413ff396c0`, written to `wrangler.router.toml`.

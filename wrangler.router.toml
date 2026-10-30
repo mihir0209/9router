@@ -72,5 +72,5 @@ persist = true
 [[d1_databases]]
 binding = "DB"
 database_name = "router-db"
-# Filled in after `npx wrangler d1 create router-db` on the paid account.
-database_id = "00000000-0000-0000-0000-000000000000"
+# Created with `npx wrangler d1 create router-db` on the paid account.
+database_id = "3bc7cca5-54f8-454f-bcdf-87413ff396c0"
