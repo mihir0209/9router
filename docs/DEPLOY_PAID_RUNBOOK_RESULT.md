@@ -221,3 +221,10 @@ Built with the app's own code, not a hand-rolled key scheme: a throw-away vitest
 * Rows generated: settings 1, providerConnections 62, providerNodes 18, apiKeys 7, combos 11, kv 2,972 (modelAliases 1,084 + customModels 1,888), total 3,071. proxyPools / mitmAlias / pricing: 0 in the backup. auditLog / usageHistory / usageDaily / requestDetails / _meta: not generated, they start empty.
 * Round trip: a fresh adapter reading the scratch D1 and running `exportDb()` returns exactly the backup's connection ids, node ids, api key ids+keys, combo ids+names, alias map, custom-model composite keys and every settings key except the preserved password; per-connection id/provider/name/credential/isActive tuples equal.
 * Dry run with `wrangler d1 execute --local --persist-to <tmp>`: seed from the B1 export (565 rows), `DELETE FROM ninerouter_rows` (0 rows), the 8 files -> 3,071 rows with the counts above.
+
+## B3 empty + load (remote `router-db`, account 1da22c19...)
+
+* `SELECT ... GROUP BY` before: _meta 1, auditLog 158, kv 3, requestDetails 350, usageDaily 6, usageHistory 47 (565).
+* `DELETE FROM ninerouter_rows` (565 changes; the table and the database stay), then the 8 load files with `wrangler d1 execute router-db --remote --file ... --yes` (400 statements each, 271 in the last, 3,071 total; no errors).
+* After: **apiKeys 7, combos 11, kv 2,972, providerConnections 62, providerNodes 18, settings 1** (3,071 rows) = the backup's counts. A key-by-key comparison of the remote rows (table, row key, data length) against the scratch build: 3,071 = 3,071, 0 only on either side. Of the 1,209 row keys that existed only in the old snapshot, 0 remain.
+* Note: this left the live isolates holding the earlier (wiped/old) in-memory state; B4 redeploys to evict them.
