@@ -15,6 +15,8 @@
 //
 // Optional knobs:
 //   SMOKE_CHAT_MODEL        cheap model for the few real provider calls (default cf/@cf/meta/llama-3.2-1b-instruct)
+//   SMOKE_CHAT_PROVIDER     real provider id of the chat model when its prefix is an alias (for example cf -> cloudflare-ai);
+//                           forceProvider must be the provider id, not the alias (default: the model prefix)
 //   SMOKE_OTHER_PROVIDER    a provider id different from the chat model's, for the pinned-provider 403 case
 //   SMOKE_OTHER_MODEL       a model id that is not the chat model, for the ACL / pin cases (default openai/gpt-4o)
 //   SMOKE_REQUEST_TIMEOUT_MS per-request timeout; a request that hangs is recorded as status 0 "timeout" (default 45000)
@@ -69,6 +71,7 @@ const CHAT_MODEL = pick("SMOKE_CHAT_MODEL") || "cf/@cf/meta/llama-3.2-1b-instruc
 const OTHER_PROVIDER = pick("SMOKE_OTHER_PROVIDER") || (CHAT_MODEL.startsWith("ollama/") ? "openai" : "ollama");
 const OTHER_MODEL = pick("SMOKE_OTHER_MODEL") || "openai/gpt-4o"; // only ever asked for, never reaches a provider (denied or rewritten first)
 const MODEL_LEAF = CHAT_MODEL.slice(CHAT_MODEL.indexOf("/") + 1);
+const CHAT_PROVIDER = pick("SMOKE_CHAT_PROVIDER") || CHAT_MODEL.slice(0, CHAT_MODEL.indexOf("/"));
 const REQUEST_TIMEOUT_MS = Number(pick("SMOKE_REQUEST_TIMEOUT_MS") || 45000);
 const KEY_WAIT_MS = Number(pick("SMOKE_KEY_WAIT_MS") || 60000);
 const MAX_REAL = Number(pick("SMOKE_MAX_REAL_CALLS") || 8);
@@ -362,13 +365,15 @@ async function dashboardCases() {
     const mismatch = await dashApi("dash-keys:post-mismatch", "/api/keys", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ name: `smoke-test-DELETE-ME-${STAMP}-mismatch`, forceProvider: OTHER_PROVIDER, forceModel: CHAT_MODEL }) });
     if (mismatch.res.status === 201) { const j = mismatch.json(); if (j?.id) dashKeyIds.push(j.id); }
     expect(mismatch.res.status === 400, `mismatched pair: status ${mismatch.res.status} ${mismatch.text.slice(0, 120)}`);
-    const bare = await dashApi("dash-keys:post-blocked", "/api/keys", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ name: `smoke-test-DELETE-ME-${STAMP}-blocked`, forceModel: MODEL_LEAF, blockedModels: [CHAT_MODEL] }) });
+    // A "bare" pin has no slash, so a leaf like @cf/meta/llama is not bare; use a fixed bare pin. The conflict check runs before any
+    // provider resolution, so the pair needs no real connection.
+    const bare = await dashApi("dash-keys:post-blocked", "/api/keys", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ name: `smoke-test-DELETE-ME-${STAMP}-blocked`, forceModel: "gpt-4o", blockedModels: ["openai/gpt-4o"] }) });
     if (bare.res.status === 201) { const j = bare.json(); if (j?.id) dashKeyIds.push(j.id); }
     expect(bare.res.status === 400, `bare pin covered by prefixed blocked entry: status ${bare.res.status} ${bare.text.slice(0, 120)}`);
     return { detail: `mismatch -> 400 "${String(mismatch.json()?.error || "").slice(0, 90)}"` };
   });
   await check("D6", "dashboard key CRUD: create, PUT mismatch is 400, PUT valid is 200, listed, deleted", async () => {
-    const chatProvider = CHAT_MODEL.slice(0, CHAT_MODEL.indexOf("/"));
+    const chatProvider = CHAT_PROVIDER;
     const created = await dashApi("dash-keys:create", "/api/keys", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ name: `smoke-test-DELETE-ME-${STAMP}-dash`, forceProvider: chatProvider, forceModel: CHAT_MODEL }) });
     expect(created.res.status === 201, `create ${created.res.status} ${created.text.slice(0, 120)}`);
     const id = created.json()?.id;
