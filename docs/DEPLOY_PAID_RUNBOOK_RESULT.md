@@ -76,3 +76,6 @@ LIVE_STATE_CONFIG=wrangler.router.toml scripts/smoke/live-state.sh https://route
 
 * `whoami`: still `mihir@cognixai.in`, account **R8devsin@gmail.com's Account** (`1da22c19...`) only; `d1 list` worked (empty) and `d1 create router-db` succeeded (region APAC).
 * D1 `router-db`, id `3bc7cca5-54f8-454f-bcdf-87413ff396c0`, written to `wrangler.router.toml`.
+* Import of `.agents/backups/mihir-router-db-pre-deploy.sql` (export of the user's own personal DB from 2026-10-29 12:32, unfiltered, one `d1 execute --file`): 4137 changes, 8275 rows written.
+  `SELECT table_name, COUNT(*) ... GROUP BY 1` equals the backup's per-table counts: _meta 1, apiKeys 20, auditLog 96, combos 10, kv 3502, providerConnections 62, providerNodes 17, proxyPools 25, requestDetails 350, settings 1, usageDaily 5, usageHistory 47 (total 4136).
+* Note: later changes made on the personal DB after that export are not included in `router-db`. The data contains provider credentials; contents were never printed.
