@@ -228,3 +228,27 @@ Built with the app's own code, not a hand-rolled key scheme: a throw-away vitest
 * `DELETE FROM ninerouter_rows` (565 changes; the table and the database stay), then the 8 load files with `wrangler d1 execute router-db --remote --file ... --yes` (400 statements each, 271 in the last, 3,071 total; no errors).
 * After: **apiKeys 7, combos 11, kv 2,972, providerConnections 62, providerNodes 18, settings 1** (3,071 rows) = the backup's counts. A key-by-key comparison of the remote rows (table, row key, data length) against the scratch build: 3,071 = 3,071, 0 only on either side. Of the 1,209 row keys that existed only in the old snapshot, 0 remain.
 * Note: this left the live isolates holding the earlier (wiped/old) in-memory state; B4 redeploys to evict them.
+
+## B4 redeploy and first verification
+
+* `npm run build:router` from committed HEAD (all build assertions passed, tree clean), the built bundle contains the new adapter code and no `mihir` / `antideploy` string, then `wrangler deploy --config wrangler.router.toml`: **new live version `5c0266b4-54ec-4366-9182-de293c662232`** (100%, 2026-10-30T08:27:54Z), previous `4c0b49ff-63ae-4d59-984f-2d22d1d23e54`. The deploy also evicts every isolate that held the old in-memory state. It is **not** the same build as 4c0b49ff: that build still has the merge-import bug, so redeploying it would have left the trap armed. Rollback to 4c0b49ff is possible, but not advisable.
+* `npm run build` afterwards: `.next/standalone/.9router-build-variant` = `node`, `src/proxy.js` present, no `src/middleware.js`, no `*.cloudflare-disabled`, tree clean.
+* Verification against https://router.genzzz.workers.dev with a locally signed session cookie (JWT secret from `.env.deploy`, in memory only), counts live vs backup:
+
+| Check | live | backup |
+|---|---|---|
+| GET /api/health | 200 | |
+| GET /api/providers | 200, 62; provider+name list and id list identical | 62 |
+| GET /api/provider-nodes | 18 | 18 |
+| GET /api/keys | 7, names identical | 7 |
+| GET /api/combos | 11, names identical | 11 |
+| GET /api/proxy-pools | 0 | 0 |
+| GET /api/models/alias | 1,084 | 1,084 |
+| GET /api/models/custom | 1,888 | 1,888 |
+| GET /api/settings/database (cookie + admin Bearer): providers incl. credentials, nodes, keys incl. key values, combos, aliases, custom models, every non-password settings key | all equal | |
+| /dashboard, /dashboard/providers, /dashboard/profile, /dashboard/endpoint | 200 each | |
+| GET /v1/models with the backup's key "production" | 200, 214 models, ETag, conditional GET 304; invalid key 401 | |
+| chat via `cf/@cf/meta/llama-3.2-1b-instruct` (backup's `cloudflare-ai` connection), max_tokens 8 | stream 200, 4 events, `[DONE]`; non-stream 200 with a completion | |
+| `live-state.sh` (router config) | LIVE OK, 6 secret names present, cron 401 without secret | |
+
+* Non-stream `cloudflare-ai` replies carry a stray `data: [DONE]` after the JSON body (provider-path quirk already present in the 4c0b49ff runs; not part of this change).
