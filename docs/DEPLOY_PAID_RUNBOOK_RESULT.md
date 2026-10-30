@@ -87,3 +87,12 @@ LIVE_STATE_CONFIG=wrangler.router.toml scripts/smoke/live-state.sh https://route
 * Deploy 1: version `0477bfab-7820-4147-92bd-df1827b5a2b3`. Wrangler warned that Preview URLs default to enabled; added `preview_urls = false` to `wrangler.router.toml` and redeployed the same build.
 * **Current version: `830cb6ff-92b5-4bf8-85f8-19e316796dc2`** (100%) at https://router.genzzz.workers.dev, cron `*/10 * * * *`, DO `GatewayCoordinator` created, bindings DB / GATEWAY_COORDINATOR / WORKER_SELF_REFERENCE -> router / ASSETS.
   Previous versions: 0477bfab (same code, preview URLs on), e87e5cc3 (secrets only placeholder).
+
+## P4 functional smoke (version 830cb6ff, https://router.genzzz.workers.dev)
+
+* `live-state.sh` (LIVE_STATE_CONFIG=wrangler.router.toml): health 200, login 200, `/v1/models` without key 401, cron 401, six secret names present. Its "100%" grep failed because wrangler now prints `(100%) <id>`; fixed in its own commit (`fix(smoke): live-state accepts both wrangler deployment line orders`).
+* `deployed-smoke.mjs` run 1 (with the 21 MB oversize upload): 29 pass, 2 fail. Both failures were harness assumptions, not the app: D6 used the alias prefix `cf` as forceProvider (the app correctly requires the provider id `cloudflare-ai`),
+  D5's "bare pin" used a leaf containing a slash (`@cf/...`), which is not a bare pin. Fixed in the script (`SMOKE_CHAT_PROVIDER`, fixed bare pin `gpt-4o` vs blocked `openai/gpt-4o`), commit `test(smoke): pin cases work for aliased chat models`.
+* Run 2 (after the fix): 30 pass, 1 skip (oversize, passed in run 1: 413 in 35.9 s including the 21 MB upload).
+* Dashboard password: the .env.deploy value and the .env value were both rejected (HTTP 401; the imported settings row holds its own password hash). 2 attempts, no more. Login/logout, D1-D7 pages and key CRUD were exercised with a locally signed session cookie using the Worker's JWT secret (own deployment, in memory only). Password login on the Paid plan (bcrypt) is therefore **not** verified; the user must log in with the password of the old (imported) settings.
+* Chat via `cf/@cf/meta/llama-3.2-1b-instruct` (connection `cloudflare-ai`): non-stream 200 (818-1338 ms), stream 200 (ttfb about 512 ms). `sn/` returned an upstream 404 from the user's BYOK node (their provider, not this deployment).
