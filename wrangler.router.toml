@@ -5,6 +5,8 @@ main = ".open-next/worker.js"
 # Temporary test URL https://router.<account-subdomain>.workers.dev. Set to false once a custom domain
 # (with WAF rate limiting and Bot Fight Mode) is attached; zone rules do not cover workers.dev.
 workers_dev = true
+# Preview URLs are not needed (no versions upload workflow) and are not covered by zone rules.
+preview_urls = false
 compatibility_date = "2024-12-30"
 compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 # OpenNext hands wrangler an already whitespace-minified handler, and wrangler's own bundling

@@ -79,3 +79,11 @@ LIVE_STATE_CONFIG=wrangler.router.toml scripts/smoke/live-state.sh https://route
 * Import of `.agents/backups/mihir-router-db-pre-deploy.sql` (export of the user's own personal DB from 2026-10-29 12:32, unfiltered, one `d1 execute --file`): 4137 changes, 8275 rows written.
   `SELECT table_name, COUNT(*) ... GROUP BY 1` equals the backup's per-table counts: _meta 1, apiKeys 20, auditLog 96, combos 10, kv 3502, providerConnections 62, providerNodes 17, proxyPools 25, requestDetails 350, settings 1, usageDaily 5, usageHistory 47 (total 4136).
 * Note: later changes made on the personal DB after that export are not included in `router-db`. The data contains provider credentials; contents were never printed.
+
+## P3 secrets, build, deploy
+
+* Secrets were set **before** the first code deploy with `wrangler secret bulk` (JSON on stdin, never argv): JWT_SECRET, API_KEY_SECRET, MACHINE_ID_SALT, ADMIN_API_TOKEN, INITIAL_PASSWORD (from `.env.deploy`) and CRON_SECRET (generated). Wrangler created the Worker `router` as a secrets-only placeholder (version e87e5cc3). So the real code never served without secrets. NEXT_PUBLIC_BASE_URL was not copied.
+* `npm run build:router`: all assertions passed, tree clean afterwards (src/proxy.js present, no src/middleware.js, no *.cloudflare-disabled). Dry run: 11,557.78 KiB / 2,818.38 KiB gzip, Worker startup 14 ms. Built worker and wrangler bundle: no `mihir`, `themihir`, `antideploy`.
+* Deploy 1: version `0477bfab-7820-4147-92bd-df1827b5a2b3`. Wrangler warned that Preview URLs default to enabled; added `preview_urls = false` to `wrangler.router.toml` and redeployed the same build.
+* **Current version: `830cb6ff-92b5-4bf8-85f8-19e316796dc2`** (100%) at https://router.genzzz.workers.dev, cron `*/10 * * * *`, DO `GatewayCoordinator` created, bindings DB / GATEWAY_COORDINATOR / WORKER_SELF_REFERENCE -> router / ASSETS.
+  Previous versions: 0477bfab (same code, preview URLs on), e87e5cc3 (secrets only placeholder).
