@@ -65,7 +65,22 @@ export async function createCloudflareMemoryAdapter() {
   // keeps later writes alive.
   let cfModule = null;
   try { cfModule = await import("@opennextjs/cloudflare"); } catch { /* not on Workers */ }
+  // Every background D1 write is tracked so a caller can wait for durability (flush()).
+  // Writes are applied to memory synchronously and persisted afterwards; without a way to wait,
+  // a request such as a database restore answered 200 while its rows were still being written, and
+  // Workers cancel waitUntil work about 30 s after the response.
+  const pendingWrites = new Set();
+  let failedWrites = 0;
+  let reportedFailures = 0;
+  let lastWriteFailure = "";
+  function noteWriteFailure(label, error) {
+    failedWrites++;
+    lastWriteFailure = `${label}: ${error?.message || error}`;
+    console.warn(`[DB] ${lastWriteFailure}`);
+  }
   function keepAlive(task) {
+    pendingWrites.add(task);
+    Promise.resolve(task).finally(() => pendingWrites.delete(task)).catch(() => {});
     try {
       const current = cfModule?.getCloudflareContext?.();
       if (current?.ctx?.waitUntil) { current.ctx.waitUntil(task); return; }
@@ -407,7 +422,7 @@ export async function createCloudflareMemoryAdapter() {
           ).bind(table, row.key, row.data)
         ));
       }
-    })().catch((error) => console.warn(`[DB] D1 persist failed for ${table}: ${error.message}`));
+    })().catch((error) => noteWriteFailure(`D1 persist failed for ${table}`, error));
     keepAlive(task);
   }
 
@@ -419,7 +434,7 @@ export async function createCloudflareMemoryAdapter() {
       `VALUES(?, ?, ?, CURRENT_TIMESTAMP) ` +
       `ON CONFLICT(table_name, row_key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`
     ).bind(table, primaryKeyFor(table, row), JSON.stringify(row)).run()
-      .catch((error) => console.warn(`[DB] D1 row persist failed for ${table}: ${error.message}`));
+      .catch((error) => noteWriteFailure(`D1 row persist failed for ${table}`, error));
     keepAlive(task);
   }
 
@@ -432,7 +447,7 @@ export async function createCloudflareMemoryAdapter() {
     const task = d1.batch(rows.map((row) =>
       d1.prepare(`DELETE FROM ${D1_TABLE} WHERE table_name = ? AND row_key = ?`)
         .bind(table, primaryKeyFor(table, row))
-    )).catch((error) => console.warn(`[DB] D1 row delete failed for ${table}: ${error.message}`));
+    )).catch((error) => noteWriteFailure(`D1 row delete failed for ${table}`, error));
     keepAlive(task);
   }
 
@@ -472,11 +487,9 @@ export async function createCloudflareMemoryAdapter() {
       else deletes.push(key);
     }
     const task = (async () => {
-      if (deletes.length) {
-        await d1.batch(deletes.map((key) =>
-          d1.prepare(`DELETE FROM ${D1_TABLE} WHERE table_name = ? AND row_key = ?`).bind(table, key)
-        ));
-      }
+      // New rows first, deletions last: a failure or a cancelled task between the two steps then
+      // leaves old rows behind instead of a table whose old rows are gone and new rows never arrived.
+      // The two key sets are disjoint (one entry per row key), so the order does not change the result.
       const chunkSize = 50;
       for (let i = 0; i < upserts.length; i += chunkSize) {
         await d1.batch(upserts.slice(i, i + chunkSize).map((row) =>
@@ -487,7 +500,12 @@ export async function createCloudflareMemoryAdapter() {
           ).bind(table, primaryKeyFor(table, row), JSON.stringify(row))
         ));
       }
-    })().catch((error) => console.warn(`[DB] D1 persist failed for ${table}: ${error.message}`));
+      for (let i = 0; i < deletes.length; i += chunkSize * 4) {
+        await d1.batch(deletes.slice(i, i + chunkSize * 4).map((key) =>
+          d1.prepare(`DELETE FROM ${D1_TABLE} WHERE table_name = ? AND row_key = ?`).bind(table, key)
+        ));
+      }
+    })().catch((error) => noteWriteFailure(`D1 persist failed for ${table}`, error));
     keepAlive(task);
   }
 
@@ -506,6 +524,18 @@ export async function createCloudflareMemoryAdapter() {
     seedHistorySequence,
     ensureRow,
     freshWithin,
+    /**
+     * Wait until every D1 write started so far has finished. Rejects when one of them failed, so a
+     * caller that must not report success early (a database restore) can tell the user.
+     */
+    flush: async () => {
+      while (pendingWrites.size) await Promise.allSettled([...pendingWrites]);
+      // Failures since the previous flush(), including a task that failed before this call.
+      if (failedWrites > reportedFailures) {
+        reportedFailures = failedWrites;
+        throw new Error(`D1 write did not complete (${lastWriteFailure})`);
+      }
+    },
     close: () => {},
     raw: state,
   };

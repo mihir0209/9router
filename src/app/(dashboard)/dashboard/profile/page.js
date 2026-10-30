@@ -9,7 +9,7 @@ import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG } from "@/shared/constants/config";
 import { LOCALE_COOKIE, normalizeLocale } from "@/i18n/config";
 import { LOCALE_FLAGS } from "@/shared/constants/locales";
-import { validateBackup, previewMerge, mergeBackups } from "@/lib/db/mergeBackups";
+import { validateBackup, previewMerge, buildMergeImportPayload } from "@/lib/db/mergeBackups";
 import { IMPORT_STAGES, formatProgressMessage, withDuration, describeImportResult } from "@/lib/importProgress";
 
 function getLocaleFromCookie() {
@@ -832,7 +832,7 @@ export default function ProfilePage() {
         setImportStage(IMPORT_STAGES.merging);
         await nextPaint();
         const preview = previewMerge(base, payload, mergeStrategy);
-        const merged = mergeBackups(base, payload, mergeStrategy);
+        const merged = buildMergeImportPayload(base, payload, mergeStrategy);
 
         setImportStage(IMPORT_STAGES.uploading);
         await nextPaint();
@@ -931,7 +931,7 @@ export default function ProfilePage() {
       await nextPaint();
       const preview = previewMerge(base, incoming, mergeStrategy);
 
-      const merged = mergeBackups(base, incoming, mergeStrategy);
+      const merged = buildMergeImportPayload(base, incoming, mergeStrategy);
       setImportStage(IMPORT_STAGES.uploading);
       await nextPaint();
       const body = JSON.stringify({ ...merged, password });

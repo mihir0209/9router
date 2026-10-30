@@ -134,6 +134,40 @@ export async function exportDb() {
   return out;
 }
 
+const IMPORT_ARRAY_TABLES = ["providerConnections", "providerNodes", "proxyPools", "apiKeys", "combos", "customModels"];
+const IMPORT_MAP_TABLES = ["modelAliases", "mitmAlias", "pricing"];
+
+/**
+ * Refuse a payload that would only wipe. importDb deletes every table it owns before it inserts,
+ * so `{}` or `{ password }` (what the dashboard posts when a merge fails to produce a result)
+ * used to empty the database and report success. A usable backup carries at least one known
+ * table, in the shape the exporter writes it.
+ */
+function assertImportablePayload(payload) {
+  const present = [];
+  if (payload.settings !== undefined && payload.settings !== null) {
+    if (typeof payload.settings !== "object" || Array.isArray(payload.settings)) {
+      throw new Error('Invalid database payload: "settings" must be an object');
+    }
+    present.push("settings");
+  }
+  for (const key of IMPORT_ARRAY_TABLES) {
+    const value = payload[key];
+    if (value === undefined || value === null) continue;
+    if (!Array.isArray(value)) throw new Error(`Invalid database payload: "${key}" must be an array`);
+    present.push(key);
+  }
+  for (const key of IMPORT_MAP_TABLES) {
+    const value = payload[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid database payload: "${key}" must be an object`);
+    present.push(key);
+  }
+  if (!present.length) {
+    throw new Error("Invalid database payload: it contains none of the backup tables (settings, providerConnections, apiKeys, ...); nothing was changed");
+  }
+}
+
 /**
  * Replace the whole database with `payload`.
  *
@@ -145,6 +179,7 @@ export async function importDb(payload, options = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("Invalid database payload");
   }
+  assertImportablePayload(payload);
   const db = await getAdapter();
   // The wipe below must see (and so persist the deletion of) every resident row.
   await db.ensureTables?.(["providerConnections", "kv"]);

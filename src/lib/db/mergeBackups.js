@@ -263,3 +263,20 @@ export function mergeBackups(base, incoming, strategy = "newer-wins") {
 
   return { merged, stats, errors: [] };
 }
+
+/**
+ * The object to POST to /api/settings/database after a merge.
+ *
+ * mergeBackups() returns a wrapper `{ merged, stats, errors }`. The dashboard used to spread that
+ * wrapper into the request body (`{ ...result, password }`), so the server received the keys
+ * "merged", "stats" and "errors" and no table at all. importDb replaces the database, so every
+ * merge-mode import deleted all providers, keys, combos and models and inserted nothing.
+ * Returns the merged tables themselves, or throws with the merge errors.
+ */
+export function buildMergeImportPayload(base, incoming, strategy = "newer-wins") {
+  const { merged, errors } = mergeBackups(base, incoming, strategy);
+  if (!merged || typeof merged !== "object") {
+    throw new Error(`Merge failed, nothing was changed: ${(errors || []).join(", ") || "no result"}`);
+  }
+  return merged;
+}
