@@ -201,3 +201,23 @@ Real weaknesses in the Cloudflare path that can also lose data, independent of t
 2. **Delete before insert**: `persistDirtyRows` sent the row deletes first and the upserts after, so any failure or cancellation between the two leaves a database with the old rows gone and the new ones missing.
 3. **Response before durability**: the Cloudflare adapter has no `flush()` (the route calls `db.flush()` only `if (typeof db.flush === "function")`), so the import returned 200 while the D1 writes were still running under `ctx.waitUntil`, which Workers cancel about 30 s after the response. A 5,000-row restore is about 100 sequential batches of 50.
 4. Persist failures were only `console.warn`ed, so the caller was told "success".
+
+### B0 update: the actual cause, found while fixing
+
+`mergeBackups()` returns a wrapper `{ merged, stats, errors }`. The profile page posted `JSON.stringify({ ...merged, password })`, where `merged` was that wrapper, so every **merge-mode import** (the default mode, and the separate Merge button) sent the top-level keys `merged`, `stats`, `errors`, `password` and **no table**. `importDb` has replace semantics: it deleted settings, providerConnections, providerNodes, proxyPools, apiKeys, combos and four kv scopes, inserted nothing, and the route answered 200 `{ success: true }` (counts all 0). That is exactly the live D1 state (no INSERT statements, 3,634 rows gone, other tables intact). This also happens on the Node build: it is not Cloudflare-specific; on Cloudflare the same payload additionally returns before D1 is written.
+
+Fix (commit below, separate from the docs): `buildMergeImportPayload()` returns the merged tables or throws; `importDb` rejects a payload with no backup table or with wrong shapes (`{}`, `{ password }`, wrapper keys); the Cloudflare adapter now has `flush()` (the route already awaits `db.flush()` when present), sends upserts before deletes and reports failed writes; `tests/unit/db-import-safety.test.js` (10 tests, 8 fail on the old code). Full vitest: 502 files passed, 24 skipped, only the two known load failures.
+Replace mode (raw backup file as the body) was not affected by this bug.
+
+## B1 backup before wiping
+
+`wrangler d1 export router-db --remote` -> `.agents/backups/router-db-before-wipe-20261030-135218.sql` (809,034 bytes, 565 `INSERT`s: _meta 1, auditLog 158, kv 3, requestDetails 350, usageDaily 6, usageHistory 47). This is the state the user's failed import left behind (no providers). The dir is git-ignored.
+
+## B2 load file
+
+Built with the app's own code, not a hand-rolled key scheme: a throw-away vitest drove the real `importDb` over the real `cloudflareMemoryAdapter` backed by a scratch SQLite stand-in for D1 (`flush()` awaited), then dumped every persisted `ninerouter_rows` row as `INSERT`s (8 files, 400 rows each, 119-387 KB, in `.agents/backups/load-20261030-135302/`, git-ignored).
+
+* Settings: the backup's 42 settings keys, with `password` (and `oidcClientSecret`, absent) taken from the settings row that `router-db` held before the wipe (the imported mihir-router snapshot), i.e. what the route's `preserveProtectedSettings` does. The backup itself has no password.
+* Rows generated: settings 1, providerConnections 62, providerNodes 18, apiKeys 7, combos 11, kv 2,972 (modelAliases 1,084 + customModels 1,888), total 3,071. proxyPools / mitmAlias / pricing: 0 in the backup. auditLog / usageHistory / usageDaily / requestDetails / _meta: not generated, they start empty.
+* Round trip: a fresh adapter reading the scratch D1 and running `exportDb()` returns exactly the backup's connection ids, node ids, api key ids+keys, combo ids+names, alias map, custom-model composite keys and every settings key except the preserved password; per-connection id/provider/name/credential/isActive tuples equal.
+* Dry run with `wrangler d1 execute --local --persist-to <tmp>`: seed from the B1 export (565 rows), `DELETE FROM ninerouter_rows` (0 rows), the 8 files -> 3,071 rows with the counts above.
