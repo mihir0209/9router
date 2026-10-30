@@ -170,3 +170,34 @@ Deleting the Worker or `router-db` is not part of any rollback and was not done.
 ### Local state
 
 `npm run build` node variant (`.next/standalone/.9router-build-variant` = `node`), `src/proxy.js` present, no `src/middleware.js`, no `*.cloudflare-disabled`, tree clean, nothing pushed, no secrets committed. `~/.9router/db/data.sqlite` untouched; the personal account and `mihir-router` were not touched.
+
+
+---
+# Providers wipe, D1 reload (2026-10-30)
+
+Staged log. No secret value appears here; backup contents were never printed.
+
+## B0 inspection (read-only)
+
+* `wrangler whoami`: only `R8devsin@gmail.com's Account` (`1da22c19...`), so the paid account. `CLOUDFLARE_ACCOUNT_ID` is exported for every command.
+* New backup `/home/ghostrider/Downloads/9router-cognixai-cloud.json` (868,065 bytes, file mtime 13:31 IST). Top-level keys: settings, providerConnections, providerNodes, proxyPools, apiKeys, combos, modelAliases, customModels, mitmAlias, pricing (no version/format field, the app's export format).
+  Counts: settings 1 (42 keys, **no `password`**, no `oidcClientSecret`), providerConnections **62** (all ids distinct), providerNodes 18, proxyPools 0, apiKeys 7, combos 11, modelAliases 1084, customModels 1888 (distinct composite keys 1888), mitmAlias 0, pricing 0.
+  `validateBackup()` (src/lib/db/mergeBackups.js): valid. The backup is **not** empty and uses the standard field names, so a missing/renamed `providerConnections` does not explain the wipe.
+* Live `router-db` at the start of this stage (before any change by me), per table: _meta 1, auditLog 158, kv 3, requestDetails 350, usageDaily 6, usageHistory 47 (565 rows). **settings, providerConnections, providerNodes, proxyPools, apiKeys, combos: 0 rows; kv lost all modelAliases / customModels rows.**
+  Before the user's import it held the old snapshot (kv 3502 = customModels 2414 + modelAliases 1085 + disabledModels 1 + gemini_thought_signatures 2, providerConnections 62, providerNodes 17, proxyPools 25, apiKeys 20, combos 10, settings 1, ...). The import wiped exactly the tables `importDb` wipes (3,634 rows) and kept the other tables and the 3 kv rows of scopes it does not touch.
+* Evidence from Cloudflare D1 analytics (account GraphQL, no payloads): between 06:35 and 08:15 UTC the database saw about 3,129 single-row `DELETE ... WHERE table_name = ? AND row_key = ?` statements and **no `INSERT` at all** (the analytics under-report the 3,634 by about 500; the final table state is complete). Worker invocations in that window: all `success`, 0 errors.
+
+### Root cause (as far as it can be shown)
+
+`importDb` replaces the database: it deletes every row of settings, providerConnections, providerNodes, proxyPools, apiKeys, combos and four kv scopes, then inserts the payload. It **accepts any object**. The route also accepts `{ password }` alone.
+I reproduced the live end state exactly with the real `importDb` + `cloudflareMemoryAdapter` over a D1 stand-in loaded with the old snapshot: an import whose payload carries none of the tables deletes 3,634 rows, inserts nothing and leaves `_meta/auditLog/kv(3)/requestDetails/usageDaily/usageHistory` untouched, which matches the live D1 table by table.
+The dashboard can produce such a payload: in **merge** mode (the default) the page posts `{ ...merged, password }`, and `mergeBackups()` returns `merged: null` whenever `validateBackup` finds a `null` table in the base or the incoming file, so the page posts only `{ password }`. The server answered 200 and the dashboard reported success. Which exact file/click produced this on 2026-10-30 cannot be recovered (the request body is not logged and the file that was used is not known to me; the file now in Downloads validates fine).
+
+Ruled out by replay (same snapshot, same new backup, all persist tasks allowed to finish): a full **replace** import and a **merge** import both end with the backup's rows (`providerConnections 62`, `kv` complete). So the persistence layer works when it runs to completion.
+
+Real weaknesses in the Cloudflare path that can also lose data, independent of the trigger above:
+
+1. **No import validation**: an empty or table-less payload is a silent "delete everything" (above).
+2. **Delete before insert**: `persistDirtyRows` sent the row deletes first and the upserts after, so any failure or cancellation between the two leaves a database with the old rows gone and the new ones missing.
+3. **Response before durability**: the Cloudflare adapter has no `flush()` (the route calls `db.flush()` only `if (typeof db.flush === "function")`), so the import returned 200 while the D1 writes were still running under `ctx.waitUntil`, which Workers cancel about 30 s after the response. A 5,000-row restore is about 100 sequential batches of 50.
+4. Persist failures were only `console.warn`ed, so the caller was told "success".
