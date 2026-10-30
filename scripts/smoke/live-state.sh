@@ -19,7 +19,7 @@ echo "== deployments (latest first)"
 dep="$(npx wrangler deployments list "${CFG[@]}" 2>&1 | tail -25)"
 echo "$dep"
 latest="$(echo "$dep" | awk '/^Created:/{c++} c>=1' | tail -n +1)"
-if ! echo "$dep" | tail -12 | grep -q "${EXPECTED}.*(100%)"; then
+if ! echo "$dep" | tail -12 | grep -Eq "(${EXPECTED}.*\(100%\)|\(100%\).*${EXPECTED})"; then
   echo "!! latest deployment does not show ${EXPECTED} at 100%"; fail=1
 fi
 
