@@ -61,13 +61,55 @@ async function shouldLowWrite() {
   if (lowWriteCache.value !== undefined && Date.now() - lowWriteCache.ts < LOW_WRITE_CACHE_TTL_MS) {
     return lowWriteCache.value;
   }
-  let value = process.env.NINEROUTER_RUNTIME === "cloudflare";
+  if (global._settingsRepoCache?.data && global._settingsRepoCache.data.lowWriteMode !== undefined) {
+    const setting = global._settingsRepoCache.data.lowWriteMode;
+    let val;
+    if (setting === true || setting === "extreme") val = true;
+    else if (setting === false) val = false;
+    else if (process.env.NINEROUTER_RUNTIME === "cloudflare") val = isExtremeProfile();
+    else val = false;
+    lowWriteCache.value = val;
+    lowWriteCache.ts = Date.now();
+    return val;
+  }
+
+  const adapter = global._dbAdapter?.instance;
+  if (adapter?.get) {
+    try {
+      const row = adapter.get(`SELECT data FROM settings WHERE id = 1`);
+      if (row) {
+        const data = parseJson(row.data, {});
+        if (data.lowWriteMode === false) {
+          lowWriteCache.value = false;
+          lowWriteCache.ts = Date.now();
+          return false;
+        }
+        if (data.lowWriteMode === true || data.lowWriteMode === "extreme") {
+          lowWriteCache.value = true;
+          lowWriteCache.ts = Date.now();
+          return true;
+        }
+      }
+    } catch {}
+  }
+
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare" && isExtremeProfile()) {
+    lowWriteCache.value = true;
+    lowWriteCache.ts = Date.now();
+    return true;
+  }
+  let value = false;
   try {
     const { getSettings } = await import("./settingsRepo.js");
     const setting = (await getSettings())?.lowWriteMode;
     if (setting === true || setting === "extreme") value = true;
     else if (setting === false) value = false;
-  } catch {}
+    else if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
+      value = isExtremeProfile();
+    }
+  } catch {
+    value = process.env.NINEROUTER_RUNTIME === "cloudflare" ? isExtremeProfile() : false;
+  }
   lowWriteCache.value = value;
   lowWriteCache.ts = Date.now();
   return value;
@@ -111,9 +153,45 @@ if (!global._analyticsBufferSettingCache) global._analyticsBufferSettingCache = 
 const bufferSettingCache = global._analyticsBufferSettingCache;
 
 async function shouldBufferAnalytics() {
-  if (process.env.NINEROUTER_RUNTIME === "cloudflare") return true;
   if (bufferSettingCache.value !== undefined && Date.now() - bufferSettingCache.ts < LOW_WRITE_CACHE_TTL_MS) {
     return bufferSettingCache.value;
+  }
+  if (global._settingsRepoCache?.data && global._settingsRepoCache.data.analyticsBufferEnabled !== undefined) {
+    const setting = global._settingsRepoCache.data.analyticsBufferEnabled;
+    let val;
+    if (setting === true) val = true;
+    else if (setting === false) val = false;
+    else if (process.env.NINEROUTER_RUNTIME === "cloudflare") val = isExtremeProfile();
+    else val = false;
+    bufferSettingCache.value = val;
+    bufferSettingCache.ts = Date.now();
+    return val;
+  }
+
+  const adapter = global._dbAdapter?.instance;
+  if (adapter?.get) {
+    try {
+      const row = adapter.get(`SELECT data FROM settings WHERE id = 1`);
+      if (row) {
+        const data = parseJson(row.data, {});
+        if (data.analyticsBufferEnabled === false) {
+          bufferSettingCache.value = false;
+          bufferSettingCache.ts = Date.now();
+          return false;
+        }
+        if (data.analyticsBufferEnabled === true) {
+          bufferSettingCache.value = true;
+          bufferSettingCache.ts = Date.now();
+          return true;
+        }
+      }
+    } catch {}
+  }
+
+  if (process.env.NINEROUTER_RUNTIME === "cloudflare" && isExtremeProfile()) {
+    bufferSettingCache.value = true;
+    bufferSettingCache.ts = Date.now();
+    return true;
   }
   let value = false;
   try {
@@ -121,8 +199,14 @@ async function shouldBufferAnalytics() {
     const s = await getSettings();
     if (s?.analyticsBufferEnabled === true) value = true;
     else if (s?.analyticsBufferEnabled === false) value = false;
-    else if (process.env.NINEROUTER_RUNTIME === "cloudflare") value = true;
-  } catch {}
+    else if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
+      value = isExtremeProfile();
+    }
+  } catch {
+    if (process.env.NINEROUTER_RUNTIME === "cloudflare") {
+      value = isExtremeProfile();
+    }
+  }
   bufferSettingCache.value = value;
   bufferSettingCache.ts = Date.now();
   return value;

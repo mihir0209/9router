@@ -7,6 +7,8 @@ import { resetApiKeysCache } from "./repos/apiKeysRepo.js";
 import { resetSettingsCache } from "./repos/settingsRepo.js";
 import { resetKvCache } from "./repos/aliasRepo.js";
 import { resetPricingCache } from "./repos/pricingRepo.js";
+import { flushAnalyticsBuffer } from "./repos/usageRepo.js";
+import { flushRequestDetailsBuffer } from "./repos/requestDetailsRepo.js";
 import { stringifyJson, parseJson } from "./helpers/jsonCol.js";
 
 // Settings
@@ -90,6 +92,8 @@ export {
 
 // Export/import full DB
 export async function exportDb() {
+  await flushAnalyticsBuffer().catch(() => {});
+  await flushRequestDetailsBuffer().catch(() => {});
   const db = await getAdapter();
   // Lazy tables on the Cloudflare adapter: without this an export from a cold
   // isolate silently omitted every connection and kv scope.

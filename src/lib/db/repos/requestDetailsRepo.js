@@ -166,6 +166,9 @@ export async function saveRequestDetail(detail) {
 }
 
 export async function getRequestDetails(filter = {}) {
+  if (writeBuffer.length > 0) {
+    await flushRequestDetailsBuffer().catch(() => {});
+  }
   const db = await getAdapter();
   await db.ensureTables?.(["requestDetails"]);
   const conds = [];
@@ -207,6 +210,9 @@ export async function getDistinctProviders() {
 }
 
 export async function getRequestDetailById(id) {
+  if (writeBuffer.length > 0) {
+    await flushRequestDetailsBuffer().catch(() => {});
+  }
   const db = await getAdapter();
   await db.ensureTables?.(["requestDetails"]);
   const row = db.get(`SELECT data FROM requestDetails WHERE id = ?`, [id]);
