@@ -131,7 +131,7 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, a
     const safeContent = contentObj?.content || "[Empty streaming response]";
     const safeThinking = contentObj?.thinking || null;
 
-    saveRequestDetail(buildRequestDetail({
+    const detailTask = saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
       latency,
       tokens: usage || { prompt_tokens: 0, completion_tokens: 0 },
@@ -146,7 +146,15 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, a
     });
 
     // Persist stream usage to DB (no console line; the "📊 done" line below is authoritative)
-    saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, apiKeyId, endpoint: clientRawRequest?.endpoint, label: "STREAM USAGE", silent: true });
+    const usageTask = saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, apiKeyId, endpoint: clientRawRequest?.endpoint, label: "STREAM USAGE", silent: true });
+
+    try {
+      const cfContext = globalThis[Symbol.for("__cloudflare-context__")];
+      if (cfContext?.ctx?.waitUntil) {
+        if (detailTask) cfContext.ctx.waitUntil(detailTask);
+        if (usageTask) cfContext.ctx.waitUntil(usageTask);
+      }
+    } catch {}
     if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency }));
   };
 

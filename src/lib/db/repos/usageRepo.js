@@ -687,7 +687,11 @@ export async function saveRequestUsage(entry) {
 
       const elapsed = Date.now() - analyticsBuffer.lastFlushTs;
       if (elapsed >= ANALYTICS_BUFFER_TTL_MS || analyticsBuffer.lifetimeRequests >= ANALYTICS_BUFFER_MAX_ITEMS) {
-        flushAnalyticsBuffer().catch(() => {});
+        const flushTask = flushAnalyticsBuffer().catch(() => {});
+        try {
+          const cfContext = globalThis[Symbol.for("__cloudflare-context__")];
+          if (cfContext?.ctx?.waitUntil) cfContext.ctx.waitUntil(flushTask);
+        } catch {}
       } else {
         ensureAnalyticsFlushTimer();
       }

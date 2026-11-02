@@ -128,12 +128,12 @@ export function formatDoneLine({ usage, latency }) {
 }
 
 export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, apiKeyId, endpoint, label = "USAGE", silent = false }) {
-  if (!tokens || typeof tokens !== "object") return;
+  if (!tokens || typeof tokens !== "object") return Promise.resolve();
 
   const inTokens = tokens.input_tokens ?? tokens.prompt_tokens ?? 0;
   const outTokens = tokens.output_tokens ?? tokens.completion_tokens ?? 0;
 
-  if (inTokens === 0 && outTokens === 0) return;
+  if (inTokens === 0 && outTokens === 0) return Promise.resolve();
 
   if (!silent && isInfoLogEnabled()) {
     const time = hhmmss();
@@ -148,7 +148,7 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
     completion_tokens: tokens.completion_tokens ?? tokens.output_tokens ?? 0
   };
 
-  saveRequestUsage({
+  const task = saveRequestUsage({
     provider: provider || "unknown",
     model: model || "unknown",
     tokens: normalized,
@@ -157,5 +157,17 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
     apiKey: apiKey || undefined,
     apiKeyId: apiKeyId || undefined,
     endpoint: endpoint || null
-  }).catch(() => {});
+  }).catch((err) => {
+    console.error("[saveUsageStats] error saving request usage:", err);
+  });
+
+  // Keep Cloudflare worker isolate alive until DB writes finish
+  try {
+    const cfContext = globalThis[Symbol.for("__cloudflare-context__")];
+    if (cfContext?.ctx?.waitUntil) {
+      cfContext.ctx.waitUntil(task);
+    }
+  } catch {}
+
+  return task;
 }

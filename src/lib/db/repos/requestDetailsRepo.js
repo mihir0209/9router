@@ -156,7 +156,11 @@ export async function saveRequestDetail(detail) {
   // flushToDatabase() drains entire buffer in a loop, so all pushes during await are persisted.
   if (writeBuffer.length >= config.batchSize) {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-    flushToDatabase().catch((e) => console.error("[requestDetailsRepo] flush err:", e));
+    const task = flushToDatabase().catch((e) => console.error("[requestDetailsRepo] flush err:", e));
+    try {
+      const cfContext = globalThis[Symbol.for("__cloudflare-context__")];
+      if (cfContext?.ctx?.waitUntil) cfContext.ctx.waitUntil(task);
+    } catch {}
   } else if (!flushTimer) {
     flushTimer = setTimeout(() => {
       flushTimer = null;

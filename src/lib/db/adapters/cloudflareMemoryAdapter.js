@@ -82,6 +82,10 @@ export async function createCloudflareMemoryAdapter() {
     pendingWrites.add(task);
     Promise.resolve(task).finally(() => pendingWrites.delete(task)).catch(() => {});
     try {
+      const globalContext = globalThis[Symbol.for("__cloudflare-context__")];
+      if (globalContext?.ctx?.waitUntil) { globalContext.ctx.waitUntil(task); return; }
+    } catch {}
+    try {
       const current = cfModule?.getCloudflareContext?.();
       if (current?.ctx?.waitUntil) { current.ctx.waitUntil(task); return; }
     } catch { /* outside a request: fall back to the boot context */ }
