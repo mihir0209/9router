@@ -95,9 +95,10 @@ describe("buildOAuthRedirectUri", () => {
     ).toBe("http://127.0.0.1:443/callback");
   });
 
-  it("leaves the fixed-port loopback redirects for codex and xai untouched", () => {
+  it("leaves the fixed-port loopback redirects for codex, xai, and antigravity untouched", () => {
     expect(buildOAuthRedirectUri(httpsPublic, "codex")).toBe("http://localhost:1455/auth/callback");
     expect(buildOAuthRedirectUri(httpsPublic, "xai")).toBe("http://127.0.0.1:56121/callback");
+    expect(buildOAuthRedirectUri(httpsPublic, "antigravity")).toBe("http://localhost:8080/callback");
   });
 
   it("follows the public base URL for every non-fixed-port provider", () => {

@@ -19,6 +19,7 @@ const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
 export const CODEX_LOOPBACK_REDIRECT_URI = "http://localhost:1455/auth/callback";
 export const XAI_LOOPBACK_REDIRECT_URI = "http://127.0.0.1:56121/callback";
+export const GOOGLE_LOOPBACK_REDIRECT_URI = "http://localhost:8080/callback";
 
 export function isLoopbackHostname(hostname) {
   return LOOPBACK_HOSTNAMES.has(String(hostname || "").trim().toLowerCase());
@@ -51,6 +52,13 @@ export function buildOAuthRedirectUri(location, provider) {
     // registered redirect_uri exactly, so normalizing 127.0.0.1 to localhost (or
     // vice versa) breaks the exchange.
     return `http://${location.hostname}:${appPort}/callback`;
+  }
+
+  // Google OAuth desktop clients (Antigravity) only allow loopback URIs
+  // in Google Cloud Console. On remote/hosted dashboards, route to the registered
+  // loopback callback so Google does not fail with Error 400: redirect_uri_mismatch.
+  if (provider === "antigravity") {
+    return GOOGLE_LOOPBACK_REDIRECT_URI;
   }
 
   return `${publicBaseUrl(location)}/callback`;

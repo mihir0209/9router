@@ -712,14 +712,37 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         return;
       }
 
-      const url = new URL(input);
-      const code = url.searchParams.get("code");
-      const token = url.searchParams.get("token");
-      const state = url.searchParams.get("state");
-      const errorParam = url.searchParams.get("error");
+      let code = null;
+      let token = null;
+      let state = null;
 
-      if (errorParam) {
-        throw new Error(url.searchParams.get("error_description") || errorParam);
+      if (!input.includes("://")) {
+        if (input.startsWith("4/")) {
+          const splitIdx = input.indexOf("&");
+          code = splitIdx === -1 ? input : input.slice(0, splitIdx);
+          const stateMatch = input.match(/[?&]state=([^&]+)/);
+          if (stateMatch) state = decodeURIComponent(stateMatch[1]);
+        } else if (input.includes("code=")) {
+          const query = input.startsWith("?") ? input.slice(1) : input;
+          const params = new URLSearchParams(query);
+          code = params.get("code");
+          state = params.get("state");
+          token = params.get("token");
+        } else if (input.length > 20 && !input.includes(" ")) {
+          code = input;
+        }
+      }
+
+      if (!code && !token) {
+        const url = new URL(input);
+        code = url.searchParams.get("code");
+        token = url.searchParams.get("token");
+        state = url.searchParams.get("state");
+        const errorParam = url.searchParams.get("error");
+
+        if (errorParam) {
+          throw new Error(url.searchParams.get("error_description") || errorParam);
+        }
       }
 
       if (!code && !token) {
@@ -750,13 +773,16 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
   if (!provider || !providerInfo) return null;
   const isXaiProvider = provider === "xai";
   const isKimchiProvider = provider === "kimchi";
+  const isGoogleProvider = provider === "antigravity" || provider === "gemini-cli";
   const deviceLoginUrl = deviceData?.verification_uri_complete || deviceData?.verification_uri || "";
   const modalTitle = isXaiProvider ? "Connect Grok Build OAuth" : `Connect ${providerInfo.name}`;
   const manualPlaceholder = isXaiProvider
     ? "http://127.0.0.1:56121/callback?code=... or copied code"
     : isKimchiProvider
       ? `${placeholderUrl.replace("code=...", "token=...")} or copied token`
-      : placeholderUrl;
+      : isGoogleProvider
+        ? "http://localhost:8080/callback?code=... or authorization code"
+        : placeholderUrl;
 
   return (
     <Modal isOpen={isOpen} title={modalTitle} onClose={handleClose} size="lg">
