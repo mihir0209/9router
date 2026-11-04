@@ -127,6 +127,27 @@ export async function getProviderConnections(filter = {}) {
       return true;
     });
   }
+
+  // If a specific provider was requested but no matching connections were found in the
+  // in-memory cache, an external isolate may have newly added/activated a connection in D1.
+  // Force a scoped resync for providerConnections once before failing closed with 404.
+  if (filter.provider && result.length === 0 && connRepoCache.list) {
+    const db = await getAdapter();
+    if (typeof db.resync === "function") {
+      await db.resync(true, ["providerConnections"]).catch(() => {});
+      const rows = db.all("SELECT * FROM providerConnections");
+      list = rows.map(rowToConn);
+      list.sort((a, b) => (a.priority || 999) - (b.priority || 999));
+      connRepoCache.list = list;
+      connRepoCache.ts = Date.now();
+      result = list.filter((c) => {
+        if (filter.provider && c.provider !== filter.provider) return false;
+        if (filter.isActive !== undefined && Boolean(c.isActive) !== Boolean(filter.isActive)) return false;
+        return true;
+      });
+    }
+  }
+
   return result.map((c) => ({ ...c }));
 }
 

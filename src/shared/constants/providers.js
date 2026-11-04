@@ -22,6 +22,7 @@ function buildProviderEntry(r) {
     ...display,
     id: r.id,
     alias: r.uiAlias || r.alias,
+    aliases: r.aliases || [],
     ...(r.hidden ? { hidden: true } : {}),
     ...mediaFields,
     ...(r.priority !== undefined ? { priority: r.priority } : {}),
@@ -118,7 +119,7 @@ export const AUTH_METHODS = {
 // Helper: Get provider by alias
 export function getProviderByAlias(alias) {
   for (const provider of Object.values(AI_PROVIDERS)) {
-    if (provider.alias === alias || provider.id === alias) {
+    if (provider.alias === alias || provider.id === alias || (Array.isArray(provider.aliases) && provider.aliases.includes(alias))) {
       return provider;
     }
   }
@@ -139,7 +140,8 @@ export function getProviderAlias(providerId) {
 
 // Alias to ID mapping (for quick lookup)
 export const ALIAS_TO_ID = Object.values(AI_PROVIDERS).reduce((acc, p) => {
-  acc[p.alias] = p.id;
+  if (p.alias) acc[p.alias] = p.id;
+  for (const a of p.aliases || []) acc[a] = p.id;
   return acc;
 }, {});
 
