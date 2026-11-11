@@ -56,7 +56,7 @@ export function filterToOpenAIFormat(body, opts = {}) {
       }
       
       // Text-only payloads go out as a plain string; see collapseTextParts.
-      return { ...msg, content: collapseTextParts(filteredContent) };
+      return { ...msg, content: collapseTextParts(filteredContent, opts) };
     }
     
     return msg;
