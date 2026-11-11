@@ -67,4 +67,43 @@ describe("Vertex API-key locations", () => {
       apiKey: "test-key", providerSpecificData: { projectId: "test-project", location: "eu" },
     })).toBe("https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/endpoints/openapi/chat/completions?key=test-key");
   });
+
+  it("smart-routes gemini-4-carbon to global even when connection is set to asia-southeast1", () => {
+    const executor = new VertexExecutor();
+    // OAuth / SA flow
+    const oauthUrl = new URL(executor.buildUrl("gemini-4-carbon", false, 0, {
+      accessToken: "test-token",
+      providerSpecificData: { projectId: "698194328976", location: "asia-southeast1" },
+    }));
+    expect(oauthUrl.pathname).toBe("/v1/projects/698194328976/locations/global/publishers/google/models/gemini-4-carbon:generateContent");
+
+    // API-key flow
+    const apiKeyUrl = new URL(executor.buildUrl("gemini-4-carbon", true, 0, {
+      apiKey: "test-key",
+      providerSpecificData: { projectId: "698194328976", location: "asia-southeast1" },
+    }));
+    expect(apiKeyUrl.pathname).toBe("/v1/projects/698194328976/locations/global/publishers/google/models/gemini-4-carbon:streamGenerateContent");
+  });
+
+  it("keeps gemini-4-argon on asia-southeast1 when configured on connection", () => {
+    const executor = new VertexExecutor();
+    const url = new URL(executor.buildUrl("gemini-4-argon", false, 0, {
+      accessToken: "test-token",
+      providerSpecificData: { projectId: "698194328976", location: "asia-southeast1" },
+    }));
+    expect(url.pathname).toBe("/v1/projects/698194328976/locations/asia-southeast1/publishers/google/models/gemini-4-argon:generateContent");
+  });
+
+  it("honors per-model location override in providerSpecificData if provided", () => {
+    const executor = new VertexExecutor();
+    const url = new URL(executor.buildUrl("gemini-4-carbon", false, 0, {
+      accessToken: "test-token",
+      providerSpecificData: {
+        projectId: "698194328976",
+        location: "asia-southeast1",
+        modelLocations: { "gemini-4-carbon": "us" },
+      },
+    }));
+    expect(url.pathname).toBe("/v1/projects/698194328976/locations/us/publishers/google/models/gemini-4-carbon:generateContent");
+  });
 });

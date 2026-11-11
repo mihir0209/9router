@@ -50,6 +50,40 @@ async function resolveProjectId(apiKey) {
 }
 
 /**
+ * Resolves the location to use for Vertex AI.
+ *
+ * Some models (like Gemini 4 Carbon) are only deployed on Google's global endpoint
+ * (or us/eu multi-region) and will fail with HTTP 404 NOT_FOUND on regional endpoints
+ * like asia-southeast1. Using global is also 10% cheaper.
+ *
+ * Models like Gemini 4 Argon, Gemini 2.5/3.x Flash, etc. honor the configured location
+ * (e.g. asia-southeast1).
+ */
+export function resolveVertexLocation(provider, model, configuredLocation, providerSpecificData = null) {
+  const baseModel = (typeof model === "string" ? model : "").replace(/\([^()]+\)\s*$/, "").trim();
+  const perModelOverride = providerSpecificData?.modelLocations?.[baseModel]
+    || providerSpecificData?.modelLocations?.[model];
+  if (perModelOverride) {
+    return perModelOverride;
+  }
+
+  const meta = getModelMeta(provider, model);
+  if (meta?.forcedLocation) {
+    return meta.forcedLocation;
+  }
+
+  if (/carbon/i.test(baseModel)) {
+    return "global";
+  }
+
+  if (configuredLocation) {
+    return configuredLocation;
+  }
+
+  return meta?.defaultLocation || null;
+}
+
+/**
  * VertexExecutor - Google Cloud Vertex AI
  *
  * "vertex"         → Gemini models via regional/global Vertex endpoint
@@ -92,19 +126,28 @@ export class VertexExecutor extends BaseExecutor {
           "Add quota_project_id to your ADC JSON or set providerSpecificData.projectId."
         );
       }
-      // Global-only models (registry defaultLocation, e.g. Argon) must not fall back to a regional location.
-      const location = credentials?.providerSpecificData?.location
-        || getModelMeta(this.provider, model)?.defaultLocation
-        || "us-central1";
+      // Global-only models (registry forcedLocation/defaultLocation, e.g. Carbon on global)
+      // must not route to an unsupported regional location like asia-southeast1.
+      const location = resolveVertexLocation(
+        this.provider,
+        model,
+        credentials?.providerSpecificData?.location,
+        credentials?.providerSpecificData
+      ) || "us-central1";
       let url = `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${model}:${action}`;
       if (stream) url += "?alt=sse";
       return url;
     }
 
-    // Raw API keys with an explicit project must honor its location (e.g. Argon on global).
+    // Raw API keys with an explicit project must honor its location (e.g. Argon on regional, Carbon on global).
     // Keep the projectless endpoint for existing connections without a configured project.
     // ?alt=sse is required for proper SSE streaming (matches every other Gemini executor)
-    const location = credentials?.providerSpecificData?.location || "global";
+    const location = resolveVertexLocation(
+      this.provider,
+      model,
+      credentials?.providerSpecificData?.location,
+      credentials?.providerSpecificData
+    ) || "global";
     let url = projectId
       ? `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${model}:${action}`
       : `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:${action}`;
