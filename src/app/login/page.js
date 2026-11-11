@@ -9,7 +9,7 @@ export default function LoginPage() {
   const [resetHint, setResetHint] = useState("");
   const [retryAfter, setRetryAfter] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [hasPassword, setHasPassword] = useState(null);
+  const [hasPassword, setHasPassword] = useState(true);
   const [authMode, setAuthMode] = useState("password");
   const [ssoType, setSsoType] = useState("oidc");
   const [oidcConfigured, setOidcConfigured] = useState(false);

@@ -22,6 +22,7 @@ export const metadata = {
   icons: {
     icon: "/favicon.svg",
   },
+  manifest: "/manifest.webmanifest",
 };
 
 export const viewport = {

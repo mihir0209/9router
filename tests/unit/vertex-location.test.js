@@ -106,4 +106,27 @@ describe("Vertex API-key locations", () => {
     }));
     expect(url.pathname).toBe("/v1/projects/698194328976/locations/us/publishers/google/models/gemini-4-carbon:generateContent");
   });
+
+  it("defaults all models to global when no location is configured", () => {
+    const executor = new VertexExecutor();
+    for (const model of ["gemini-4-argon", "gemini-4-carbon", "gemini-3.1-pro-preview", "gemini-2.5-flash"]) {
+      const url = new URL(executor.buildUrl(model, false, 0, {
+        accessToken: "test-token",
+        providerSpecificData: { projectId: "698194328976" },
+      }));
+      expect(url.pathname).toBe(`/v1/projects/698194328976/locations/global/publishers/google/models/${model}:generateContent`);
+    }
+  });
+
+  it("honors user custom location setting for any model", () => {
+    const executor = new VertexExecutor();
+    const url = new URL(executor.buildUrl("gemini-3.1-pro-preview", false, 0, {
+      accessToken: "test-token",
+      providerSpecificData: {
+        projectId: "698194328976",
+        location: "us-central1",
+      },
+    }));
+    expect(url.pathname).toBe("/v1/projects/698194328976/locations/us-central1/publishers/google/models/gemini-3.1-pro-preview:generateContent");
+  });
 });

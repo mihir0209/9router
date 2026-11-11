@@ -23,18 +23,17 @@ export default {
     format: "vertex",
   },
   models: [
-    // Argon is served from regional locations (e.g. asia-southeast1, us-central1) as well as global.
+    // All models default to the global location unless overridden by custom setting
     { id: "gemini-4-argon", name: "Gemini 4 Argon", defaultLocation: "global" },
-    // Carbon is served only from the global endpoint (or us/eu multi-regions), never regional locations.
-    { id: "gemini-4-carbon", name: "Gemini 4 Carbon", defaultLocation: "global", forcedLocation: "global" },
-    { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview" },
-    { id: "gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite Preview" },
-    { id: "gemini-3-flash-preview", name: "Gemini 3 Flash Preview" },
-    { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
-    { id: "veo-3.1-generate-preview", name: "Veo 3.1 (Preview)", params: ["duration","aspect_ratio","resolution","negative_prompt","seed","storage_uri","generate_audio"], kind: "video" },
-    { id: "veo-3.1-fast-generate-preview", name: "Veo 3.1 Fast (Preview)", params: ["duration","aspect_ratio","resolution","negative_prompt","seed","storage_uri","generate_audio"], kind: "video" },
-    { id: "veo-3.0-generate-001", name: "Veo 3", params: ["duration","aspect_ratio","resolution","negative_prompt","seed","storage_uri","generate_audio"], kind: "video" },
-    { id: "veo-2.0-generate-001", name: "Veo 2", params: ["duration","aspect_ratio","negative_prompt","seed","storage_uri"], kind: "video" },
+    { id: "gemini-4-carbon", name: "Gemini 4 Carbon", defaultLocation: "global" },
+    { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", defaultLocation: "global" },
+    { id: "gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite Preview", defaultLocation: "global" },
+    { id: "gemini-3-flash-preview", name: "Gemini 3 Flash Preview", defaultLocation: "global" },
+    { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", defaultLocation: "global" },
+    { id: "veo-3.1-generate-preview", name: "Veo 3.1 (Preview)", defaultLocation: "global", params: ["duration","aspect_ratio","resolution","negative_prompt","seed","storage_uri","generate_audio"], kind: "video" },
+    { id: "veo-3.1-fast-generate-preview", name: "Veo 3.1 Fast (Preview)", defaultLocation: "global", params: ["duration","aspect_ratio","resolution","negative_prompt","seed","storage_uri","generate_audio"], kind: "video" },
+    { id: "veo-3.0-generate-001", name: "Veo 3", defaultLocation: "global", params: ["duration","aspect_ratio","resolution","negative_prompt","seed","storage_uri","generate_audio"], kind: "video" },
+    { id: "veo-2.0-generate-001", name: "Veo 2", defaultLocation: "global", params: ["duration","aspect_ratio","negative_prompt","seed","storage_uri"], kind: "video" },
   ],
   serviceKinds: ["llm","imageToText","video"],
   // Veo via predictLongRunning + fetchPredictOperation (adapter: handlers/videoProviders/vertex.js).

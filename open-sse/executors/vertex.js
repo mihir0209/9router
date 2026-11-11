@@ -52,35 +52,39 @@ async function resolveProjectId(apiKey) {
 /**
  * Resolves the location to use for Vertex AI.
  *
- * Some models (like Gemini 4 Carbon) are only deployed on Google's global endpoint
- * (or us/eu multi-region) and will fail with HTTP 404 NOT_FOUND on regional endpoints
- * like asia-southeast1. Using global is also 10% cheaper.
- *
- * Models like Gemini 4 Argon, Gemini 2.5/3.x Flash, etc. honor the configured location
- * (e.g. asia-southeast1).
+ * Defaults to "global" for all models unless explicitly overridden.
+ * Allows custom settings per-model (providerSpecificData.modelLocations) or
+ * connection-level custom settings (providerSpecificData.location).
+ * If a custom regional location is specified on the connection (e.g. asia-southeast1),
+ * models like Carbon that only exist on global/us/eu will safely route to global unless
+ * a per-model override explicitly targets another supported region.
  */
 export function resolveVertexLocation(provider, model, configuredLocation, providerSpecificData = null) {
   const baseModel = (typeof model === "string" ? model : "").replace(/\([^()]+\)\s*$/, "").trim();
+
+  // 1. Custom per-model override from providerSpecificData (user custom setting)
   const perModelOverride = providerSpecificData?.modelLocations?.[baseModel]
-    || providerSpecificData?.modelLocations?.[model];
+    || providerSpecificData?.modelLocations?.[model]
+    || providerSpecificData?.locations?.[baseModel]
+    || providerSpecificData?.locations?.[model];
   if (perModelOverride) {
     return perModelOverride;
   }
 
+  // 2. Custom connection-level location override (user custom setting)
+  const customLoc = configuredLocation || providerSpecificData?.location;
+  if (customLoc) {
+    // If connection is set to an unsupported regional endpoint (e.g. asia-southeast1),
+    // carbon is only available on global, us, or eu multi-region.
+    if (/carbon/i.test(baseModel) && /^(asia-|australia-|southamerica-|europe-west[0-9])/i.test(customLoc)) {
+      return "global";
+    }
+    return customLoc;
+  }
+
+  // 3. Fallback to model registry default or "global"
   const meta = getModelMeta(provider, model);
-  if (meta?.forcedLocation) {
-    return meta.forcedLocation;
-  }
-
-  if (/carbon/i.test(baseModel)) {
-    return "global";
-  }
-
-  if (configuredLocation) {
-    return configuredLocation;
-  }
-
-  return meta?.defaultLocation || null;
+  return meta?.defaultLocation || "global";
 }
 
 /**
@@ -106,7 +110,8 @@ export class VertexExecutor extends BaseExecutor {
     const projectId =
       saJson?.project_id ||
       adcJson?.quota_project_id ||
-      credentials?.providerSpecificData?.projectId;
+      credentials?.providerSpecificData?.projectId ||
+      (rawKey ? projectIdCache.get(rawKey) : null);
 
     if (this.provider === "vertex-partner") {
       // Partner models require project_id in path regardless of auth method
@@ -202,12 +207,20 @@ export class VertexExecutor extends BaseExecutor {
       credentials.accessToken = result.accessToken;
     }
 
-    // vertex-partner with raw key: auto-resolve project_id if not provided
-    if (this.provider === "vertex-partner" && !saJson && !adcJson && !credentials?.providerSpecificData?.projectId) {
-      const projectId = await resolveProjectId(credentials.apiKey);
-      if (!projectId) throw new Error("Vertex: could not resolve project_id from API key. Please add it manually in provider settings.");
-      log?.debug?.("VERTEX", `Resolved project_id: ${projectId}`);
-      credentials.providerSpecificData = { ...credentials.providerSpecificData, projectId };
+    // Auto-resolve project_id from raw API key if not provided (both vertex and vertex-partner)
+    if (!saJson && !adcJson && !credentials?.providerSpecificData?.projectId && credentials?.apiKey) {
+      try {
+        const projectId = await resolveProjectId(credentials.apiKey);
+        if (projectId) {
+          credentials.providerSpecificData = { ...credentials.providerSpecificData, projectId };
+          log?.debug?.("VERTEX", `Resolved project_id: ${projectId}`);
+        }
+      } catch (e) {
+        if (this.provider === "vertex-partner") {
+          throw new Error("Vertex: could not resolve project_id from API key. Please add it manually in provider settings.");
+        }
+        log?.warn?.("VERTEX", `Failed to resolve project_id: ${e.message}`);
+      }
     }
 
     const url = this.buildUrl(model, stream, 0, credentials);
