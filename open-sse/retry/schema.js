@@ -230,6 +230,7 @@ export function decisionFromRule(rule, backoffLevel = 0) {
   return {
     shouldFallback: true,
     cooldownMs: rule.cooldownMs != null ? rule.cooldownMs : TRANSIENT_COOLDOWN_MS,
+    modelScoped: Boolean(rule.modelScoped),
   };
 }
 

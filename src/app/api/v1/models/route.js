@@ -18,11 +18,13 @@ import { resolveClinepassModels, resolveClineModels } from "open-sse/services/cl
 import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
+import { resolveCommandCodeModels } from "open-sse/services/commandcodeModels.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
 import { mapWithConcurrency } from "@/lib/async/mapWithConcurrency.js";
 import { resolveProviderModelList, fetchCompatibleModelIds, INTERNAL_MODELS_FETCH_HEADER } from "@/lib/modelCatalog/providerModelResolver.js";
+import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 
 // Combo seats use UI aliases; the model registry also has transport aliases.
 // Capability overrides and catalog limits are keyed by provider id, so map a
@@ -50,6 +52,7 @@ import {
   unauthorizedModelsResponse,
   withCatalog,
 } from "@/lib/modelCatalog/modelsListCache.js";
+
 
 
 // LLM kind sentinel — combos/models with no explicit kind default to LLM
@@ -635,6 +638,11 @@ export async function buildModelsList(kindFilter, options = {}) {
           }
           if (Number.isFinite(contextWindow)) originalModel.context_length = contextWindow;
           if (Number.isFinite(maxOutput)) originalModel.max_completion_tokens = maxOutput;
+          // Selectable reasoning levels (the set the dashboard picker shows) so clients
+          // can build their effort selector from the gateway instead of keeping a
+          // per-model table. Omitted when the model has no reasoning.
+          const thinkingLevels = getThinkingLevels(providerId, modelId);
+          if (Array.isArray(thinkingLevels) && thinkingLevels.length > 0) originalModel.thinking_levels = thinkingLevels;
         }
         providerOutput.push(originalModel);
 
@@ -648,7 +656,9 @@ export async function buildModelsList(kindFilter, options = {}) {
           if (caps) aliasModel.capabilities = caps;
           if (Number.isFinite(originalModel.context_length)) aliasModel.context_length = originalModel.context_length;
           if (Number.isFinite(originalModel.max_completion_tokens)) aliasModel.max_completion_tokens = originalModel.max_completion_tokens;
+          if (originalModel.thinking_levels) aliasModel.thinking_levels = originalModel.thinking_levels;
           providerOutput.push(aliasModel);
+        }
         }
       }
 

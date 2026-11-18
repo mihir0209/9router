@@ -20,6 +20,10 @@ export default {
   transport: {
     baseUrl: "https://integrate.api.nvidia.com/v1/chat/completions",
     validateUrl: "https://integrate.api.nvidia.com/v1/models",
+    timeoutMs: 90000,
+    quirks: {
+      dropClientMetadata: true,
+    },
   },
   // NIM's catalogue is large and moves fast. integrate.api.nvidia.com/v1/models
   // requires a key, so there is no modelsFetcher here — the list below is a
@@ -35,15 +39,19 @@ export default {
     { id: "thinkingmachines/inkling", name: "Inkling" },
     { id: "deepseek-ai/deepseek-v4-pro-0813", name: "DeepSeek V4 Pro 0813" },
     { id: "deepseek-ai/deepseek-v4-flash-0731", name: "DeepSeek V4 Flash 0731" },
-    { id: "nvidia/nemotron-3.5-lightning-30b-a3b", name: "Nemotron 3.5 Lightning 30B" },
+    { id: "nvidia/nemotron-3.5-lightning-30b-a3b", name: "Nemotron 3.5 Lightning" },
+    { id: "nvidia/nemotron-3.5-bolt-e4b", name: "Nemotron 3.5 Bolt" },
     { id: "nvidia/nemotron-3-super-120b-a12b", name: "Nemotron 3 Super 120B" },
-    { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", name: "Nemotron 3 Nano Omni 30B" },
+    { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", name: "Nemotron 3 Nano Omni" },
     { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra" },
     { id: "nvidia/llama-3.3-nemotron-super-49b-v1.5", name: "Llama 3.3 Nemotron Super 49B v1.5" },
     { id: "nvidia/llama-3.1-nemotron-ultra-253b-v1", name: "Llama 3.1 Nemotron Ultra 253B" },
     { id: "nvidia/nemotron-nano-12b-v2-vl", name: "Nemotron Nano 12B v2 VL" },
     { id: "nvidia/nvidia-nemotron-nano-9b-v2", name: "Nemotron Nano 9B v2" },
     { id: "nvidia/nemotron-3-nano-30b-a3b", name: "Nemotron 3 Nano 30B" },
+    { id: "meta/llama-guard-4-12b", name: "Llama Guard 4 12B" },
+    { id: "nvidia/riva-translate-4b-instruct-v2", name: "Riva Translate 4B v2" },
+    { id: "meta/llama-3.3-70b-instruct", name: "Llama 3.3 70B Instruct" },
     { id: "qwen/qwen3.5-397b-a17b", name: "Qwen 3.5 397B" },
     { id: "qwen/qwen3.5-122b-a10b", name: "Qwen 3.5 122B" },
     { id: "qwen/qwen3-coder-480b-a35b-instruct", name: "Qwen 3 Coder 480B" },

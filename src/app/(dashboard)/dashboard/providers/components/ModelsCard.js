@@ -1,5 +1,7 @@
 "use client";
 
+import { applyQoderModelNames } from "@/shared/utils/providerCustomModels";
+
 import { useState, useCallback, useEffect } from "react";
 import PropTypes from "prop-types";
 import { Card, Button, Modal } from "@/shared/components";
@@ -268,11 +270,12 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
 
   // Refreshed entries are shown alongside the built-in catalog, deduped so a
   // model present in both is not listed twice.
+  const baseBuiltIn = applyQoderModelNames(builtInModels, customModels, providerAlias);
   const displayModels = [
-    ...builtInModels,
-    ...configuredModels.filter((id) => !builtInModels.some((model) => model.id === id)).map((id) => ({ id })),
+    ...baseBuiltIn,
+    ...configuredModels.filter((id) => !baseBuiltIn.some((model) => model.id === id)).map((id) => ({ id })),
     ...cachedModels
-      .filter((m) => ![...builtInModels, ...configuredModels].some((b) => b.id === m.id))
+      .filter((m) => ![...baseBuiltIn, ...configuredModels].some((b) => b.id === m.id))
       .map((m) => ({ ...m, isCached: true })),
   ];
 
