@@ -82,6 +82,60 @@ pub struct Combo {
     pub updated_at: String,
 }
 
+/// Provider node (custom endpoint with URL prefix routing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderNode {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub node_type: Option<String>,
+    pub name: Option<String>,
+    pub prefix: String,
+    #[serde(rename = "baseUrl")]
+    pub base_url: String,
+    #[serde(rename = "apiType")]
+    pub api_type: Option<String>,
+    pub data: serde_json::Value,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+}
+
+/// Proxy pool configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyPool {
+    pub id: String,
+    #[serde(rename = "isActive")]
+    pub is_active: bool,
+    #[serde(rename = "testStatus")]
+    pub test_status: Option<String>,
+    pub data: serde_json::Value,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+}
+
+/// Plan definition for key budget and concurrency constraints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Plan {
+    pub id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub limit_micros: i64,
+    pub limit_tokens: i64,
+    pub rpm_limit: i64,
+    pub tpm_limit: i64,
+    pub concurrency_limit: i64,
+    pub period: String,
+    pub alert_pct: i64,
+    pub hard_cutoff: bool,
+    pub allowed_models: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// Usage record queued via write-behind logging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
@@ -857,6 +911,160 @@ impl Database {
             guard.query_row("SELECT COUNT(*) FROM usageHistory", [], |r| r.get(0))?;
         Ok(count)
     }
+
+    // ==========================================
+    // Provider Nodes Operations
+    // ==========================================
+
+    /// Loads all provider nodes (custom endpoints with prefixes).
+    pub fn load_provider_nodes(&self) -> anyhow::Result<Vec<ProviderNode>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare(
+            "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes ORDER BY createdAt ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let node_type: Option<String> = row.get(1)?;
+            let name: Option<String> = row.get(2)?;
+            let data_str: String = row.get(3)?;
+            let created_at: String = row.get(4)?;
+            let updated_at: String = row.get(5)?;
+
+            let val: serde_json::Value = serde_json::from_str(&data_str).unwrap_or(serde_json::Value::Null);
+            let prefix = val.get("prefix").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let base_url = val.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let api_type = val.get("apiType").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+            Ok(ProviderNode {
+                id,
+                node_type,
+                name,
+                prefix,
+                base_url,
+                api_type,
+                data: val,
+                created_at,
+                updated_at,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    // ==========================================
+    // Proxy Pools Operations
+    // ==========================================
+
+    /// Loads all proxy pool configurations.
+    pub fn load_proxy_pools(&self) -> anyhow::Result<Vec<ProxyPool>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare(
+            "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools ORDER BY createdAt ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let is_active: i64 = row.get(1)?;
+            let test_status: Option<String> = row.get(2)?;
+            let data_str: String = row.get(3)?;
+            let created_at: String = row.get(4)?;
+            let updated_at: String = row.get(5)?;
+            let val: serde_json::Value = serde_json::from_str(&data_str).unwrap_or(serde_json::Value::Null);
+
+            Ok(ProxyPool {
+                id,
+                is_active: is_active == 1,
+                test_status,
+                data: val,
+                created_at,
+                updated_at,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    // ==========================================
+    // Plans Operations
+    // ==========================================
+
+    /// Loads all rate-limit / token usage plans.
+    pub fn load_plans(&self) -> anyhow::Result<Vec<Plan>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare(
+            "SELECT id, tenant_id, name, description, limit_micros, limit_tokens, rpm_limit, tpm_limit, concurrency_limit, period, alert_pct, hard_cutoff, allowed_models, created_at, updated_at FROM plans ORDER BY created_at ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(Plan {
+                id: row.get(0)?,
+                tenant_id: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                limit_micros: row.get(4)?,
+                limit_tokens: row.get(5)?,
+                rpm_limit: row.get(6)?,
+                tpm_limit: row.get(7)?,
+                concurrency_limit: row.get(8)?,
+                period: row.get(9)?,
+                alert_pct: row.get(10)?,
+                hard_cutoff: row.get::<_, i64>(11)? == 1,
+                allowed_models: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    // ==========================================
+    // Recursive Combo Resolution
+    // ==========================================
+
+    /// Recursively expands a model or combo name into an ordered list of candidate models,
+    /// terminating cycles safely with a visited set.
+    pub fn resolve_combo_chain(&self, requested_model: &str) -> Vec<String> {
+        let mut visited = std::collections::HashSet::new();
+        let mut results = Vec::new();
+        self.expand_combo_recursive(requested_model, &mut visited, &mut results);
+        if results.is_empty() {
+            results.push(requested_model.to_string());
+        }
+        results
+    }
+
+    fn expand_combo_recursive(
+        &self,
+        model: &str,
+        visited: &mut std::collections::HashSet<String>,
+        results: &mut Vec<String>,
+    ) {
+        if visited.contains(model) {
+            return;
+        }
+        if let Ok(Some(combo)) = self.get_combo_by_name(model) {
+            visited.insert(model.to_string());
+            for sub in &combo.models {
+                self.expand_combo_recursive(sub, visited, results);
+            }
+        } else {
+            results.push(model.to_string());
+        }
+    }
 }
 
 /// Helper to match model patterns like `*`, `openai/*`, or `gpt-4o`.
@@ -1069,5 +1277,31 @@ mod tests {
             .expect("combo must exist");
         assert_eq!(loaded_combo.models.len(), 2);
         assert_eq!(loaded_combo.models[0], "anthropic/claude-3-5-sonnet");
+
+        // Test combo recursive expansion & cycle protection
+        let combo_a = Combo {
+            id: "combo-a".to_string(),
+            name: "group-a".to_string(),
+            kind: None,
+            models: vec!["group-b".to_string(), "leaf-1".to_string()],
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        let combo_b = Combo {
+            id: "combo-b".to_string(),
+            name: "group-b".to_string(),
+            kind: None,
+            models: vec!["group-a".to_string(), "leaf-2".to_string()],
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        db.save_combo(&combo_a).expect("save a");
+        db.save_combo(&combo_b).expect("save b");
+
+        let chain = db.resolve_combo_chain("group-a");
+        assert_eq!(chain, vec!["leaf-2".to_string(), "leaf-1".to_string()]);
+
+        let plain_chain = db.resolve_combo_chain("non-existent-model");
+        assert_eq!(plain_chain, vec!["non-existent-model".to_string()]);
     }
 }

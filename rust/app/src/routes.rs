@@ -182,6 +182,127 @@ pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -
 }
 
 // ============================================================================
+// Target Resolution Helper for Candidates
+// ============================================================================
+
+fn resolve_target_for_candidate(
+    candidate: &str,
+    provider_nodes: &[crate::db::ProviderNode],
+    all_connections: &[ProviderConnection],
+) -> (UpstreamConnection, String) {
+    // 1. Check if candidate starts with a node prefix (e.g. "h/glm-5.2", "9r/...", "neon/...", "srvm/...")
+    for node in provider_nodes {
+        if !node.prefix.is_empty() {
+            let prefix_slash = format!("{}/", node.prefix);
+            if candidate.starts_with(&prefix_slash) || candidate == node.prefix {
+                let upstream_model = if candidate.starts_with(&prefix_slash) {
+                    candidate[prefix_slash.len()..].to_string()
+                } else {
+                    candidate.to_string()
+                };
+
+                let mut conn = UpstreamConnection::default();
+                conn.provider = node.name.clone().unwrap_or_else(|| node.prefix.clone());
+                conn.base_url = Some(node.base_url.clone());
+
+                if let Some(pc) = all_connections.iter().find(|c| c.is_active && c.provider == node.id) {
+                    conn.api_key = pc.data.api_key.clone();
+                    if let Some(hdrs) = &pc.data.headers {
+                        let mut hmap = HeaderMap::new();
+                        for (k, v) in hdrs {
+                            if let (Ok(kn), Ok(kv)) = (
+                                header::HeaderName::from_bytes(k.as_bytes()),
+                                HeaderValue::from_str(v),
+                            ) {
+                                hmap.insert(kn, kv);
+                            }
+                        }
+                        conn.custom_headers = Some(hmap);
+                    }
+                }
+
+                return (conn, upstream_model);
+            }
+        }
+    }
+
+    // 2. Check Cloudflare prefixes ("cf/", "cfr/", "@cf/")
+    if candidate.starts_with("cf/") || candidate.starts_with("cfr/") || candidate.starts_with("@cf/") {
+        let upstream_model = if candidate.starts_with("cf/") {
+            candidate[3..].to_string()
+        } else if candidate.starts_with("cfr/") {
+            candidate[4..].to_string()
+        } else {
+            candidate.to_string()
+        };
+
+        // Prefer Cloudflare Gateway node if configured
+        if let Some(cf_node) = provider_nodes.iter().find(|n| n.prefix == "cfr" || n.prefix == "cf") {
+            let mut conn = UpstreamConnection::default();
+            conn.provider = "cloudflare".to_string();
+            conn.base_url = Some(cf_node.base_url.clone());
+            if let Some(pc) = all_connections.iter().find(|c| c.is_active && (c.provider == cf_node.id || c.provider == "cloudflare-ai")) {
+                conn.api_key = pc.data.api_key.clone();
+            }
+            return (conn, upstream_model);
+        }
+
+        // Direct Cloudflare AI Run endpoint
+        if let Some(pc) = all_connections.iter().find(|c| c.is_active && c.provider == "cloudflare-ai") {
+            let account_id = pc.data.extra.get("providerSpecificData")
+                .and_then(|psd| psd.get("accountId"))
+                .and_then(|aid| aid.as_str())
+                .unwrap_or("1da22c19548115accf1b98ab7c562b2c");
+            let base_url = format!("https://api.cloudflare.com/client/v4/accounts/{}/ai/run", account_id);
+            let mut conn = UpstreamConnection::default();
+            conn.provider = "cloudflare-ai".to_string();
+            conn.base_url = Some(base_url);
+            conn.api_key = pc.data.api_key.clone();
+            return (conn, upstream_model);
+        }
+    }
+
+    // 3. Check standard provider prefix (e.g. "vertex/gemini-4-carbon", "azure/gpt-5.6-terra")
+    if let Some((p_prefix, m_part)) = candidate.split_once('/') {
+        if let Some(pc) = all_connections.iter().find(|c| c.is_active && c.provider.eq_ignore_ascii_case(p_prefix)) {
+            let mut conn = UpstreamConnection::default();
+            conn.provider = pc.provider.clone();
+            conn.base_url = pc.data.base_url.clone();
+            conn.api_key = pc.data.api_key.clone();
+            return (conn, m_part.to_string());
+        }
+    }
+
+    // 4. Match by defaultModel
+    if let Some(pc) = all_connections.iter().find(|c| c.is_active && c.data.default_model.as_deref() == Some(candidate)) {
+        let mut conn = UpstreamConnection::default();
+        conn.provider = pc.provider.clone();
+        conn.base_url = pc.data.base_url.clone();
+        conn.api_key = pc.data.api_key.clone();
+        return (conn, candidate.to_string());
+    }
+
+    // 5. Default provider inference
+    let provider = if candidate.starts_with("claude") {
+        "anthropic".to_string()
+    } else if candidate.contains("gemini") {
+        "vertex".to_string()
+    } else {
+        "openai".to_string()
+    };
+
+    let conn_opt = all_connections.iter().find(|c| c.is_active && c.provider.eq_ignore_ascii_case(&provider));
+    let mut conn = UpstreamConnection::default();
+    conn.provider = provider;
+    if let Some(pc) = conn_opt {
+        conn.base_url = pc.data.base_url.clone();
+        conn.api_key = pc.data.api_key.clone();
+    }
+
+    (conn, candidate.to_string())
+}
+
+// ============================================================================
 // Chat Completions Handler
 // ============================================================================
 
@@ -212,7 +333,7 @@ pub async fn chat_completions_handler(
         }
     };
 
-    let (provider_override, clean_model) = proxy::strip_provider_prefix(&req.model);
+    let (_, clean_model) = proxy::strip_provider_prefix(&req.model);
 
     if let Err(e) = state.db.check_model_allowed(&api_key, &clean_model) {
         return (
@@ -228,173 +349,164 @@ pub async fn chat_completions_handler(
             .into_response();
     }
 
-    let active_connections = state
-        .db
-        .get_active_provider_connections(provider_override.as_deref())
-        .unwrap_or_default();
+    let candidates = state.db.resolve_combo_chain(&req.model);
+    tracing::info!("Requested model '{}' expanded to {} candidate(s): {:?}", req.model, candidates.len(), candidates);
 
-    let mut conn = UpstreamConnection::default();
-    if let Some(pc) = active_connections.first() {
-        conn.provider = pc.provider.clone();
-        conn.base_url = pc.data.base_url.clone();
-        conn.api_key = pc.data.api_key.clone();
-        if let Some(hdrs) = &pc.data.headers {
-            let mut hmap = HeaderMap::new();
-            for (k, v) in hdrs {
-                if let (Ok(name), Ok(val)) = (
-                    header::HeaderName::from_bytes(k.as_bytes()),
-                    HeaderValue::from_str(v),
-                ) {
-                    hmap.insert(name, val);
-                }
-            }
-            conn.custom_headers = Some(hmap);
-        }
-    } else {
-        conn.provider = provider_override.clone().unwrap_or_else(|| {
-            if clean_model.starts_with("claude") {
-                "anthropic".to_string()
-            } else if clean_model.contains("gemini") {
-                "vertex".to_string()
-            } else {
-                "openai".to_string()
-            }
-        });
-    }
-
-    let mut clean_req = req.clone();
-    clean_req.model = clean_model.clone();
+    let provider_nodes = state.db.load_provider_nodes().unwrap_or_default();
+    let all_connections = state.db.load_provider_connections().unwrap_or_default();
     let is_stream = req.stream.unwrap_or(false);
 
-    if conn.provider == "anthropic" {
-        let claude_req = translator::openai_to_claude_request(&clean_req);
-        match state.proxy.forward_claude_messages(&claude_req, &conn).await {
-            Ok(upstream_res) => {
-                let status = upstream_res.status();
-                if is_stream && status.is_success() {
-                    let sse_res = sse::claude_to_openai_sse_stream(upstream_res.bytes_stream());
-                    state.db.queue_usage(UsageRecord {
-                        provider: Some(conn.provider),
-                        model: Some(clean_model),
-                        api_key: Some(api_key.key),
-                        api_key_id: Some(api_key.id),
-                        endpoint: Some("/v1/chat/completions".to_string()),
-                        status: "ok".to_string(),
-                        ..Default::default()
-                    });
-                    return sse_res.into_response();
-                }
+    let mut last_error = String::new();
+    let mut last_status = StatusCode::SERVICE_UNAVAILABLE;
 
-                let body_bytes = upstream_res.bytes().await.unwrap_or_default();
-                if status.is_success() {
-                    if let Ok(claude_resp) =
-                        serde_json::from_slice::<translator::ClaudeMessageResponse>(&body_bytes)
-                    {
-                        let openai_resp = translator::claude_to_openai_response(&claude_resp);
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let (conn, target_model) = resolve_target_for_candidate(candidate, &provider_nodes, &all_connections);
+        tracing::info!("Candidate {}/{}: '{}' -> provider='{}', model='{}', base_url={:?}", 
+            idx + 1, candidates.len(), candidate, conn.provider, target_model, conn.base_url);
+
+        let mut clean_req = req.clone();
+        clean_req.model = target_model.clone();
+
+        if conn.provider == "anthropic" {
+            let claude_req = translator::openai_to_claude_request(&clean_req);
+            match state.proxy.forward_claude_messages(&claude_req, &conn).await {
+                Ok(upstream_res) => {
+                    let status = upstream_res.status();
+                    if status.is_success() {
+                        if is_stream {
+                            let sse_res = sse::claude_to_openai_sse_stream(upstream_res.bytes_stream());
+                            state.db.queue_usage(UsageRecord {
+                                provider: Some(conn.provider),
+                                model: Some(target_model),
+                                api_key: Some(api_key.key),
+                                api_key_id: Some(api_key.id),
+                                endpoint: Some("/v1/chat/completions".to_string()),
+                                status: "ok".to_string(),
+                                ..Default::default()
+                            });
+                            return sse_res.into_response();
+                        }
+
+                        let body_bytes = upstream_res.bytes().await.unwrap_or_default();
+                        let final_body = if let Ok(claude_resp) =
+                            serde_json::from_slice::<translator::ClaudeMessageResponse>(&body_bytes)
+                        {
+                            let openai_resp = translator::claude_to_openai_response(&claude_resp);
+                            serde_json::to_vec(&openai_resp).unwrap_or(body_bytes.to_vec())
+                        } else {
+                            body_bytes.to_vec()
+                        };
+
                         state.db.queue_usage(UsageRecord {
                             provider: Some(conn.provider),
-                            model: Some(clean_model),
+                            model: Some(target_model),
                             api_key: Some(api_key.key),
                             api_key_id: Some(api_key.id),
                             endpoint: Some("/v1/chat/completions".to_string()),
-                            prompt_tokens: openai_resp
-                                .usage
-                                .as_ref()
-                                .map_or(0, |u| u.prompt_tokens as i64),
-                            completion_tokens: openai_resp
-                                .usage
-                                .as_ref()
-                                .map_or(0, |u| u.completion_tokens as i64),
                             status: "ok".to_string(),
                             ..Default::default()
                         });
                         return (
                             StatusCode::OK,
                             [(header::CONTENT_TYPE, "application/json")],
-                            Json(openai_resp),
+                            final_body,
                         )
                             .into_response();
+                    } else {
+                        last_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                        let err_text = upstream_res.text().await.unwrap_or_default();
+                        tracing::warn!("Candidate '{}' via '{}' failed [{}]: {}", candidate, conn.provider, status, err_text);
+                        last_error = format!("[{}] {}", status, err_text);
                     }
                 }
-                (status, [(header::CONTENT_TYPE, "application/json")], body_bytes).into_response()
-            }
-            Err(e) => {
-                state.db.queue_usage(UsageRecord {
-                    provider: Some(conn.provider),
-                    model: Some(clean_model),
-                    api_key: Some(api_key.key),
-                    api_key_id: Some(api_key.id),
-                    endpoint: Some("/v1/chat/completions".to_string()),
-                    status: "error".to_string(),
-                    ..Default::default()
-                });
-                (
-                    StatusCode::BAD_GATEWAY,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    Json(json!({
-                        "error": {
-                            "message": format!("Upstream connection failed: {}", e),
-                            "type": "upstream_error"
-                        }
-                    })),
-                )
-                    .into_response()
-            }
-        }
-    } else {
-        match state.proxy.forward_chat_completions(&clean_req, &conn).await {
-            Ok(upstream_res) => {
-                let status = upstream_res.status();
-                if is_stream && status.is_success() {
-                    let sse_res = sse::passthrough_sse_stream(upstream_res.bytes_stream());
-                    state.db.queue_usage(UsageRecord {
-                        provider: Some(conn.provider),
-                        model: Some(clean_model),
-                        api_key: Some(api_key.key),
-                        api_key_id: Some(api_key.id),
-                        endpoint: Some("/v1/chat/completions".to_string()),
-                        status: "ok".to_string(),
-                        ..Default::default()
-                    });
-                    return sse_res.into_response();
+                Err(e) => {
+                    tracing::warn!("Candidate '{}' via '{}' error: {}", candidate, conn.provider, e);
+                    last_error = e.to_string();
                 }
-
-                let body_bytes = upstream_res.bytes().await.unwrap_or_default();
-                state.db.queue_usage(UsageRecord {
-                    provider: Some(conn.provider),
-                    model: Some(clean_model),
-                    api_key: Some(api_key.key),
-                    api_key_id: Some(api_key.id),
-                    endpoint: Some("/v1/chat/completions".to_string()),
-                    status: if status.is_success() { "ok" } else { "error" }.to_string(),
-                    ..Default::default()
-                });
-                (status, [(header::CONTENT_TYPE, "application/json")], body_bytes).into_response()
             }
-            Err(e) => {
-                state.db.queue_usage(UsageRecord {
-                    provider: Some(conn.provider),
-                    model: Some(clean_model),
-                    api_key: Some(api_key.key),
-                    api_key_id: Some(api_key.id),
-                    endpoint: Some("/v1/chat/completions".to_string()),
-                    status: "error".to_string(),
-                    ..Default::default()
-                });
-                (
-                    StatusCode::BAD_GATEWAY,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    Json(json!({
-                        "error": {
-                            "message": format!("Upstream connection failed: {}", e),
-                            "type": "upstream_error"
+        } else {
+            match state.proxy.forward_chat_completions(&clean_req, &conn).await {
+                Ok(upstream_res) => {
+                    let status = upstream_res.status();
+                    if status.is_success() {
+                        if is_stream {
+                            let sse_res = sse::passthrough_sse_stream(upstream_res.bytes_stream());
+                            state.db.queue_usage(UsageRecord {
+                                provider: Some(conn.provider),
+                                model: Some(target_model),
+                                api_key: Some(api_key.key),
+                                api_key_id: Some(api_key.id),
+                                endpoint: Some("/v1/chat/completions".to_string()),
+                                status: "ok".to_string(),
+                                ..Default::default()
+                            });
+                            return sse_res.into_response();
                         }
-                    })),
-                )
-                    .into_response()
+
+                        let body_bytes = upstream_res.bytes().await.unwrap_or_default();
+                        // Unpack Cloudflare AI run response format if wrapped in { "result": { ... } }
+                        let final_body = if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                            if let Some(inner) = val.get("result") {
+                                serde_json::to_vec(inner).unwrap_or(body_bytes.to_vec())
+                            } else {
+                                body_bytes.to_vec()
+                            }
+                        } else {
+                            body_bytes.to_vec()
+                        };
+
+                        state.db.queue_usage(UsageRecord {
+                            provider: Some(conn.provider),
+                            model: Some(target_model),
+                            api_key: Some(api_key.key),
+                            api_key_id: Some(api_key.id),
+                            endpoint: Some("/v1/chat/completions".to_string()),
+                            status: "ok".to_string(),
+                            ..Default::default()
+                        });
+
+                        return (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            final_body,
+                        )
+                            .into_response();
+                    } else {
+                        last_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                        let err_text = upstream_res.text().await.unwrap_or_default();
+                        tracing::warn!("Candidate '{}' via '{}' failed [{}]: {}", candidate, conn.provider, status, err_text);
+                        last_error = format!("[{}] {}", status, err_text);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Candidate '{}' via '{}' error: {}", candidate, conn.provider, e);
+                    last_error = e.to_string();
+                }
             }
         }
     }
+
+    state.db.queue_usage(UsageRecord {
+        provider: None,
+        model: Some(req.model.clone()),
+        api_key: Some(api_key.key),
+        api_key_id: Some(api_key.id),
+        endpoint: Some("/v1/chat/completions".to_string()),
+        status: "error".to_string(),
+        ..Default::default()
+    });
+
+    (
+        last_status,
+        [(header::CONTENT_TYPE, "application/json")],
+        Json(json!({
+            "error": {
+                "message": format!("All {} candidate(s) failed for '{}': {}", candidates.len(), req.model, last_error),
+                "type": "combo_routing_error"
+            }
+        })),
+    )
+        .into_response()
 }
 
 // ============================================================================
@@ -543,8 +655,104 @@ pub async fn messages_handler(
 }
 
 // ============================================================================
-// REST API Handlers: Providers, Keys, Settings, Usage
+// REST API Handlers: Providers, Keys, Settings, Usage, Combos, Nodes, Pools
 // ============================================================================
+
+pub async fn get_connections_handler(State(state): State<AppState>) -> Response {
+    match state.db.load_provider_connections() {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_provider_nodes_handler(State(state): State<AppState>) -> Response {
+    match state.db.load_provider_nodes() {
+        Ok(nodes) => Json(json!({ "nodes": nodes })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_combos_handler(State(state): State<AppState>) -> Response {
+    match state.db.load_combos() {
+        Ok(combos) => Json(combos).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_plans_handler(State(state): State<AppState>) -> Response {
+    match state.db.load_plans() {
+        Ok(plans) => Json(json!({ "plans": plans })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_proxy_pools_handler(State(state): State<AppState>) -> Response {
+    match state.db.load_proxy_pools() {
+        Ok(pools) => Json(json!({ "proxyPools": pools })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn require_login_handler() -> Response {
+    Json(json!({
+        "requireLogin": false,
+        "tunnelDashboardAccess": true
+    }))
+    .into_response()
+}
+
+pub async fn auth_status_handler() -> Response {
+    Json(json!({
+        "loggedIn": true,
+        "user": "admin",
+        "requireLogin": false
+    }))
+    .into_response()
+}
+
+pub async fn version_handler() -> Response {
+    Json(json!({
+        "version": "0.5.119",
+        "latestVersion": "0.5.119",
+        "upToDate": true,
+        "runtime": "rust-native"
+    }))
+    .into_response()
+}
+
+pub async fn changelog_handler() -> Response {
+    Json(json!({
+        "changelog": []
+    }))
+    .into_response()
+}
+
+pub async fn models_meta_handler() -> Response {
+    Json(json!({
+        "models": {}
+    }))
+    .into_response()
+}
 
 pub async fn get_providers_handler(State(state): State<AppState>) -> Response {
     match state.db.load_provider_connections() {
@@ -661,7 +869,7 @@ pub async fn get_keys_handler(State(state): State<AppState>) -> Response {
                     })
                 })
                 .collect();
-            Json(json!({ "keys": serialized })).into_response()
+            Json(serialized).into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -864,7 +1072,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/messages",
             axum::routing::post(messages_handler).options(options_handler),
         )
-        // Providers
+        // Providers & Connections
         .route(
             "/api/providers",
             axum::routing::get(get_providers_handler)
@@ -872,8 +1080,55 @@ pub fn create_router(state: AppState) -> Router {
                 .options(options_handler),
         )
         .route(
+            "/api/connections",
+            axum::routing::get(get_connections_handler)
+                .post(create_provider_handler)
+                .options(options_handler),
+        )
+        .route(
             "/api/providers/{id}/test",
             axum::routing::post(test_provider_handler).options(options_handler),
+        )
+        // Provider Nodes
+        .route(
+            "/api/provider-nodes",
+            axum::routing::get(get_provider_nodes_handler).options(options_handler),
+        )
+        // Combos
+        .route(
+            "/api/combos",
+            axum::routing::get(get_combos_handler).options(options_handler),
+        )
+        // Plans
+        .route(
+            "/api/plans",
+            axum::routing::get(get_plans_handler).options(options_handler),
+        )
+        // Proxy Pools
+        .route(
+            "/api/proxy-pools",
+            axum::routing::get(get_proxy_pools_handler).options(options_handler),
+        )
+        // Auth, Login, Version, Changelog
+        .route(
+            "/api/settings/require-login",
+            axum::routing::get(require_login_handler).options(options_handler),
+        )
+        .route(
+            "/api/auth/status",
+            axum::routing::get(auth_status_handler).options(options_handler),
+        )
+        .route(
+            "/api/version",
+            axum::routing::get(version_handler).options(options_handler),
+        )
+        .route(
+            "/api/changelog",
+            axum::routing::get(changelog_handler).options(options_handler),
+        )
+        .route(
+            "/api/models/meta",
+            axum::routing::get(models_meta_handler).options(options_handler),
         )
         // API Keys
         .route(

@@ -268,6 +268,25 @@ pub struct UpstreamConnection {
     pub custom_headers: Option<HeaderMap>,
 }
 
+/// Constructs the chat completions upstream URL based on baseUrl conventions:
+/// - Already ends with /chat/completions -> use as is
+/// - Cloudflare AI run URL (contains /ai/run) -> append /{model}
+/// - Ends with /v1, /compat, or /v2 -> append /chat/completions
+/// - Otherwise -> append /v1/chat/completions
+pub fn build_chat_completions_url(base_url: &str, model: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/chat/completions") {
+        return base.to_string();
+    }
+    if base.contains("/ai/run") {
+        return format!("{}/{}", base, model);
+    }
+    if base.ends_with("/v1") || base.ends_with("/compat") || base.ends_with("/v2") {
+        return format!("{}/chat/completions", base);
+    }
+    format!("{}/v1/chat/completions", base)
+}
+
 #[derive(Clone)]
 pub struct ProxyService {
     client: reqwest::Client,
@@ -309,7 +328,7 @@ impl ProxyService {
             .base_url
             .as_deref()
             .unwrap_or(default_base);
-        let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
+        let url = build_chat_completions_url(base, &req.model);
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
