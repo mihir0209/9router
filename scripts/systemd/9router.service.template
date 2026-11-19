@@ -1,0 +1,20 @@
+[Unit]
+Description=9Router Native AI Gateway and Dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORK_DIR__
+ExecStart=__BINARY_PATH__
+Restart=always
+RestartSec=3
+Environment="PORT=20127"
+Environment="RUST_LOG=info"
+LimitNOFILE=65536
+
+# Sandboxing & Resource constraints
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

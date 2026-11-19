@@ -296,16 +296,38 @@ impl ProxyService {
         req: &ChatCompletionRequest,
         conn: &UpstreamConnection,
     ) -> Result<reqwest::Response, reqwest::Error> {
+        let default_base = match conn.provider.to_ascii_lowercase().as_str() {
+            "deepseek" => "https://api.deepseek.com",
+            "groq" => "https://api.groq.com/openai",
+            "openrouter" => "https://openrouter.ai/api",
+            "mistral" => "https://api.mistral.ai",
+            "together" => "https://api.together.xyz",
+            "perplexity" => "https://api.perplexity.ai",
+            _ => "https://api.openai.com",
+        };
         let base = conn
             .base_url
             .as_deref()
-            .unwrap_or("https://api.openai.com");
+            .unwrap_or(default_base);
         let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        if let Some(token) = &conn.access_token {
+        let provider_lower = conn.provider.to_ascii_lowercase();
+        if provider_lower == "azure" {
+            if let Some(key) = &conn.api_key {
+                if let Ok(val) = HeaderValue::from_str(key) {
+                    headers.insert(reqwest::header::HeaderName::from_static("api-key"), val);
+                }
+            }
+        } else if provider_lower == "gemini" || provider_lower == "google" {
+            if let Some(key) = &conn.api_key {
+                if let Ok(val) = HeaderValue::from_str(key) {
+                    headers.insert(reqwest::header::HeaderName::from_static("x-goog-api-key"), val);
+                }
+            }
+        } else if let Some(token) = &conn.access_token {
             if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", token)) {
                 headers.insert(AUTHORIZATION, val);
             }
