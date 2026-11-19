@@ -180,7 +180,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, keyContext),
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, keyContext, new Set([modelStr])),
         adapterAdded
       ),
       log,
@@ -213,7 +213,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, keyContext),
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, keyContext, new Set([modelStr])),
         adapterAdded
       ),
       log,
@@ -235,7 +235,7 @@ export async function handleChat(request, clientRawRequest = null) {
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, keyContext = {}) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, keyContext = {}, visitedCombos = new Set()) {
   const finish = (response) => response?.body
     ? guardApiKeyResponse(response, keyContext.keyRecord, keyContext.release)
     : (void keyContext.release?.(), response);
@@ -249,6 +249,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
   // If provider is null, this might be a combo name - check and handle
   if (!modelInfo.provider) {
+    if (visitedCombos.has(modelStr)) {
+      log.warn("CHAT", `Combo cycle detected for "${modelStr}", skipping candidate`);
+      return finish(errorResponse(HTTP_STATUS.BAD_REQUEST, `Combo cycle detected for "${modelStr}"`));
+    }
+    const nextVisited = new Set(visitedCombos);
+    nextVisited.add(modelStr);
     const comboModels = await getComboModels(modelStr);
     if (comboModels) {
       const chatSettings = await getSettings();
@@ -272,7 +278,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, keyContext);
+            return handleSingleModelChat(b, m, cleanRawReq, request, keyContext, nextVisited);
           },
           log,
           comboName: modelStr,
@@ -290,7 +296,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, keyContext),
+          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, keyContext, nextVisited),
           adapterAdded
         ),
         log,
