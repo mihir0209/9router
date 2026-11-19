@@ -1,0 +1,12 @@
+{
+  "schema": "rust-anything/front-door@1",
+  "name": "custom-server",
+  "commands": [],
+  "units": [],
+  "kind": "http",
+  "routes": [
+    "POST /v1/chat/completions",
+    "GET /api/health",
+    "GET /v1/models"
+  ]
+}

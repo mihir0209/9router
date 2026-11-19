@@ -1,0 +1,94 @@
+pub mod auth;
+pub mod config;
+pub mod db;
+pub mod embed;
+pub mod proxy;
+pub mod routes;
+pub mod sse;
+pub mod translator;
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+fn report_fallbacks() {
+    if let Some(path) = std::env::var_os("RUST_ANYTHING_FALLBACK_LOG") {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path);
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut stream) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            stream.recv().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    report_fallbacks();
+
+    // 1. Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "ninerouter=info,tower_http=info".into()),
+        )
+        .init();
+
+    // 2. Initialize configuration
+    let config = Arc::new(config::Config::load());
+    tracing::info!(
+        "Loaded configuration: data_dir={}, port={}",
+        config.data_dir.display(),
+        config.port
+    );
+
+    // 3. Initialize SQLite database & write-behind worker task
+    let db = db::Database::open(&config)?;
+    tracing::info!("Database initialized at {}", config.db_path.display());
+
+    // 4. Initialize ProxyService
+    let proxy = Arc::new(proxy::ProxyService::new());
+
+    // 5. Compose Axum router
+    let state = routes::AppState {
+        config: Arc::clone(&config),
+        db,
+        proxy,
+    };
+    let app = routes::create_router(state);
+
+    // 6. Bind to port and run with graceful shutdown
+    let port = config.port;
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("9Router listening on http://0.0.0.0:{}", port);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    tracing::info!("9Router shutdown gracefully");
+    Ok(())
+}

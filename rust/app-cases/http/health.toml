@@ -1,0 +1,13 @@
+[request]
+method = "GET"
+path = "/api/health"
+
+[response]
+status = 200
+
+[response.headers]
+access-control-allow-headers = "*"
+access-control-allow-methods = "GET, OPTIONS"
+access-control-allow-origin = "*"
+content-type = "application/json"
+vary = "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch"
