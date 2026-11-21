@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod cache;
 pub mod combo_router;
 pub mod config;
 pub mod custom_adapter;
@@ -80,12 +81,14 @@ async fn main() -> anyhow::Result<()> {
 
     // 6. Compose Axum router
     let combo_tracker = combo_router::ComboTracker::new();
+    let token_cache = cache::TokenCache::default();
     let state = routes::AppState {
         config: Arc::clone(&config),
         db,
         proxy,
         original: original.clone(),
         combo_tracker,
+        token_cache,
     };
     let app = routes::create_router(state);
 
