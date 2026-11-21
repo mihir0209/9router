@@ -64,7 +64,7 @@ impl DaemonManager {
         }
     }
 
-    fn read_pid_record(&self) -> Option<PidRecord> {
+    pub fn read_pid_record(&self) -> Option<PidRecord> {
         if !self.pid_file.exists() {
             return None;
         }
