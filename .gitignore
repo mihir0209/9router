@@ -115,4 +115,6 @@ scratch/
 *.db-journal
 *.db-wal
 *.db-shm
+release_assets/
+*.bak-9router
 
