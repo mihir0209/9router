@@ -1,11 +1,11 @@
 # Multi-stage Dockerfile for ultra-lightweight (~20MB) 9Router Native Rust Container
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata gcompat
+RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 
-# Copy the stripped, LTO-optimized single binary with embedded web dashboard
-COPY rust/app/target/release/ninerouter /app/ninerouter
+# Copy the static-pie linked, LTO-optimized single binary with embedded web dashboard
+COPY rust/app/target/x86_64-unknown-linux-musl/release/ninerouter /app/ninerouter
 
 ENV PORT=20127
 ENV HOST=0.0.0.0
