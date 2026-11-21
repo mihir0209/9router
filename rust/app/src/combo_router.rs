@@ -1,7 +1,12 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+
+pub const DEFAULT_HEDGED_DELAY: Duration = Duration::from_millis(800);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComboStrategy {
@@ -10,15 +15,27 @@ pub enum ComboStrategy {
     Sticky,
     Capacity,
     Fusion,
+    HedgedRacing,
 }
 
 impl ComboStrategy {
     pub fn parse(s: &str) -> Self {
-        match s.to_lowercase().trim() {
+        let s_lower = s.to_lowercase();
+        let trimmed = s_lower.trim();
+        let base = trimmed
+            .split(':')
+            .next()
+            .unwrap_or(trimmed)
+            .split('=')
+            .next()
+            .unwrap_or(trimmed)
+            .trim();
+        match base {
             "round-robin" | "roundrobin" => Self::RoundRobin,
             "sticky" => Self::Sticky,
             "capacity" => Self::Capacity,
             "fusion" => Self::Fusion,
+            "hedged" | "race" | "hedged-racing" | "hedged_racing" | "racing" => Self::HedgedRacing,
             _ => Self::Fallback,
         }
     }
@@ -30,7 +47,12 @@ impl ComboStrategy {
             Self::Sticky => "sticky",
             Self::Capacity => "capacity",
             Self::Fusion => "fusion",
+            Self::HedgedRacing => "hedged",
         }
+    }
+
+    pub fn is_hedged_racing(&self) -> bool {
+        matches!(self, Self::HedgedRacing | Self::Fusion)
     }
 }
 
@@ -160,9 +182,198 @@ impl ComboTracker {
                 scored.into_iter().map(|(_, c)| c).collect()
             }
 
-            ComboStrategy::Fusion => {
-                // Fusion uses parallel speculative racing
+            ComboStrategy::Fusion | ComboStrategy::HedgedRacing => {
+                // Fusion and HedgedRacing preserve defined candidate order
                 candidates.to_vec()
+            }
+        }
+    }
+}
+
+/// Resolves the hedged speculative dispatch delay.
+/// Priority:
+/// 1. Strategy parameter if encoded as "hedged:<ms>" or "race:<ms>" or "hedged=<ms>"
+/// 2. Match rules JSON field "hedgedDelayMs", "hedged_delay_ms", "hedgedDelay", or "hedged_delay"
+/// 3. Environment variable `HEDGED_DELAY_MS` or `HEDGED_DELAY`
+/// 4. Default: 800ms
+pub fn resolve_hedged_delay(strategy_str: Option<&str>, match_rules: Option<&str>) -> Duration {
+    // 1. Check strategy string format like "hedged:500" or "race:300"
+    if let Some(s) = strategy_str {
+        if let Some((_, delay_part)) = s.split_once(':').or_else(|| s.split_once('=')) {
+            let digits: String = delay_part.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(ms) = digits.parse::<u64>() {
+                if ms > 0 {
+                    return Duration::from_millis(ms);
+                }
+            }
+        }
+    }
+
+    // 2. Check match_rules JSON (e.g. {"hedgedDelayMs": 500} or {"hedged_delay": 500})
+    if let Some(rules) = match_rules {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(rules) {
+            let delay_val = v
+                .get("hedgedDelayMs")
+                .or_else(|| v.get("hedged_delay_ms"))
+                .or_else(|| v.get("hedgedDelay"))
+                .or_else(|| v.get("hedged_delay"));
+            if let Some(num) = delay_val.and_then(|v| v.as_u64()) {
+                if num > 0 {
+                    return Duration::from_millis(num);
+                }
+            }
+        }
+    }
+
+    // 3. Check environment variable HEDGED_DELAY_MS or HEDGED_DELAY
+    if let Ok(env_val) = std::env::var("HEDGED_DELAY_MS").or_else(|_| std::env::var("HEDGED_DELAY")) {
+        let digits: String = env_val.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(ms) = digits.parse::<u64>() {
+            if ms > 0 {
+                return Duration::from_millis(ms);
+            }
+        }
+    }
+
+    // 4. Default: 800ms
+    DEFAULT_HEDGED_DELAY
+}
+
+/// Executes a hedged speculative race between primary and secondary candidates.
+///
+/// Coordination flow:
+/// - Dispatches request to primary candidate.
+/// - If primary delivers successful response before hedged_delay, it wins immediately;
+///   secondary is never dispatched.
+/// - If primary fails before hedged_delay, secondary candidate is dispatched immediately
+///   without waiting for hedged_delay to finish.
+/// - If primary does not return within hedged_delay, secondary candidate is dispatched
+///   speculatively in parallel.
+/// - Whichever candidate delivers a successful response first wins; the slower candidate
+///   is cancelled immediately via CancellationToken and dropping its future.
+/// - If both fail, the last failure error is returned.
+pub async fn execute_hedged_race<F, Fut, T, E>(
+    primary: String,
+    secondary: String,
+    hedged_delay: Duration,
+    runner: F,
+) -> Result<(String, T), E>
+where
+    F: Fn(String, CancellationToken) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let token_primary = CancellationToken::new();
+    let token_secondary = CancellationToken::new();
+
+    let fut_primary = runner(primary.clone(), token_primary.clone());
+    tokio::pin!(fut_primary);
+
+    // If hedged_delay is zero, launch secondary immediately
+    if hedged_delay.is_zero() {
+        let fut_secondary = runner(secondary.clone(), token_secondary.clone());
+        tokio::pin!(fut_secondary);
+        return race_two_candidates(
+            primary,
+            secondary,
+            fut_primary,
+            fut_secondary,
+            token_primary,
+            token_secondary,
+        )
+        .await;
+    }
+
+    let delay = tokio::time::sleep(hedged_delay);
+    tokio::pin!(delay);
+
+    let mut primary_completed = false;
+    let mut primary_ok = None;
+
+    tokio::select! {
+        res = &mut fut_primary => {
+            primary_completed = true;
+            if let Ok(val) = res {
+                primary_ok = Some(val);
+            }
+        }
+        _ = &mut delay => {
+            // hedged_delay elapsed while primary is still in flight
+        }
+    }
+
+    if primary_completed {
+        if let Some(val) = primary_ok {
+            // Primary won before hedged_delay! Secondary is never dispatched.
+            return Ok((primary, val));
+        }
+        // Primary failed early before hedged_delay.
+        // Speculatively dispatch secondary immediately without waiting!
+        let fut_secondary = runner(secondary.clone(), token_secondary.clone());
+        return match fut_secondary.await {
+            Ok(val) => Ok((secondary, val)),
+            Err(e) => Err(e),
+        };
+    }
+
+    // Speculative parallel request to secondary candidate
+    let fut_secondary = runner(secondary.clone(), token_secondary.clone());
+    tokio::pin!(fut_secondary);
+
+    race_two_candidates(
+        primary,
+        secondary,
+        fut_primary,
+        fut_secondary,
+        token_primary,
+        token_secondary,
+    )
+    .await
+}
+
+async fn race_two_candidates<Fut1, Fut2, T, E>(
+    primary: String,
+    secondary: String,
+    mut fut_primary: std::pin::Pin<&mut Fut1>,
+    mut fut_secondary: std::pin::Pin<&mut Fut2>,
+    token_primary: CancellationToken,
+    token_secondary: CancellationToken,
+) -> Result<(String, T), E>
+where
+    Fut1: Future<Output = Result<T, E>>,
+    Fut2: Future<Output = Result<T, E>>,
+{
+    let mut primary_failed = false;
+    let mut secondary_failed = false;
+
+    loop {
+        tokio::select! {
+            res_p = fut_primary.as_mut(), if !primary_failed => {
+                match res_p {
+                    Ok(val) => {
+                        token_secondary.cancel();
+                        return Ok((primary, val));
+                    }
+                    Err(e) => {
+                        primary_failed = true;
+                        if secondary_failed {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            res_s = fut_secondary.as_mut(), if !secondary_failed => {
+                match res_s {
+                    Ok(val) => {
+                        token_primary.cancel();
+                        return Ok((secondary, val));
+                    }
+                    Err(e) => {
+                        secondary_failed = true;
+                        if primary_failed {
+                            return Err(e);
+                        }
+                    }
+                }
             }
         }
     }
@@ -354,5 +565,280 @@ mod tests {
         assert!(clusters.iter().any(|(slug, _, c)| slug == "gpt-4o" && c.len() == 2));
         assert!(clusters.iter().any(|(slug, _, c)| slug == "gpt-4o-mini" && c.len() == 2));
         assert!(!clusters.iter().any(|(slug, _, _)| slug == "single-model-without-cluster"));
+    }
+
+    #[test]
+    fn test_combo_strategy_parse_hedged_and_race() {
+        assert_eq!(ComboStrategy::parse("hedged"), ComboStrategy::HedgedRacing);
+        assert_eq!(ComboStrategy::parse("race"), ComboStrategy::HedgedRacing);
+        assert_eq!(ComboStrategy::parse("hedged-racing"), ComboStrategy::HedgedRacing);
+        assert_eq!(ComboStrategy::parse("hedged_racing"), ComboStrategy::HedgedRacing);
+        assert_eq!(ComboStrategy::parse("racing"), ComboStrategy::HedgedRacing);
+        assert_eq!(ComboStrategy::parse("hedged:500"), ComboStrategy::HedgedRacing);
+        assert_eq!(ComboStrategy::parse("race:250ms"), ComboStrategy::HedgedRacing);
+        assert_eq!(ComboStrategy::HedgedRacing.as_str(), "hedged");
+        assert!(ComboStrategy::HedgedRacing.is_hedged_racing());
+    }
+
+    #[test]
+    fn test_resolve_hedged_delay_all_sources() {
+        // Default 800ms
+        assert_eq!(resolve_hedged_delay(None, None), Duration::from_millis(800));
+        assert_eq!(resolve_hedged_delay(Some("hedged"), None), Duration::from_millis(800));
+        assert_eq!(resolve_hedged_delay(Some("race"), None), Duration::from_millis(800));
+
+        // Strategy string parameters
+        assert_eq!(resolve_hedged_delay(Some("hedged:350"), None), Duration::from_millis(350));
+        assert_eq!(resolve_hedged_delay(Some("race:120ms"), None), Duration::from_millis(120));
+        assert_eq!(resolve_hedged_delay(Some("hedged=500"), None), Duration::from_millis(500));
+
+        // match_rules JSON
+        assert_eq!(
+            resolve_hedged_delay(Some("hedged"), Some(r#"{"hedgedDelayMs": 450}"#)),
+            Duration::from_millis(450)
+        );
+        assert_eq!(
+            resolve_hedged_delay(None, Some(r#"{"hedged_delay": 600}"#)),
+            Duration::from_millis(600)
+        );
+
+        // Precedence: strategy string > match_rules
+        assert_eq!(
+            resolve_hedged_delay(Some("hedged:250"), Some(r#"{"hedgedDelayMs": 900}"#)),
+            Duration::from_millis(250)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hedged_race_primary_fast_wins() {
+        let runner = |cand: String, cancel_token: CancellationToken| async move {
+            if cand == "primary" {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok("primary_response")
+            } else {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(300)) => Ok("secondary_response"),
+                    _ = cancel_token.cancelled() => Err("canceled"),
+                }
+            }
+        };
+
+        let res = execute_hedged_race(
+            "primary".to_string(),
+            "secondary".to_string(),
+            Duration::from_millis(100),
+            runner,
+        )
+        .await;
+
+        assert!(res.is_ok());
+        let (winner, val) = res.unwrap();
+        assert_eq!(winner, "primary");
+        assert_eq!(val, "primary_response");
+    }
+
+    #[tokio::test]
+    async fn test_hedged_race_secondary_wins_and_primary_canceled() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Mutex;
+
+        struct DropGuard(Arc<AtomicBool>);
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let primary_dropped = Arc::new(AtomicBool::new(false));
+        let pd_clone = primary_dropped.clone();
+        let primary_token_holder: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
+        let pth_clone = primary_token_holder.clone();
+
+        let runner = move |cand: String, cancel_token: CancellationToken| {
+            let pd = pd_clone.clone();
+            let pth = pth_clone.clone();
+            async move {
+                if cand == "primary" {
+                    *pth.lock().unwrap() = Some(cancel_token.clone());
+                    let _guard = DropGuard(pd);
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(500)) => Ok("slow_primary"),
+                        _ = cancel_token.cancelled() => Err("primary_canceled"),
+                    }
+                } else {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Ok("fast_secondary")
+                }
+            }
+        };
+
+        let res = execute_hedged_race(
+            "primary".to_string(),
+            "secondary".to_string(),
+            Duration::from_millis(40),
+            runner,
+        )
+        .await;
+
+        assert!(res.is_ok());
+        let (winner, val) = res.unwrap();
+        assert_eq!(winner, "secondary");
+        assert_eq!(val, "fast_secondary");
+
+        // Verify primary was cancelled via CancellationToken AND dropped
+        let token = primary_token_holder.lock().unwrap().clone().expect("Primary token captured");
+        assert!(token.is_cancelled(), "Primary CancellationToken must be cancelled");
+        assert!(primary_dropped.load(Ordering::SeqCst), "Primary connection future must be dropped");
+    }
+
+    #[tokio::test]
+    async fn test_hedged_race_primary_wins_when_faster_than_secondary() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Mutex;
+
+        struct DropGuard(Arc<AtomicBool>);
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let secondary_dropped = Arc::new(AtomicBool::new(false));
+        let sd_clone = secondary_dropped.clone();
+        let secondary_token_holder: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
+        let sth_clone = secondary_token_holder.clone();
+
+        let runner = move |cand: String, cancel_token: CancellationToken| {
+            let sd = sd_clone.clone();
+            let sth = sth_clone.clone();
+            async move {
+                if cand == "primary" {
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    Ok("primary_win")
+                } else {
+                    *sth.lock().unwrap() = Some(cancel_token.clone());
+                    let _guard = DropGuard(sd);
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => Ok("secondary_finish"),
+                        _ = cancel_token.cancelled() => Err("secondary_canceled"),
+                    }
+                }
+            }
+        };
+
+        let res = execute_hedged_race(
+            "primary".to_string(),
+            "secondary".to_string(),
+            Duration::from_millis(30),
+            runner,
+        )
+        .await;
+
+        assert!(res.is_ok());
+        let (winner, val) = res.unwrap();
+        assert_eq!(winner, "primary");
+        assert_eq!(val, "primary_win");
+
+        // Verify secondary was cancelled via CancellationToken AND dropped
+        let token = secondary_token_holder.lock().unwrap().clone().expect("Secondary token captured");
+        assert!(token.is_cancelled(), "Secondary CancellationToken must be cancelled");
+        assert!(secondary_dropped.load(Ordering::SeqCst), "Secondary connection future must be dropped");
+    }
+
+    #[tokio::test]
+    async fn test_hedged_race_primary_fails_early_secondary_immediate() {
+        let start = std::time::Instant::now();
+
+        let runner = |cand: String, _cancel_token: CancellationToken| async move {
+            if cand == "primary" {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                Err("primary_error")
+            } else {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                Ok("secondary_ok")
+            }
+        };
+
+        let res = execute_hedged_race(
+            "primary".to_string(),
+            "secondary".to_string(),
+            Duration::from_millis(500),
+            runner,
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+        assert!(res.is_ok());
+        let (winner, val) = res.unwrap();
+        assert_eq!(winner, "secondary");
+        assert_eq!(val, "secondary_ok");
+        assert!(elapsed < Duration::from_millis(200), "Secondary must be dispatched immediately upon primary failure");
+    }
+
+    #[tokio::test]
+    async fn test_hedged_race_both_fail() {
+        let runner = |cand: String, _cancel_token: CancellationToken| async move {
+            let res: Result<&'static str, &'static str> = if cand == "primary" {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Err("primary_fail")
+            } else {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Err("secondary_fail")
+            };
+            res
+        };
+
+        let res = execute_hedged_race(
+            "primary".to_string(),
+            "secondary".to_string(),
+            Duration::from_millis(10),
+            runner,
+        )
+        .await;
+
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_hedged_race_future_drop_cancels_in_flight() {
+        use std::sync::atomic::AtomicBool;
+
+        struct DropGuard(Arc<AtomicBool>);
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let primary_dropped = Arc::new(AtomicBool::new(false));
+        let pd_clone = primary_dropped.clone();
+
+        let runner = move |cand: String, _cancel_token: CancellationToken| {
+            let pd = pd_clone.clone();
+            async move {
+                let res: Result<&'static str, &'static str> = if cand == "primary" {
+                    let _guard = DropGuard(pd);
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    Ok("primary_res")
+                } else {
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                    Ok("secondary_res")
+                };
+                res
+            }
+        };
+
+        let res = execute_hedged_race(
+            "primary".to_string(),
+            "secondary".to_string(),
+            Duration::from_millis(20),
+            runner,
+        )
+        .await;
+
+        assert!(res.is_ok());
+        let (winner, _) = res.unwrap();
+        assert_eq!(winner, "secondary");
+        assert!(primary_dropped.load(Ordering::SeqCst), "Primary future must be dropped on secondary win");
     }
 }

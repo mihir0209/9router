@@ -593,12 +593,13 @@ pub async fn chat_completions_handler(
     let candidates = state.db.resolve_combo_chain(&req.model);
     tracing::info!("Requested model '{}' expanded to {} candidate(s): {:?}", req.model, candidates.len(), candidates);
 
-    let (combo_strategy, combo_name) = match state.db.get_combo_by_name(&req.model) {
-        Ok(Some(c)) => (
+    let combo = state.db.get_combo_by_name(&req.model).ok().flatten();
+    let (combo_strategy, combo_name) = match &combo {
+        Some(c) => (
             crate::combo_router::ComboStrategy::parse(c.strategy.as_deref().unwrap_or("fallback")),
-            Some(c.name),
+            Some(c.name.clone()),
         ),
-        _ => (crate::combo_router::ComboStrategy::Fallback, None),
+        None => (crate::combo_router::ComboStrategy::Fallback, None),
     };
 
     let ordered_candidates = state.combo_tracker.order_candidates(
@@ -607,85 +608,81 @@ pub async fn chat_completions_handler(
         combo_strategy,
     );
 
-    let provider_nodes = state.db.load_provider_nodes().unwrap_or_default();
-    let all_connections = state.db.load_provider_connections().unwrap_or_default();
+    let provider_nodes = Arc::new(state.db.load_provider_nodes().unwrap_or_default());
+    let all_connections = Arc::new(state.db.load_provider_connections().unwrap_or_default());
     let is_stream = req.stream.unwrap_or(false);
-
-    // Speculative Hedged Fusion Racing for non-streaming when 2+ candidates exist
-    if combo_strategy == crate::combo_router::ComboStrategy::Fusion && ordered_candidates.len() >= 2 && !is_stream {
-        let c0 = ordered_candidates[0].clone();
-        let c1 = ordered_candidates[1].clone();
-        let _g0 = state.combo_tracker.track_in_flight(&c0);
-        let fut0 = execute_candidate_chat(&c0, &req, false, &state, &api_key, &provider_nodes, &all_connections);
-        tokio::pin!(fut0);
-
-        let race_res = tokio::select! {
-            res0 = &mut fut0 => {
-                match res0 {
-                    Ok(resp) => {
-                        if let Some(ref cn) = combo_name {
-                            state.combo_tracker.record_success(cn, &c0);
-                        }
-                        return resp;
-                    }
-                    Err(_) => {
-                        state.combo_tracker.record_error(&c0);
-                        let _g1 = state.combo_tracker.track_in_flight(&c1);
-                        execute_candidate_chat(&c1, &req, false, &state, &api_key, &provider_nodes, &all_connections).await
-                    }
-                }
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
-                tracing::info!("Fusion hedge triggered (>250ms), racing '{}' with '{}'", c0, c1);
-                let _g1 = state.combo_tracker.track_in_flight(&c1);
-                let fut1 = execute_candidate_chat(&c1, &req, false, &state, &api_key, &provider_nodes, &all_connections);
-                tokio::pin!(fut1);
-
-                tokio::select! {
-                    res0 = &mut fut0 => {
-                        match res0 {
-                            Ok(resp) => {
-                                if let Some(ref cn) = combo_name {
-                                    state.combo_tracker.record_success(cn, &c0);
-                                }
-                                Ok(resp)
-                            }
-                            Err(_) => {
-                                state.combo_tracker.record_error(&c0);
-                                fut1.await
-                            }
-                        }
-                    }
-                    res1 = &mut fut1 => {
-                        match res1 {
-                            Ok(resp) => {
-                                if let Some(ref cn) = combo_name {
-                                    state.combo_tracker.record_success(cn, &c1);
-                                }
-                                Ok(resp)
-                            }
-                            Err(_) => {
-                                state.combo_tracker.record_error(&c1);
-                                fut0.await
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
-        match race_res {
-            Ok(resp) => return resp,
-            Err((_status, err)) => {
-                tracing::warn!("Fusion race between '{}' and '{}' failed: {}", c0, c1, err);
-            }
-        }
-    }
 
     let mut last_error = String::new();
     let mut last_status = StatusCode::SERVICE_UNAVAILABLE;
 
-    for (idx, candidate) in ordered_candidates.iter().enumerate() {
+    // Speculative Hedged Racing for combo candidates when hedged/race strategy (or fusion for non-stream)
+    let is_hedged_eligible = (combo_strategy == crate::combo_router::ComboStrategy::HedgedRacing
+        || (combo_strategy == crate::combo_router::ComboStrategy::Fusion && !is_stream))
+        && ordered_candidates.len() >= 2;
+
+    if is_hedged_eligible {
+        let c0 = ordered_candidates[0].clone();
+        let c1 = ordered_candidates[1].clone();
+        let hedged_delay = if combo_strategy == crate::combo_router::ComboStrategy::Fusion {
+            std::time::Duration::from_millis(250)
+        } else {
+            crate::combo_router::resolve_hedged_delay(
+                combo.as_ref().and_then(|c| c.strategy.as_deref()),
+                combo.as_ref().and_then(|c| c.match_rules.as_deref()),
+            )
+        };
+
+        tracing::info!(
+            "Speculative Hedged Racing active for combo '{:?}' between '{}' and '{}' with delay {:?}",
+            combo_name, c0, c1, hedged_delay
+        );
+
+        let race_res = crate::combo_router::execute_hedged_race(
+            c0.clone(),
+            c1.clone(),
+            hedged_delay,
+            |cand, cancel_token| {
+                let state = state.clone();
+                let api_key = api_key.clone();
+                let req = req.clone();
+                let provider_nodes = provider_nodes.clone();
+                let all_connections = all_connections.clone();
+                async move {
+                    let _g = state.combo_tracker.track_in_flight(&cand);
+                    tokio::select! {
+                        res = execute_candidate_chat(&cand, &req, is_stream, &state, &api_key, &provider_nodes, &all_connections) => {
+                            if res.is_err() {
+                                state.combo_tracker.record_error(&cand);
+                            }
+                            res
+                        }
+                        _ = cancel_token.cancelled() => {
+                            tracing::info!("Hedged racing candidate '{}' cancelled by winner", cand);
+                            Err((StatusCode::REQUEST_TIMEOUT, format!("Candidate '{}' cancelled by hedged race winner", cand)))
+                        }
+                    }
+                }
+            },
+        ).await;
+
+        match race_res {
+            Ok((winner, resp)) => {
+                if let Some(ref cn) = combo_name {
+                    state.combo_tracker.record_success(cn, &winner);
+                }
+                return resp;
+            }
+            Err((status, err)) => {
+                tracing::warn!("Hedged race between '{}' and '{}' failed: {}", c0, c1, err);
+                last_status = status;
+                last_error = err;
+            }
+        }
+    }
+
+    let start_idx = if is_hedged_eligible { 2 } else { 0 };
+
+    for (idx, candidate) in ordered_candidates.iter().enumerate().skip(start_idx) {
         let _in_flight = state.combo_tracker.track_in_flight(candidate);
         match execute_candidate_chat(candidate, &req, is_stream, &state, &api_key, &provider_nodes, &all_connections).await {
             Ok(resp) => {
@@ -953,12 +950,13 @@ pub async fn messages_handler(
     let candidates = state.db.resolve_combo_chain(&req.model);
     tracing::info!("Requested Claude model '{}' expanded to {} candidate(s): {:?}", req.model, candidates.len(), candidates);
 
-    let (combo_strategy, combo_name) = match state.db.get_combo_by_name(&req.model) {
-        Ok(Some(c)) => (
+    let combo = state.db.get_combo_by_name(&req.model).ok().flatten();
+    let (combo_strategy, combo_name) = match &combo {
+        Some(c) => (
             crate::combo_router::ComboStrategy::parse(c.strategy.as_deref().unwrap_or("fallback")),
-            Some(c.name),
+            Some(c.name.clone()),
         ),
-        _ => (crate::combo_router::ComboStrategy::Fallback, None),
+        None => (crate::combo_router::ComboStrategy::Fallback, None),
     };
 
     let ordered_candidates = state.combo_tracker.order_candidates(
@@ -967,14 +965,81 @@ pub async fn messages_handler(
         combo_strategy,
     );
 
-    let provider_nodes = state.db.load_provider_nodes().unwrap_or_default();
-    let all_connections = state.db.load_provider_connections().unwrap_or_default();
+    let provider_nodes = Arc::new(state.db.load_provider_nodes().unwrap_or_default());
+    let all_connections = Arc::new(state.db.load_provider_connections().unwrap_or_default());
     let is_stream = req.stream.unwrap_or(false);
 
     let mut last_error = String::new();
     let mut last_status = StatusCode::SERVICE_UNAVAILABLE;
 
-    for (idx, candidate) in ordered_candidates.iter().enumerate() {
+    // Speculative Hedged Racing for Claude combo candidates when hedged/race strategy (or fusion for non-stream)
+    let is_hedged_eligible = (combo_strategy == crate::combo_router::ComboStrategy::HedgedRacing
+        || (combo_strategy == crate::combo_router::ComboStrategy::Fusion && !is_stream))
+        && ordered_candidates.len() >= 2;
+
+    if is_hedged_eligible {
+        let c0 = ordered_candidates[0].clone();
+        let c1 = ordered_candidates[1].clone();
+        let hedged_delay = if combo_strategy == crate::combo_router::ComboStrategy::Fusion {
+            std::time::Duration::from_millis(250)
+        } else {
+            crate::combo_router::resolve_hedged_delay(
+                combo.as_ref().and_then(|c| c.strategy.as_deref()),
+                combo.as_ref().and_then(|c| c.match_rules.as_deref()),
+            )
+        };
+
+        tracing::info!(
+            "Speculative Hedged Racing active for Claude combo '{:?}' between '{}' and '{}' with delay {:?}",
+            combo_name, c0, c1, hedged_delay
+        );
+
+        let race_res = crate::combo_router::execute_hedged_race(
+            c0.clone(),
+            c1.clone(),
+            hedged_delay,
+            |cand, cancel_token| {
+                let state = state.clone();
+                let api_key = api_key.clone();
+                let req = req.clone();
+                let provider_nodes = provider_nodes.clone();
+                let all_connections = all_connections.clone();
+                async move {
+                    let _g = state.combo_tracker.track_in_flight(&cand);
+                    tokio::select! {
+                        res = execute_candidate_claude(&cand, &req, is_stream, &state, &api_key, &provider_nodes, &all_connections) => {
+                            if res.is_err() {
+                                state.combo_tracker.record_error(&cand);
+                            }
+                            res
+                        }
+                        _ = cancel_token.cancelled() => {
+                            tracing::info!("Hedged racing Claude candidate '{}' cancelled by winner", cand);
+                            Err((StatusCode::REQUEST_TIMEOUT, format!("Candidate '{}' cancelled by hedged race winner", cand)))
+                        }
+                    }
+                }
+            },
+        ).await;
+
+        match race_res {
+            Ok((winner, resp)) => {
+                if let Some(ref cn) = combo_name {
+                    state.combo_tracker.record_success(cn, &winner);
+                }
+                return resp;
+            }
+            Err((status, err)) => {
+                tracing::warn!("Hedged race between Claude candidates '{}' and '{}' failed: {}", c0, c1, err);
+                last_status = status;
+                last_error = err;
+            }
+        }
+    }
+
+    let start_idx = if is_hedged_eligible { 2 } else { 0 };
+
+    for (idx, candidate) in ordered_candidates.iter().enumerate().skip(start_idx) {
         let _in_flight = state.combo_tracker.track_in_flight(candidate);
         match execute_candidate_claude(candidate, &req, is_stream, &state, &api_key, &provider_nodes, &all_connections).await {
             Ok(resp) => {
@@ -3176,6 +3241,45 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
         assert!(ct.contains("text/html"));
+    }
+
+    #[tokio::test]
+    async fn test_combo_hedged_racing_strategy_api() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_settings(&json!({ "requireLogin": false })).unwrap();
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+        });
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker };
+        let app = create_router(state);
+
+        // Create combo with strategy: "hedged"
+        let create_req = Request::builder()
+            .method("POST")
+            .uri("/api/combos")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{
+                "name": "fast-race",
+                "models": ["openai/gpt-4o", "azure/gpt-4o"],
+                "strategy": "hedged"
+            }"#))
+            .unwrap();
+
+        let resp = app.clone().oneshot(create_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let combo = db.get_combo_by_name("fast-race").unwrap().expect("combo exists");
+        assert_eq!(combo.strategy.as_deref(), Some("hedged"));
+        assert_eq!(
+            crate::combo_router::ComboStrategy::parse(combo.strategy.as_deref().unwrap()),
+            crate::combo_router::ComboStrategy::HedgedRacing
+        );
     }
 }
 
