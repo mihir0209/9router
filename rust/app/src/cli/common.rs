@@ -36,8 +36,9 @@ pub fn resolve_gateway_url(port_opt: Option<u16>, url_opt: Option<String>) -> St
 }
 
 /// Resolves an API key for gateway queries by checking CLI arguments,
-/// standard environment variables, or looking up active keys in the local SQLite database.
-pub fn resolve_api_key(key_opt: Option<String>) -> Option<String> {
+/// standard environment variables, or looking up active keys in the local SQLite database
+/// within the provided base directory.
+pub fn resolve_api_key_from_dir(key_opt: Option<String>, base_dir: &std::path::Path) -> Option<String> {
     if let Some(k) = key_opt {
         let trimmed = k.trim().to_string();
         if !trimmed.is_empty() {
@@ -54,27 +55,28 @@ pub fn resolve_api_key(key_opt: Option<String>) -> Option<String> {
         }
     }
 
-    // Check local SQLite database for an active API key
-    let base_dir = std::env::var("DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".9router")
-        });
-    let db_path = base_dir.join("database.sqlite");
-    if db_path.exists() {
-        if let Ok(conn) = rusqlite::Connection::open_with_flags(
-            &db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ) {
-            let stmt = conn
-                .prepare("SELECT key FROM apiKeys WHERE isActive = 1 ORDER BY createdAt ASC LIMIT 1")
-                .ok();
-            if let Some(mut s) = stmt {
-                if let Ok(k) = s.query_row([], |row| row.get::<_, String>(0)) {
-                    let trimmed = k.trim().to_string();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed);
+    // Check local SQLite database for an active API key across known database locations
+    let candidate_paths = [
+        base_dir.join("db").join("data.sqlite"),
+        base_dir.join("database.sqlite"),
+        base_dir.join("data.sqlite"),
+    ];
+
+    for db_path in &candidate_paths {
+        if db_path.exists() {
+            if let Ok(conn) = rusqlite::Connection::open_with_flags(
+                db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ) {
+                let stmt = conn
+                    .prepare("SELECT key FROM apiKeys WHERE isActive = 1 ORDER BY createdAt ASC LIMIT 1")
+                    .ok();
+                if let Some(mut s) = stmt {
+                    if let Ok(k) = s.query_row([], |row| row.get::<_, String>(0)) {
+                        let trimmed = k.trim().to_string();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed);
+                        }
                     }
                 }
             }
@@ -82,6 +84,18 @@ pub fn resolve_api_key(key_opt: Option<String>) -> Option<String> {
     }
 
     None
+}
+
+/// Resolves an API key for gateway queries by checking CLI arguments,
+/// standard environment variables, or looking up active keys in the resolved 9Router data directory.
+pub fn resolve_api_key(key_opt: Option<String>) -> Option<String> {
+    let base_dir = std::env::var("DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            PathBuf::from(home).join(".9router")
+        });
+    resolve_api_key_from_dir(key_opt, &base_dir)
 }
 
 #[cfg(test)]
@@ -114,5 +128,32 @@ mod tests {
             resolve_api_key(Some("  sk-trimmed  ".into())),
             Some("sk-trimmed".into())
         );
+    }
+
+    #[test]
+    fn test_resolve_api_key_sqlite_autodiscovery() {
+        let temp_dir = std::env::temp_dir().join(format!("9r-test-{}", std::process::id()));
+        let db_dir = temp_dir.join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let db_file = db_dir.join("data.sqlite");
+
+        let conn = rusqlite::Connection::open(&db_file).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE apiKeys (
+                id TEXT PRIMARY KEY,
+                key TEXT UNIQUE NOT NULL,
+                isActive INTEGER DEFAULT 1,
+                createdAt TEXT NOT NULL
+            );
+            INSERT INTO apiKeys (id, key, isActive, createdAt)
+            VALUES ('1', 'sk-autodiscovered-default', 1, '2026-01-01T00:00:00Z');
+            "#,
+        ).unwrap();
+
+        let discovered = resolve_api_key_from_dir(None, &temp_dir);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert_eq!(discovered, Some("sk-autodiscovered-default".to_string()));
     }
 }
