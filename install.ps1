@@ -1,4 +1,4 @@
-﻿# 9Router Universal Windows PowerShell Installer
+# 9Router Universal Windows PowerShell Installer
 # Supported OS: Windows 10 / 11 / Windows Server (x64)
 # Usage:
 #   irm https://raw.githubusercontent.com/mihir0209/9router/master/install.ps1 | iex
