@@ -1,6 +1,6 @@
-.PHONY: all build build-web test run clean install-systemd status-systemd restart-systemd
+.PHONY: all build build-ui test run clean install-systemd status-systemd restart-systemd
 
-TARGET_BIN := rust/app/target/release/ninerouter
+TARGET_BIN := rust/app/target/release/9r
 PORT ?= 20127
 
 all: build
@@ -8,8 +8,8 @@ all: build
 build:
 	@./build.sh
 
-build-web:
-	@./build.sh --rebuild-web
+build-ui:
+	@./build.sh --rebuild-ui
 
 test:
 	@echo "Running Rust test suite..."
@@ -21,7 +21,7 @@ run: build
 
 clean:
 	@cargo clean --manifest-path rust/app/Cargo.toml
-	@rm -rf web/dist
+	@rm -rf rust/app/ui
 
 install-systemd: build
 	@mkdir -p $$HOME/.config/systemd/user
