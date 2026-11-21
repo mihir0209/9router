@@ -23,6 +23,7 @@ pub struct AppState {
     pub proxy: Arc<ProxyService>,
     pub original: crate::original::Original,
     pub combo_tracker: Arc<crate::combo_router::ComboTracker>,
+    pub token_cache: crate::cache::TokenCache,
 }
 
 impl axum::extract::FromRef<AppState> for Arc<Database> {
@@ -590,6 +591,24 @@ pub async fn chat_completions_handler(
             .into_response();
     }
 
+    let is_stream = req.stream.unwrap_or(false);
+    let cache_key = state.token_cache.compute_chat_hash(&req);
+
+    // Exact-Match Token Cache Check
+    if let Some(cached) = state.token_cache.get(&cache_key) {
+        tracing::info!("Cache HIT for key {}", cache_key);
+        state.db.queue_usage(UsageRecord {
+            provider: Some("cache".to_string()),
+            model: Some(req.model.clone()),
+            api_key: Some(api_key.key.clone()),
+            api_key_id: Some(api_key.id.clone()),
+            endpoint: Some("/v1/chat/completions".to_string()),
+            status: "ok".to_string(),
+            ..Default::default()
+        });
+        return cached.to_response(is_stream);
+    }
+
     let candidates = state.db.resolve_combo_chain(&req.model);
     tracing::info!("Requested model '{}' expanded to {} candidate(s): {:?}", req.model, candidates.len(), candidates);
 
@@ -611,7 +630,6 @@ pub async fn chat_completions_handler(
     let provider_nodes = Arc::new(state.db.load_provider_nodes().unwrap_or_default());
     let all_connections = Arc::new(state.db.load_provider_connections().unwrap_or_default());
     let is_stream = req.stream.unwrap_or(false);
-
     let mut last_error = String::new();
     let mut last_status = StatusCode::SERVICE_UNAVAILABLE;
 
@@ -670,7 +688,7 @@ pub async fn chat_completions_handler(
                 if let Some(ref cn) = combo_name {
                     state.combo_tracker.record_success(cn, &winner);
                 }
-                return resp;
+                return state.token_cache.wrap_and_cache(cache_key.clone(), resp, is_stream).await;
             }
             Err((status, err)) => {
                 tracing::warn!("Hedged race between '{}' and '{}' failed: {}", c0, c1, err);
@@ -689,7 +707,7 @@ pub async fn chat_completions_handler(
                 if let Some(ref cn) = combo_name {
                     state.combo_tracker.record_success(cn, candidate);
                 }
-                return resp;
+                return state.token_cache.wrap_and_cache(cache_key.clone(), resp, is_stream).await;
             }
             Err((status, err)) => {
                 state.combo_tracker.record_error(candidate);
@@ -947,6 +965,24 @@ pub async fn messages_handler(
             .into_response();
     }
 
+    let is_stream = req.stream.unwrap_or(false);
+    let cache_key = state.token_cache.compute_claude_hash(&req);
+
+    // Exact-Match Token Cache Check
+    if let Some(cached) = state.token_cache.get(&cache_key) {
+        tracing::info!("Claude Cache HIT for key {}", cache_key);
+        state.db.queue_usage(UsageRecord {
+            provider: Some("cache".to_string()),
+            model: Some(req.model.clone()),
+            api_key: Some(api_key.key.clone()),
+            api_key_id: Some(api_key.id.clone()),
+            endpoint: Some("/v1/messages".to_string()),
+            status: "ok".to_string(),
+            ..Default::default()
+        });
+        return cached.to_response(is_stream);
+    }
+
     let candidates = state.db.resolve_combo_chain(&req.model);
     tracing::info!("Requested Claude model '{}' expanded to {} candidate(s): {:?}", req.model, candidates.len(), candidates);
 
@@ -1027,7 +1063,7 @@ pub async fn messages_handler(
                 if let Some(ref cn) = combo_name {
                     state.combo_tracker.record_success(cn, &winner);
                 }
-                return resp;
+                return state.token_cache.wrap_and_cache(cache_key.clone(), resp, is_stream).await;
             }
             Err((status, err)) => {
                 tracing::warn!("Hedged race between Claude candidates '{}' and '{}' failed: {}", c0, c1, err);
@@ -1046,7 +1082,7 @@ pub async fn messages_handler(
                 if let Some(ref cn) = combo_name {
                     state.combo_tracker.record_success(cn, candidate);
                 }
-                return resp;
+                return state.token_cache.wrap_and_cache(cache_key.clone(), resp, is_stream).await;
             }
             Err((status, err)) => {
                 state.combo_tracker.record_error(candidate);
@@ -2946,7 +2982,8 @@ mod tests {
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
         let combo_tracker = crate::combo_router::ComboTracker::new();
-        let state = AppState { config, db, proxy, original, combo_tracker };
+        let token_cache = crate::cache::TokenCache::default();
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache };
         let app = create_router(state);
 
         let req = Request::builder()
@@ -2976,7 +3013,8 @@ mod tests {
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
         let combo_tracker = crate::combo_router::ComboTracker::new();
-        let state = AppState { config, db, proxy, original, combo_tracker };
+        let token_cache = crate::cache::TokenCache::default();
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache };
         let app = create_router(state);
 
         // GET /v1/models without key
@@ -3101,7 +3139,8 @@ mod tests {
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
         let combo_tracker = crate::combo_router::ComboTracker::new();
-        let state = AppState { config, db, proxy, original, combo_tracker };
+        let token_cache = crate::cache::TokenCache::default();
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache };
         let app = create_router(state);
 
         let req = Request::builder()
@@ -3134,7 +3173,8 @@ mod tests {
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
         let combo_tracker = crate::combo_router::ComboTracker::new();
-        let state = AppState { config, db, proxy, original, combo_tracker };
+        let token_cache = crate::cache::TokenCache::default();
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache };
         let app = create_router(state);
 
         // 1. Create a combo
@@ -3215,7 +3255,8 @@ mod tests {
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty(); // Standalone embedded mode
         let combo_tracker = crate::combo_router::ComboTracker::new();
-        let state = AppState { config, db, proxy, original, combo_tracker };
+        let token_cache = crate::cache::TokenCache::default();
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache };
         let app = create_router(state);
 
         // GET / should serve embedded index.html
@@ -3256,7 +3297,8 @@ mod tests {
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
         let combo_tracker = crate::combo_router::ComboTracker::new();
-        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker };
+        let token_cache = crate::cache::TokenCache::default();
+        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache };
         let app = create_router(state);
 
         // Create combo with strategy: "hedged"
@@ -3280,6 +3322,136 @@ mod tests {
             crate::combo_router::ComboStrategy::parse(combo.strategy.as_deref().unwrap()),
             crate::combo_router::ComboStrategy::HedgedRacing
         );
+    }
+
+    #[tokio::test]
+    async fn test_exact_match_token_caching_in_routes() {
+        let db = Database::open_in_memory().unwrap();
+        let test_key = ApiKey {
+            id: "key-cache-test".to_string(),
+            key: "sk-cache-key-123".to_string(),
+            name: Some("Cache Test".to_string()),
+            machine_id: None,
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            rate_limit_requests: 0,
+            rate_limit_window_seconds: 60,
+            token_limit_daily: 0,
+            token_limit_monthly: 0,
+            allowed_models: "*".to_string(),
+            blocked_models: String::new(),
+            allowed_ips: String::new(),
+            blocked_ips: String::new(),
+            expires_at: String::new(),
+            description: String::new(),
+            owner_ref: None,
+            max_concurrent_requests: 0,
+            allowed_providers: String::new(),
+            blocked_providers: String::new(),
+            force_provider: String::new(),
+            force_model: String::new(),
+            allowed_endpoints: String::new(),
+            blocked_endpoints: String::new(),
+        };
+        db.save_api_key(&test_key).unwrap();
+
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+        });
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+
+        // 1. Pre-seed cache with a response for canonical query "what is 2+2?"
+        let canonical_chat_req = ChatCompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![crate::translator::ChatMessage::user("what is 2+2?")],
+            ..Default::default()
+        };
+        let chat_cache_key = token_cache.compute_chat_hash(&canonical_chat_req);
+        token_cache.set_json(
+            &chat_cache_key,
+            axum::body::Bytes::from_static(b"{\"id\":\"chatcmpl-cached\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"4\"}}]}"),
+        );
+
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache: token_cache.clone() };
+        let app = create_router(state);
+
+        // 2. Dispatch POST /v1/chat/completions with whitespace variation: "  what   is   2+2?  \n"
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-cache-key-123")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"  what   is   2+2?  \n"}]}"#))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("x-9router-cache").unwrap(), "HIT");
+        assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), "application/json");
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(val["choices"][0]["message"]["content"], "4");
+
+        // 3. Dispatch streaming POST /v1/chat/completions with stream=true
+        let stream_req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-cache-key-123")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"what is 2+2?"}]}"#))
+            .unwrap();
+
+        let stream_resp = app.clone().oneshot(stream_req).await.unwrap();
+        assert_eq!(stream_resp.status(), StatusCode::OK);
+        assert_eq!(stream_resp.headers().get("x-9router-cache").unwrap(), "HIT");
+        assert_eq!(stream_resp.headers().get(header::CONTENT_TYPE).unwrap(), "text/event-stream");
+
+        // 4. Pre-seed cache for Claude message request
+        let canonical_claude_req = ClaudeMessageRequest {
+            model: "claude-3-5-sonnet".to_string(),
+            messages: vec![crate::translator::ClaudeMessage {
+                role: "user".to_string(),
+                content: crate::translator::ClaudeContent::Single("ping".to_string()),
+            }],
+            max_tokens: 100,
+            system: None,
+            metadata: None,
+            stop_sequences: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let claude_cache_key = token_cache.compute_claude_hash(&canonical_claude_req);
+        token_cache.set_json(
+            &claude_cache_key,
+            axum::body::Bytes::from_static(b"{\"id\":\"msg-cached\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"pong\"}]}"),
+        );
+
+        // 5. Dispatch POST /v1/messages with whitespace variation
+        let claude_http_req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("Authorization", "Bearer sk-cache-key-123")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"claude-3-5-sonnet","max_tokens":100,"messages":[{"role":"user","content":"  ping  \n"}]}"#))
+            .unwrap();
+
+        let claude_resp = app.oneshot(claude_http_req).await.unwrap();
+        assert_eq!(claude_resp.status(), StatusCode::OK);
+        assert_eq!(claude_resp.headers().get("x-9router-cache").unwrap(), "HIT");
+        let claude_body = axum::body::to_bytes(claude_resp.into_body(), usize::MAX).await.unwrap();
+        let claude_val: serde_json::Value = serde_json::from_slice(&claude_body).unwrap();
+        assert!(claude_val["content"].as_array().unwrap()[0]["text"].as_str().unwrap().contains("pong"));
     }
 }
 
