@@ -6,7 +6,7 @@ publish = false
 description = "Native Rust core for 9Router: single-binary high-performance AI Gateway and dashboard"
 
 [[bin]]
-name = "ninerouter"
+name = "9r"
 path = "src/main.rs"
 
 [dependencies]

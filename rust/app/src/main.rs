@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod cache;
 pub mod circuit_breaker;
+pub mod cli;
 pub mod combo_router;
 pub mod config;
 pub mod custom_adapter;
@@ -10,6 +11,7 @@ pub mod original;
 pub mod proxy;
 pub mod routes;
 pub mod sse;
+pub mod token_saver;
 pub mod translator;
 
 use std::net::SocketAddr;
@@ -52,6 +54,11 @@ async fn shutdown_signal() {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     report_fallbacks();
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if cli::dispatch(&args)? {
+        return Ok(());
+    }
 
     // 1. Initialize tracing
     tracing_subscriber::fmt()

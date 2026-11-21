@@ -601,7 +601,7 @@ pub async fn chat_completions_handler(
         Err(res) => return res,
     };
 
-    let req: ChatCompletionRequest = match serde_json::from_slice(&body) {
+    let mut req: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
             return (
@@ -617,6 +617,11 @@ pub async fn chat_completions_handler(
                 .into_response();
         }
     };
+
+    let rtk_saved = crate::token_saver::compress_chat_request(&mut req);
+    if rtk_saved > 0 {
+        tracing::info!("[RTK] compressed tool result messages, saved {} bytes", rtk_saved);
+    }
 
     let (_, clean_model) = proxy::strip_provider_prefix(&req.model);
 
@@ -1026,7 +1031,7 @@ pub async fn messages_handler(
         Err(res) => return res,
     };
 
-    let req: ClaudeMessageRequest = match serde_json::from_slice(&body) {
+    let mut req: ClaudeMessageRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
             return (
@@ -1042,6 +1047,11 @@ pub async fn messages_handler(
                 .into_response();
         }
     };
+
+    let rtk_saved = crate::token_saver::compress_claude_request(&mut req);
+    if rtk_saved > 0 {
+        tracing::info!("[RTK] compressed Claude tool_result blocks, saved {} bytes", rtk_saved);
+    }
 
     let (_, clean_model) = proxy::strip_provider_prefix(&req.model);
 
