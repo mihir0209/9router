@@ -40,9 +40,10 @@ if (fs.existsSync(staticSource)) {
   console.warn("⚠️ Warning: .next/static not found");
 }
 
-// 4. Recursively copy all prerendered HTML pages from .next/server/app
+// 4. Recursively copy all prerendered HTML and RSC files from .next/server/app
 const serverAppDir = path.join(nextDir, "server", "app");
 let htmlCount = 0;
+let rscCount = 0;
 
 function copyHtmlFiles(dir, relativeBase = "") {
   if (!fs.existsSync(dir)) return;
@@ -57,18 +58,19 @@ function copyHtmlFiles(dir, relativeBase = "") {
       if (entry.name !== "api" && !entry.name.endsWith(".segments")) {
         copyHtmlFiles(fullPath, relPath);
       }
-    } else if (entry.name.endsWith(".html")) {
+    } else if (entry.name.endsWith(".html") || entry.name.endsWith(".rsc")) {
       const destPath = path.join(targetDir, relPath);
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
       fs.copyFileSync(fullPath, destPath);
-      htmlCount++;
+      if (entry.name.endsWith(".html")) htmlCount++;
+      else rscCount++;
     }
   }
 }
 
 if (fs.existsSync(serverAppDir)) {
   copyHtmlFiles(serverAppDir);
-  console.log(`✓ Copied ${htmlCount} prerendered HTML pages from .next/server/app`);
+  console.log(`✓ Copied ${htmlCount} HTML pages and ${rscCount} RSC payloads from .next/server/app`);
 }
 
 // 5. Ensure root fallback: if index.html doesn't exist, use dashboard.html
@@ -78,6 +80,33 @@ if (!fs.existsSync(indexHtml) && fs.existsSync(dashboardHtml)) {
   fs.copyFileSync(dashboardHtml, indexHtml);
   console.log("✓ Created index.html fallback from dashboard.html");
 }
+
+// 6. Mirror bracketed chunk directories/files with percent-encoded names (%5B and %5D)
+function mirrorUrlEncodedPaths(dir) {
+  if (!fs.existsSync(dir)) return;
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      mirrorUrlEncodedPaths(fullPath);
+      if (entry.name.includes("[") || entry.name.includes("]")) {
+        const encodedName = entry.name.replaceAll("[", "%5B").replaceAll("]", "%5D");
+        const encodedPath = path.join(dir, encodedName);
+        if (!fs.existsSync(encodedPath)) {
+          fs.cpSync(fullPath, encodedPath, { recursive: true });
+        }
+      }
+    } else if (entry.isFile() && (entry.name.includes("[") || entry.name.includes("]"))) {
+      const encodedName = entry.name.replaceAll("[", "%5B").replaceAll("]", "%5D");
+      const encodedPath = path.join(dir, encodedName);
+      if (!fs.existsSync(encodedPath)) {
+        fs.copyFileSync(fullPath, encodedPath);
+      }
+    }
+  }
+}
+mirrorUrlEncodedPaths(targetDir);
+console.log("✓ Mirrored percent-encoded paths for bracketed routes (%5B...%5D)");
 
 console.log("====================================================");
 console.log(`🎉 Authentic 9Router embedded UI ready at ${targetDir}`);

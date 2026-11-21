@@ -231,6 +231,32 @@ pub fn verify_dashboard_jwt(token: &str, jwt_secret: &str) -> bool {
     false
 }
 
+/// Generates an HS256 JWT compatible with Next.js dashboard auth verification.
+pub fn create_dashboard_jwt(jwt_secret: &str) -> String {
+    use base64::Engine;
+    let now = chrono::Utc::now().timestamp();
+    let exp = now + 86400; // 24 hours
+    let header_json = r#"{"alg":"HS256","typ":"JWT"}"#;
+    let payload_json = serde_json::json!({
+        "authenticated": true,
+        "iat": now,
+        "exp": exp
+    })
+    .to_string();
+
+    let header_b64 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(header_json.as_bytes());
+    let payload_b64 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
+
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, jwt_secret.as_bytes());
+    let tag = ring::hmac::sign(&key, signing_input.as_bytes());
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tag.as_ref());
+
+    format!("{}.{}", signing_input, sig_b64)
+}
+
 /// Constant-time comparison of two secret byte slices to prevent timing attacks.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {

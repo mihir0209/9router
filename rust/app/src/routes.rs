@@ -2357,17 +2357,93 @@ pub async fn require_login_handler(
     .into_response()
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct LoginPayload {
+    pub password: Option<String>,
+}
+
+pub async fn login_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<LoginPayload>,
+) -> Response {
+    let password = payload.password.unwrap_or_default();
+    let settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
+    let expected_password = settings
+        .get("password")
+        .and_then(|p| p.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "123456".to_string());
+
+    if password != expected_password {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::CONTENT_TYPE, "application/json")],
+            Json(json!({"error": "Invalid password"})),
+        )
+            .into_response();
+    }
+
+    let token = crate::auth::create_dashboard_jwt(&state.config.jwt_secret);
+    let cookie_val = format!(
+        "auth_token={}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax",
+        token
+    );
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::SET_COOKIE, &cookie_val),
+        ],
+        Json(json!({
+            "success": true,
+            "mustChangePassword": false
+        })),
+    )
+        .into_response()
+}
+
+pub async fn logout_handler() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (
+                header::SET_COOKIE,
+                "auth_token=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+            ),
+        ],
+        Json(json!({"success": true})),
+    )
+        .into_response()
+}
+
 pub async fn auth_status_handler(
     State(state): State<AppState>,
-    req: axum::extract::Request,
+    headers: HeaderMap,
 ) -> Response {
-    if state.original.is_running() {
-        return crate::original::proxy(State(state), req).await;
-    }
+    let settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
+    let require_login = settings
+        .get("requireLogin")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let has_password = settings.get("password").is_some();
+
+    let authenticated = if !require_login {
+        true
+    } else if let Some(token) = crate::auth::extract_session_token(&headers) {
+        crate::auth::verify_dashboard_jwt(&token, &state.config.jwt_secret)
+    } else {
+        false
+    };
+
     Json(json!({
-        "loggedIn": true,
-        "user": "admin",
-        "requireLogin": false
+        "requireLogin": require_login,
+        "authMode": "password",
+        "ssoType": "oidc",
+        "hasPassword": has_password,
+        "authenticated": authenticated,
+        "displayName": "Admin user",
+        "loginMethod": "Password"
     }))
     .into_response()
 }
@@ -2894,6 +2970,207 @@ pub async fn get_usage_handler(
     .into_response()
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct UsageStatsQuery {
+    pub period: Option<String>,
+}
+
+pub async fn usage_stats_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<UsageStatsQuery>,
+) -> Response {
+    if let Err(resp) =
+        crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db)
+    {
+        return resp;
+    }
+
+    let period = query.period.unwrap_or_else(|| "today".to_string());
+    match state.db.get_usage_statistics(&period) {
+        Ok(stats) => Json(stats).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "application/json")],
+            Json(json!({"error": format!("Failed to compute stats: {}", e)})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn usage_stream_handler() -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_util::stream;
+
+    let initial = json!({
+        "activeRequests": [],
+        "recentRequests": [],
+        "errorProvider": "",
+        "pending": { "byModel": {}, "byAccount": {} }
+    });
+
+    let initial_event = Ok::<_, std::convert::Infallible>(
+        Event::default().data(initial.to_string()),
+    );
+    let s = stream::once(async move { initial_event });
+    Sse::new(s).keep_alive(KeepAlive::default()).into_response()
+}
+
+pub async fn dashboard_models_handler(State(state): State<AppState>) -> Response {
+    let base_models = [
+        ("openai", "gpt-4o", "GPT-4o", 128000, 4096, true, false, false),
+        ("openai", "gpt-4o-mini", "GPT-4o Mini", 128000, 4096, true, false, false),
+        ("openai", "o1", "OpenAI o1", 200000, 100000, true, false, true),
+        ("openai", "o3-mini", "OpenAI o3-mini", 200000, 100000, false, false, true),
+        (
+            "anthropic",
+            "claude-3-5-sonnet-20241022",
+            "Claude 3.5 Sonnet",
+            200000,
+            8192,
+            true,
+            false,
+            false,
+        ),
+        (
+            "anthropic",
+            "claude-3-5-haiku-20241022",
+            "Claude 3.5 Haiku",
+            200000,
+            8192,
+            true,
+            false,
+            false,
+        ),
+        (
+            "anthropic",
+            "claude-opus-4-6-thinking",
+            "Claude Opus 4.6 Thinking",
+            200000,
+            32000,
+            true,
+            false,
+            true,
+        ),
+        ("google", "gemini-2.5-pro", "Gemini 2.5 Pro", 1000000, 8192, true, true, true),
+        ("google", "gemini-2.5-flash", "Gemini 2.5 Flash", 1000000, 8192, true, true, false),
+        (
+            "google",
+            "gemini-3.8-flash-high",
+            "Gemini 3.8 Flash High",
+            1000000,
+            8192,
+            true,
+            true,
+            true,
+        ),
+        ("google", "gemini-4-carbon", "Gemini 4 Carbon", 1000000, 8192, true, true, true),
+        ("deepseek", "deepseek-chat", "DeepSeek Chat (V3)", 64000, 8000, false, false, false),
+        (
+            "deepseek",
+            "deepseek-reasoner",
+            "DeepSeek Reasoner (R1)",
+            64000,
+            8000,
+            false,
+            false,
+            true,
+        ),
+        (
+            "groq",
+            "llama-3.3-70b-versatile",
+            "Llama 3.3 70B",
+            128000,
+            32768,
+            false,
+            false,
+            false,
+        ),
+        ("qwen", "qwen-max", "Qwen Max", 32768, 8192, false, false, false),
+        ("qwen", "qwen-plus", "Qwen Plus", 128000, 8192, false, false, false),
+    ];
+
+    let mut models = Vec::new();
+    for (provider, model, name, ctx, max_out, vis, search, reason) in base_models {
+        models.push(json!({
+            "provider": provider,
+            "model": model,
+            "name": name,
+            "fullModel": format!("{}/{}", provider, model),
+            "routedModel": format!("{}/{}", provider, model),
+            "alias": model,
+            "caps": {
+                "vision": vis,
+                "search": search,
+                "reasoning": reason,
+                "contextWindow": ctx,
+                "maxOutput": max_out
+            }
+        }));
+    }
+
+    if let Ok(combos) = state.db.load_combos() {
+        for combo in combos {
+            models.push(json!({
+                "provider": "combo",
+                "model": combo.name,
+                "name": format!("Combo: {}", combo.name),
+                "fullModel": format!("combo/{}", combo.name),
+                "routedModel": format!("combo/{}", combo.name),
+                "alias": combo.name,
+                "caps": {
+                    "vision": true,
+                    "search": false,
+                    "reasoning": true,
+                    "contextWindow": 128000,
+                    "maxOutput": 8192
+                }
+            }));
+        }
+    }
+
+    Json(json!({ "models": models })).into_response()
+}
+
+pub async fn get_blocked_ips_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) =
+        crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db)
+    {
+        return resp;
+    }
+    let settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
+    let blocked = settings
+        .get("autoBlockedIPs")
+        .cloned()
+        .unwrap_or(json!([]));
+    Json(json!({ "blockedIPs": blocked })).into_response()
+}
+
+pub async fn get_pricing_handler() -> Response {
+    Json(json!({
+        "openai": {
+            "gpt-4o": { "input": 2.5, "output": 10.0, "cached": 1.25 },
+            "gpt-4o-mini": { "input": 0.15, "output": 0.6, "cached": 0.075 }
+        },
+        "anthropic": {
+            "claude-3-5-sonnet-20241022": { "input": 3.0, "output": 15.0, "cached": 0.3 },
+            "claude-3-5-haiku-20241022": { "input": 0.8, "output": 4.0, "cached": 0.08 }
+        },
+        "google": {
+            "gemini-2.5-pro": { "input": 1.25, "output": 5.0, "cached": 0.3125 },
+            "gemini-2.5-flash": { "input": 0.075, "output": 0.3, "cached": 0.01875 }
+        },
+        "deepseek": {
+            "deepseek-chat": { "input": 0.14, "output": 0.28, "cached": 0.014 },
+            "deepseek-reasoner": { "input": 0.55, "output": 2.19, "cached": 0.14 }
+        }
+    }))
+    .into_response()
+}
+
 // ============================================================================
 // Router Assembly
 // ============================================================================
@@ -2999,8 +3276,24 @@ pub fn create_router(state: AppState) -> Router {
             axum::routing::get(require_login_handler).options(options_handler),
         )
         .route(
+            "/api/auth/login",
+            axum::routing::post(login_handler).options(options_handler),
+        )
+        .route(
+            "/api/auth/logout",
+            axum::routing::post(logout_handler).options(options_handler),
+        )
+        .route(
             "/api/auth/status",
             axum::routing::get(auth_status_handler).options(options_handler),
+        )
+        .route(
+            "/api/models",
+            axum::routing::get(dashboard_models_handler).options(options_handler),
+        )
+        .route(
+            "/api/pricing",
+            axum::routing::get(get_pricing_handler).options(options_handler),
         )
         .route(
             "/api/version",
@@ -3058,12 +3351,24 @@ pub fn create_router(state: AppState) -> Router {
                 .options(options_handler),
         )
         .route(
+            "/api/settings/blocked-ips",
+            axum::routing::get(get_blocked_ips_handler).options(options_handler),
+        )
+        .route(
             "/api/usage",
             axum::routing::get(get_usage_handler).options(options_handler),
         )
         .route(
             "/api/usage/dashboard",
             axum::routing::get(get_usage_handler).options(options_handler),
+        )
+        .route(
+            "/api/usage/stats",
+            axum::routing::get(usage_stats_handler).options(options_handler),
+        )
+        .route(
+            "/api/usage/stream",
+            axum::routing::get(usage_stream_handler).options(options_handler),
         )
         // Reverse proxy fallback to original Next.js for UI, static assets, and full dashboard APIs
         .fallback(crate::original::proxy)

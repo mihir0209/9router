@@ -999,6 +999,267 @@ impl Database {
         Ok(count)
     }
 
+    /// Aggregates usage statistics for the given time period ("today", "24h", "7d", "30d", "60d", "all").
+    pub fn get_usage_statistics(&self, period: &str) -> anyhow::Result<serde_json::Value> {
+        let guard = self.conn.lock().unwrap();
+
+        let cutoff = match period {
+            "today" => {
+                let now = chrono::Utc::now();
+                now.date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .map(|dt| dt.and_utc().to_rfc3339())
+                    .unwrap_or_default()
+            }
+            "24h" => (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339(),
+            "7d" => (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339(),
+            "30d" => (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+            "60d" => (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339(),
+            _ => String::from("1970-01-01T00:00:00Z"),
+        };
+
+        // 1. Overall totals
+        let (total_requests, prompt_tokens, completion_tokens, cached_tokens, total_cost): (
+            i64,
+            i64,
+            i64,
+            i64,
+            f64,
+        ) = guard
+            .query_row(
+                r#"
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(promptTokens), 0),
+                COALESCE(SUM(completionTokens), 0),
+                COALESCE(SUM(cachedTokens), 0),
+                COALESCE(SUM(cost), 0.0)
+            FROM usageHistory
+            WHERE timestamp >= ?
+            "#,
+                [&cutoff],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap_or((0, 0, 0, 0, 0.0));
+
+        // 2. By provider
+        let mut by_provider = serde_json::Map::new();
+        if let Ok(mut stmt) = guard.prepare(
+            r#"
+            SELECT
+                provider,
+                COUNT(*),
+                COALESCE(SUM(promptTokens), 0),
+                COALESCE(SUM(completionTokens), 0),
+                COALESCE(SUM(cachedTokens), 0),
+                COALESCE(SUM(cost), 0.0)
+            FROM usageHistory
+            WHERE timestamp >= ?
+            GROUP BY provider
+            "#,
+        ) {
+            if let Ok(rows) = stmt.query_map([&cutoff], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, f64>(5)?,
+                ))
+            }) {
+                for item in rows.flatten() {
+                    by_provider.insert(
+                        item.0,
+                        serde_json::json!({
+                            "requests": item.1,
+                            "promptTokens": item.2,
+                            "completionTokens": item.3,
+                            "cachedTokens": item.4,
+                            "cost": item.5,
+                        }),
+                    );
+                }
+            }
+        }
+
+        // 3. By model
+        let mut by_model = serde_json::Map::new();
+        if let Ok(mut stmt) = guard.prepare(
+            r#"
+            SELECT
+                model,
+                provider,
+                COUNT(*),
+                COALESCE(SUM(promptTokens), 0),
+                COALESCE(SUM(completionTokens), 0),
+                COALESCE(SUM(cachedTokens), 0),
+                COALESCE(SUM(cost), 0.0),
+                MAX(timestamp)
+            FROM usageHistory
+            WHERE timestamp >= ?
+            GROUP BY model, provider
+            "#,
+        ) {
+            if let Ok(rows) = stmt.query_map([&cutoff], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, f64>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                ))
+            }) {
+                for item in rows.flatten() {
+                    let key = format!("{} ({})", item.0, item.1);
+                    by_model.insert(
+                        key,
+                        serde_json::json!({
+                            "rawModel": item.0,
+                            "provider": item.1,
+                            "requests": item.2,
+                            "promptTokens": item.3,
+                            "completionTokens": item.4,
+                            "cachedTokens": item.5,
+                            "cost": item.6,
+                            "lastUsed": item.7,
+                        }),
+                    );
+                }
+            }
+        }
+
+        // 4. By account / connection
+        let mut by_account = serde_json::Map::new();
+        if let Ok(mut stmt) = guard.prepare(
+            r#"
+            SELECT
+                COALESCE(connectionId, 'default'),
+                model,
+                provider,
+                COUNT(*),
+                COALESCE(SUM(promptTokens), 0),
+                COALESCE(SUM(completionTokens), 0),
+                COALESCE(SUM(cachedTokens), 0),
+                COALESCE(SUM(cost), 0.0),
+                MAX(timestamp)
+            FROM usageHistory
+            WHERE timestamp >= ?
+            GROUP BY connectionId, model, provider
+            "#,
+        ) {
+            if let Ok(rows) = stmt.query_map([&cutoff], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, f64>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                ))
+            }) {
+                for item in rows.flatten() {
+                    let key = format!("{} ({} - {})", item.1, item.2, item.0);
+                    by_account.insert(
+                        key,
+                        serde_json::json!({
+                            "connectionId": item.0,
+                            "accountName": item.0,
+                            "rawModel": item.1,
+                            "provider": item.2,
+                            "requests": item.3,
+                            "promptTokens": item.4,
+                            "completionTokens": item.5,
+                            "cachedTokens": item.6,
+                            "cost": item.7,
+                            "lastUsed": item.8,
+                        }),
+                    );
+                }
+            }
+        }
+
+        // 5. Recent requests
+        let mut recent_requests = Vec::new();
+        if let Ok(mut stmt) = guard.prepare(
+            r#"
+            SELECT
+                timestamp,
+                provider,
+                model,
+                promptTokens,
+                completionTokens,
+                cachedTokens,
+                status
+            FROM usageHistory
+            ORDER BY id DESC
+            LIMIT 20
+            "#,
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, String>(6)?,
+                ))
+            }) {
+                for item in rows.flatten() {
+                    recent_requests.push(serde_json::json!({
+                        "timestamp": item.0,
+                        "provider": item.1,
+                        "model": item.2,
+                        "promptTokens": item.3,
+                        "completionTokens": item.4,
+                        "cachedTokens": item.5,
+                        "status": item.6,
+                    }));
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "totalRequests": total_requests,
+            "totalPromptTokens": prompt_tokens,
+            "totalCompletionTokens": completion_tokens,
+            "totalCachedTokens": cached_tokens,
+            "totalCost": total_cost,
+            "byProvider": by_provider,
+            "byModel": by_model,
+            "byAccount": by_account,
+            "byApiKey": serde_json::json!({}),
+            "byEndpoint": serde_json::json!({}),
+            "last10Minutes": [
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0}
+            ],
+            "pending": {
+                "byModel": serde_json::json!({}),
+                "byAccount": serde_json::json!({})
+            },
+            "activeRequests": [],
+            "recentRequests": recent_requests,
+            "errorProvider": ""
+        }))
+    }
+
     // ==========================================
     // Provider Nodes Operations
     // ==========================================
