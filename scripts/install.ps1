@@ -15,7 +15,7 @@ function Log-Info($msg) {
 }
 
 function Log-Success($msg) {
-    Write-Host "✓ $msg" -ForegroundColor Green
+    Write-Host "[+] $msg" -ForegroundColor Green
 }
 
 function Log-Error($msg) {
@@ -73,10 +73,7 @@ try {
 }
 
 # Create .cmd shims for cmd.exe and PowerShell compatibility
-$CmdShimContent = @"
-@echo off
-"%~dp0$CommandPrimary.exe" %*
-"@
+$CmdShimContent = "@echo off`r`n`"%~dp0$CommandPrimary.exe`" %*"
 
 Set-Content -Path $AliasCmd -Value $CmdShimContent -Encoding ASCII
 Set-Content -Path $PrimaryCmd -Value $CmdShimContent -Encoding ASCII
