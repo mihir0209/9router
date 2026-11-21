@@ -172,8 +172,10 @@ export default function LoginPage() {
                 Set a new password before accessing the dashboard remotely.
               </p>
               <div className="flex flex-col gap-2">
-                <label className="text-sm font-medium">New password</label>
+                <label htmlFor="newPassword" className="text-sm font-medium">New password</label>
                 <Input
+                  id="newPassword"
+                  name="newPassword"
                   type="password"
                   placeholder="Enter new password"
                   value={newPassword}
@@ -218,8 +220,10 @@ export default function LoginPage() {
                 )}
 
                 <div className="flex flex-col gap-2">
-                  <label className="text-sm font-medium">Password</label>
+                  <label htmlFor="password" className="text-sm font-medium">Password</label>
                   <Input
+                    id="password"
+                    name="password"
                     type="password"
                     placeholder="Enter password"
                     value={password}

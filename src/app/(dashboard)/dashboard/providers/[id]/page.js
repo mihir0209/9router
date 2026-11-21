@@ -6,7 +6,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
 import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal, RetryRulesEditor } from "@/shared/components";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
@@ -161,10 +161,26 @@ export default function ProviderDetailPage() {
   const providerInfo = providerNode
     ? {
         id: providerNode.id,
-        name: providerNode.name || (providerNode.type === "anthropic-compatible" ? "Anthropic Compatible" : "OpenAI Compatible"),
-        color: providerNode.type === "anthropic-compatible" ? "#D97757" : "#10A37F",
-        textIcon: providerNode.type === "anthropic-compatible" ? "AC" : "OC",
-        apiType: providerNode.apiType,
+        name:
+          providerNode.name ||
+          (providerNode.type === "anthropic-compatible"
+            ? "Anthropic Compatible"
+            : providerNode.type === "custom"
+              ? "Custom Provider"
+              : "OpenAI Compatible"),
+        color:
+          providerNode.type === "anthropic-compatible"
+            ? "#D97757"
+            : providerNode.type === "custom"
+              ? "#F59E0B"
+              : "#10A37F",
+        textIcon:
+          providerNode.type === "anthropic-compatible"
+            ? "AC"
+            : providerNode.type === "custom"
+              ? "CP"
+              : "OC",
+        apiType: providerNode.apiType || "custom",
         baseUrl: providerNode.baseUrl,
         type: providerNode.type,
       }
@@ -181,7 +197,8 @@ export default function ProviderDetailPage() {
   
   const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
   const isAnthropicCompatible = isAnthropicCompatibleProvider(providerId);
-  const isCompatible = isOpenAICompatible || isAnthropicCompatible;
+  const isCustom = isCustomProvider(providerId);
+  const isCompatible = isOpenAICompatible || isAnthropicCompatible || isCustom;
   const hasDualAuthModes = !isCompatible && isOAuth && supportsApiKeyAuth;
   const oauthConnectionLabel =
     providerId === "xai" ? "Grok Build OAuth"
@@ -382,7 +399,13 @@ export default function ProviderDetailPage() {
       const apCfg = autoPingSettingsKey ? settingsData[autoPingSettingsKey] || {} : {};
       setAutoPing({ enabled: apCfg.enabled === true, connections: apCfg.connections || {}, schedules: apCfg.schedules || {} });
       if (nodesRes.ok) {
-        let node = (nodesData.nodes || []).find((entry) => entry.id === providerId) || null;
+        const matchNode = (entry) =>
+          entry.id === providerId ||
+          entry.prefix === providerId ||
+          entry.data?.prefix === providerId ||
+          entry.name?.toLowerCase() === providerId.toLowerCase() ||
+          entry.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === providerId.toLowerCase();
+        let node = (nodesData.nodes || []).find(matchNode) || null;
 
         // Newly created compatible nodes can be briefly unavailable on one worker.
         // Retry a few times before showing "Provider not found".
@@ -392,7 +415,7 @@ export default function ProviderDetailPage() {
             const retryRes = await fetch("/api/provider-nodes", { cache: "no-store" });
             if (!retryRes.ok) continue;
             const retryData = await retryRes.json();
-            node = (retryData.nodes || []).find((entry) => entry.id === providerId) || null;
+            node = (retryData.nodes || []).find(matchNode) || null;
             if (node) break;
           }
         }

@@ -74,8 +74,21 @@ export async function getProviderNodes(filter = {}) {
 }
 
 export async function getProviderNodeById(id) {
-  const all = await getProviderNodes();
-  const found = all.find((n) => n.id === id);
+  if (!id) return null;
+  const match = (n) =>
+    n.id === id ||
+    n.prefix === id ||
+    n.data?.prefix === id ||
+    n.name?.toLowerCase() === id.toLowerCase() ||
+    n.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === id.toLowerCase();
+
+  let all = await getProviderNodes();
+  let found = all.find(match);
+  if (!found) {
+    resetNodesCache();
+    all = await getProviderNodes();
+    found = all.find(match);
+  }
   return found ? { ...found } : null;
 }
 

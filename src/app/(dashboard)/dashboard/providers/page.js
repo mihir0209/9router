@@ -25,6 +25,7 @@ import { useNotificationStore } from "@/store/notificationStore";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import ModelAvailabilityBadge from "./components/ModelAvailabilityBadge";
 import AddCompatibleModal from "./components/AddCompatibleModal";
+import CustomProviderStudioModal from "./components/CustomProviderStudioModal";
 import { STATUS_FILTER_OPTIONS, matchesStatusFilter } from "./utils";
 
 function getStatusDisplay(connected, error, errorCode) {
@@ -104,6 +105,7 @@ export default function ProvidersPage() {
   const [showAddCompatibleModal, setShowAddCompatibleModal] = useState(false);
   const [showAddAnthropicCompatibleModal, setShowAddAnthropicCompatibleModal] =
     useState(false);
+  const [showCustomStudioModal, setShowCustomStudioModal] = useState(false);
   const [testingMode, setTestingMode] = useState(null);
   const [testResults, setTestResults] = useState(null);
   const [statusFilter, setStatusFilter] = useState("all");
@@ -288,6 +290,24 @@ export default function ProvidersPage() {
       (p) => matchSearch(p.name) && matchStatus(getProviderStats(p.id, "apikey")),
     );
 
+  const customProviders = providerNodes
+    .filter(
+      (node) =>
+        node.type === "custom" ||
+        node.type === "custom-provider" ||
+        (typeof node.id === "string" && node.id.startsWith("custom-")),
+    )
+    .map((node) => ({
+      id: node.id,
+      name: node.name || "Custom Provider",
+      color: "#F59E0B",
+      textIcon: "CP",
+      apiType: node.apiType || "custom",
+    }))
+    .filter(
+      (p) => matchSearch(p.name) && matchStatus(getProviderStats(p.id, "apikey")),
+    );
+
   // Dual-auth providers (oauth + apikey) store API keys as authType "apikey"
   // (and sometimes "api_key"). Card stats must count both so totals match detail.
   // kiro has no authModes in registry but accepts both (headless uses "api_key").
@@ -400,7 +420,8 @@ export default function ProvidersPage() {
     apikeyEntries.length > 0 ||
     webCookieEntries.length > 0 ||
     compatibleProviders.length > 0 ||
-    anthropicCompatibleProviders.length > 0;
+    anthropicCompatibleProviders.length > 0 ||
+    customProviders.length > 0;
 
   return (
     <div className="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
@@ -439,6 +460,15 @@ export default function ProvidersPage() {
           <div className="grid grid-cols-1 gap-2 sm:flex sm:w-auto">
             <Button
               size="sm"
+              variant="primary"
+              icon="tune"
+              onClick={() => setShowCustomStudioModal(true)}
+              className="w-full sm:w-auto !bg-amber-400 hover:!bg-amber-500 !text-black font-semibold"
+            >
+              + Custom Provider Studio
+            </Button>
+            <Button
+              size="sm"
               icon="add"
               onClick={() => setShowAddAnthropicCompatibleModal(true)}
               className="w-full sm:w-auto"
@@ -457,14 +487,15 @@ export default function ProvidersPage() {
           </div>
         </div>
         {compatibleProviders.length === 0 &&
-        anthropicCompatibleProviders.length === 0 ? (
+        anthropicCompatibleProviders.length === 0 &&
+        customProviders.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-2 border border-dashed border-border rounded-xl text-text-muted text-sm">
             <span className="material-symbols-outlined text-[18px]">extension</span>
-            <span>No custom providers — use buttons above to add OpenAI/Anthropic compatible endpoints</span>
+            <span>No custom providers — use buttons above to add OpenAI/Anthropic/Custom compatible endpoints</span>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
-            {[...compatibleProviders, ...anthropicCompatibleProviders].map(
+            {[...compatibleProviders, ...anthropicCompatibleProviders, ...customProviders].map(
               (info) => (
                 <ApiKeyProviderCard
                   key={info.id}
@@ -668,6 +699,14 @@ export default function ProvidersPage() {
           setShowAddAnthropicCompatibleModal(false);
         }}
       />
+      <CustomProviderStudioModal
+        isOpen={showCustomStudioModal}
+        onClose={() => setShowCustomStudioModal(false)}
+        onCreated={(node) => {
+          setProviderNodes((prev) => [...prev, node]);
+          setShowCustomStudioModal(false);
+        }}
+      />
 
       {/* Test Results Modal */}
       {testResults && (
@@ -822,6 +861,7 @@ function ApiKeyProviderCard({
   const isAnthropicCompatible = providerId.startsWith(
     ANTHROPIC_COMPATIBLE_PREFIX,
   );
+  const isCustom = providerId.startsWith("custom-");
 
   const dotColors = {
     free: "bg-green-500",
@@ -895,6 +935,11 @@ function ApiKeyProviderCard({
                     {isAnthropicCompatible && (
                       <Badge variant="default" size="sm">
                         Messages
+                      </Badge>
+                    )}
+                    {isCustom && (
+                      <Badge variant="default" size="sm">
+                        Custom
                       </Badge>
                     )}
                     {errorTime && (

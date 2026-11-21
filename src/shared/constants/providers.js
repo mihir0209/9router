@@ -89,6 +89,7 @@ export const OPENAI_COMPATIBLE_PREFIX = "openai-compatible-";
 export const ANTHROPIC_COMPATIBLE_PREFIX = "anthropic-compatible-";
 export const CUSTOM_EMBEDDING_PREFIX = "custom-embedding-";
 export const CUSTOM_MEDIA_PREFIX = "custom-media-";
+export const CUSTOM_PROVIDER_PREFIX = "custom-";
 
 export function isOpenAICompatibleProvider(providerId) {
   return typeof providerId === "string" && providerId.startsWith(OPENAI_COMPATIBLE_PREFIX);
@@ -104,6 +105,15 @@ export function isCustomEmbeddingProvider(providerId) {
 
 export function isCustomMediaProvider(providerId) {
   return typeof providerId === "string" && providerId.startsWith(CUSTOM_MEDIA_PREFIX);
+}
+
+export function isCustomProvider(providerId) {
+  return typeof providerId === "string" && (
+    providerId.startsWith(CUSTOM_PROVIDER_PREFIX) ||
+    providerId.startsWith("custom_") ||
+    providerId.startsWith("custom-") ||
+    providerId.startsWith("node-")
+  );
 }
 
 // All providers (combined)

@@ -7,7 +7,7 @@ import {
   getProxyPoolById,
 } from "@/models";
 import { APIKEY_PROVIDERS } from "@/shared/constants/config";
-import { AI_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider, isCustomMediaProvider } from "@/shared/constants/providers";
+import { AI_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider, isCustomMediaProvider, isCustomProvider } from "@/shared/constants/providers";
 import { normalizeProviderId, normalizeProviderSpecificData } from "@/lib/providerNormalization";
 import { toProviderConnectionResponse } from "@/lib/providerConnectionResponse";
 
@@ -102,6 +102,7 @@ export async function POST(request) {
     // Dual-auth providers (e.g. codebuddy-cn, xai) live under category "oauth" but also
     // accept an API key via authModes — they aren't in APIKEY_PROVIDERS, so allow them here.
     const supportsApiKeyMode = !!AI_PROVIDERS[provider]?.authModes?.includes("apikey");
+    const existingNode = await getProviderNodeById(provider);
     const isValidProvider = APIKEY_PROVIDERS[provider] ||
       FREE_TIER_PROVIDERS[provider] ||
       supportsApiKeyMode ||
@@ -109,12 +110,14 @@ export async function POST(request) {
       isOpenAICompatibleProvider(provider) ||
       isAnthropicCompatibleProvider(provider) ||
       isCustomEmbeddingProvider(provider) ||
-      isCustomMediaProvider(provider);
+      isCustomMediaProvider(provider) ||
+      isCustomProvider(provider) ||
+      !!existingNode;
 
     if (!provider || !isValidProvider) {
       return NextResponse.json({ error: "Invalid provider" }, { status: 400 });
     }
-    const customNode = isCustomMediaProvider(provider) ? await getProviderNodeById(provider) : null;
+    const customNode = isCustomMediaProvider(provider) ? (existingNode || await getProviderNodeById(provider)) : null;
     // A provider may declare a providerSpecificData field that stands in for an API key — e.g.
     // Bedrock's `profile`, where the credential lives in the local AWS config and there is no
     // key to paste. Without this, following such a provider's own setup notice returns 400.
@@ -123,7 +126,7 @@ export async function POST(request) {
     if (!apiKey && provider !== "ollama-local" && !hasApiKeySubstitute) {
       return NextResponse.json({ error: `${isWebCookieProvider ? "Cookie value" : "API Key"} is required` }, { status: 400 });
     }
-    const connectionName = name || displayName || AI_PROVIDERS[provider]?.name;
+    const connectionName = name || displayName || AI_PROVIDERS[provider]?.name || (existingNode || await getProviderNodeById(provider))?.name || "Primary Key";
     if (!connectionName) {
       return NextResponse.json({ error: "Name is required" }, { status: 400 });
     }
@@ -132,8 +135,8 @@ export async function POST(request) {
 
     // Compatible LLM nodes support multiple API-key connections (key pool); runtime
     // rotates/fails over via getProviderCredentials. Embedding nodes stay single-connection.
-    if (isOpenAICompatibleProvider(provider)) {
-      const node = await getProviderNodeById(provider);
+    if (isOpenAICompatibleProvider(provider) || existingNode?.type === "openai-compatible") {
+      const node = existingNode || await getProviderNodeById(provider);
       if (!node) {
         return NextResponse.json({ error: "OpenAI Compatible node not found" }, { status: 404 });
       }
@@ -142,6 +145,20 @@ export async function POST(request) {
         apiType: node.apiType,
         baseUrl: node.baseUrl,
         nodeName: node.name,
+        ...(node.retry ? { retry: node.retry } : {}),
+      };
+    } else if (isCustomProvider(provider) || existingNode?.type === "custom") {
+      const node = existingNode || await getProviderNodeById(provider);
+      if (!node) {
+        return NextResponse.json({ error: "Custom provider node not found" }, { status: 404 });
+      }
+      providerSpecificData = {
+        prefix: node.prefix,
+        baseUrl: node.baseUrl,
+        nodeName: node.name,
+        schemaMapping: node.schemaMapping || node.data?.schemaMapping || {},
+        streaming: node.streaming || node.data?.streaming || { enabled: false },
+        customHeaders: node.customHeaders || node.data?.customHeaders || {},
         ...(node.retry ? { retry: node.retry } : {}),
       };
     } else if (isAnthropicCompatibleProvider(provider)) {
