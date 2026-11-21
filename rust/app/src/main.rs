@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cache;
+pub mod circuit_breaker;
 pub mod combo_router;
 pub mod config;
 pub mod custom_adapter;
@@ -80,7 +81,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Original Next.js dashboard backend initialized at {}", original.base);
 
     // 6. Compose Axum router
-    let combo_tracker = combo_router::ComboTracker::new();
+    let circuit_breaker = Arc::new(circuit_breaker::CircuitBreakerRegistry::default());
+    let combo_tracker = combo_router::ComboTracker::with_circuit_breakers(Arc::clone(&circuit_breaker));
     let token_cache = cache::TokenCache::default();
     let state = routes::AppState {
         config: Arc::clone(&config),
@@ -89,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
         original: original.clone(),
         combo_tracker,
         token_cache,
+        circuit_breaker,
     };
     let app = routes::create_router(state);
 

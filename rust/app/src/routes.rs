@@ -24,6 +24,7 @@ pub struct AppState {
     pub original: crate::original::Original,
     pub combo_tracker: Arc<crate::combo_router::ComboTracker>,
     pub token_cache: crate::cache::TokenCache,
+    pub circuit_breaker: Arc<crate::circuit_breaker::CircuitBreakerRegistry>,
 }
 
 impl axum::extract::FromRef<AppState> for Arc<Database> {
@@ -355,6 +356,23 @@ async fn execute_candidate_chat(
     let mut clean_req = req.clone();
     clean_req.model = target_model.clone();
 
+    // Check candidate-level token cache
+    let cand_cache_key = state.token_cache.compute_chat_hash(&clean_req);
+    if let Some(cached) = state.token_cache.get(&cand_cache_key) {
+        state.circuit_breaker.record_success(&conn.provider);
+        state.circuit_breaker.record_success(candidate);
+        state.db.queue_usage(UsageRecord {
+            provider: Some(conn.provider.clone()),
+            model: Some(target_model.clone()),
+            api_key: Some(api_key.key.clone()),
+            api_key_id: Some(api_key.id.clone()),
+            endpoint: Some("/v1/chat/completions".to_string()),
+            status: "ok".to_string(),
+            ..Default::default()
+        });
+        return Ok(cached.to_response(is_stream));
+    }
+
     if let Some(mapping) = &conn.schema_mapping {
         let endpoint_url = mapping.endpoint_url.clone().or_else(|| conn.base_url.clone()).unwrap_or_else(|| {
             "http://127.0.0.1:20139/api/worst/flat/execute".to_string()
@@ -364,6 +382,8 @@ async fn execute_candidate_chat(
             let req_val = serde_json::to_value(&clean_req).unwrap_or_default();
             match state.proxy.forward_custom_request(&endpoint_url, &req_val, &conn).await {
                 Ok(upstream_res) if upstream_res.status().is_success() => {
+                    state.circuit_breaker.record_success(&conn.provider);
+                    state.circuit_breaker.record_success(candidate);
                     let sse_res = crate::custom_adapter::custom_sse_to_openai_stream(
                         upstream_res.bytes_stream(),
                         mapping.clone(),
@@ -381,9 +401,14 @@ async fn execute_candidate_chat(
                     return Ok(sse_res.into_response());
                 }
                 Ok(upstream_res) => {
-                    return Err((upstream_res.status(), format!("Upstream returned error: {}", upstream_res.status())));
+                    let status = upstream_res.status();
+                    state.circuit_breaker.record_status(&conn.provider, status);
+                    state.circuit_breaker.record_status(candidate, status);
+                    return Err((status, format!("Upstream returned error: {}", status)));
                 }
                 Err(e) => {
+                    state.circuit_breaker.record_failure(&conn.provider);
+                    state.circuit_breaker.record_failure(candidate);
                     return Err((StatusCode::BAD_GATEWAY, e.to_string()));
                 }
             }
@@ -399,6 +424,8 @@ async fn execute_candidate_chat(
                         if let Ok(raw_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                             match crate::custom_adapter::transform_custom_to_openai_response(&raw_json, mapping, &target_model) {
                                 Ok(openai_resp) => {
+                                    state.circuit_breaker.record_success(&conn.provider);
+                                    state.circuit_breaker.record_success(candidate);
                                     state.db.queue_usage(UsageRecord {
                                         provider: Some(conn.provider),
                                         model: Some(target_model.clone()),
@@ -425,9 +452,13 @@ async fn execute_candidate_chat(
                             }
                         }
                     }
+                    state.circuit_breaker.record_status(&conn.provider, status);
+                    state.circuit_breaker.record_status(candidate, status);
                     return Err((status, format!("Upstream returned status: {}", status)));
                 }
                 Err(e) => {
+                    state.circuit_breaker.record_failure(&conn.provider);
+                    state.circuit_breaker.record_failure(candidate);
                     return Err((StatusCode::BAD_GATEWAY, e.to_string()));
                 }
             }
@@ -438,6 +469,8 @@ async fn execute_candidate_chat(
             Ok(upstream_res) => {
                 let status = upstream_res.status();
                 if status.is_success() {
+                    state.circuit_breaker.record_success(&conn.provider);
+                    state.circuit_breaker.record_success(candidate);
                     if is_stream {
                         let sse_res = sse::claude_to_openai_sse_stream(upstream_res.bytes_stream());
                         state.db.queue_usage(UsageRecord {
@@ -479,11 +512,15 @@ async fn execute_candidate_chat(
                         .into_response());
                 } else {
                     let err_text = upstream_res.text().await.unwrap_or_default();
+                    state.circuit_breaker.record_status(&conn.provider, status);
+                    state.circuit_breaker.record_status(candidate, status);
                     tracing::warn!("Candidate '{}' via '{}' failed [{}]: {}", candidate, conn.provider, status, err_text);
                     return Err((status, format!("[{}] {}", status, err_text)));
                 }
             }
             Err(e) => {
+                state.circuit_breaker.record_failure(&conn.provider);
+                state.circuit_breaker.record_failure(candidate);
                 tracing::warn!("Candidate '{}' via '{}' error: {}", candidate, conn.provider, e);
                 return Err((StatusCode::BAD_GATEWAY, e.to_string()));
             }
@@ -493,6 +530,8 @@ async fn execute_candidate_chat(
             Ok(upstream_res) => {
                 let status = upstream_res.status();
                 if status.is_success() {
+                    state.circuit_breaker.record_success(&conn.provider);
+                    state.circuit_breaker.record_success(candidate);
                     if is_stream {
                         let sse_res = sse::passthrough_sse_stream(upstream_res.bytes_stream());
                         state.db.queue_usage(UsageRecord {
@@ -536,11 +575,15 @@ async fn execute_candidate_chat(
                         .into_response());
                 } else {
                     let err_text = upstream_res.text().await.unwrap_or_default();
+                    state.circuit_breaker.record_status(&conn.provider, status);
+                    state.circuit_breaker.record_status(candidate, status);
                     tracing::warn!("Candidate '{}' via '{}' failed [{}]: {}", candidate, conn.provider, status, err_text);
                     return Err((status, format!("[{}] {}", status, err_text)));
                 }
             }
             Err(e) => {
+                state.circuit_breaker.record_failure(&conn.provider);
+                state.circuit_breaker.record_failure(candidate);
                 tracing::warn!("Candidate '{}' via '{}' error: {}", candidate, conn.provider, e);
                 return Err((StatusCode::BAD_GATEWAY, e.to_string()));
             }
@@ -701,6 +744,11 @@ pub async fn chat_completions_handler(
     let start_idx = if is_hedged_eligible { 2 } else { 0 };
 
     for (idx, candidate) in ordered_candidates.iter().enumerate().skip(start_idx) {
+        let (conn, _target_model) = resolve_target_for_candidate(candidate, &provider_nodes, &all_connections);
+        if state.circuit_breaker.is_open(&conn.provider) || state.circuit_breaker.is_open(candidate) {
+            tracing::warn!("Candidate '{}' (provider '{}') circuit breaker is OPEN, skipping without socket connection", candidate, conn.provider);
+            continue;
+        }
         let _in_flight = state.combo_tracker.track_in_flight(candidate);
         match execute_candidate_chat(candidate, &req, is_stream, &state, &api_key, &provider_nodes, &all_connections).await {
             Ok(resp) => {
@@ -710,12 +758,16 @@ pub async fn chat_completions_handler(
                 return state.token_cache.wrap_and_cache(cache_key.clone(), resp, is_stream).await;
             }
             Err((status, err)) => {
-                state.combo_tracker.record_error(candidate);
+                state.combo_tracker.record_error_with_status(candidate, status);
                 tracing::warn!("Candidate {}/{} '{}' failed: {}", idx + 1, ordered_candidates.len(), candidate, err);
                 last_status = status;
                 last_error = err;
             }
         }
+    }
+
+    if last_error.is_empty() {
+        last_error = "All candidates tripped or circuit breaker is open".to_string();
     }
 
     state.db.queue_usage(UsageRecord {
@@ -782,6 +834,23 @@ async fn execute_candidate_claude(
     let mut clean_req = req.clone();
     clean_req.model = clean_model.clone();
 
+    // Check candidate-level token cache
+    let cand_cache_key = state.token_cache.compute_claude_hash(&clean_req);
+    if let Some(cached) = state.token_cache.get(&cand_cache_key) {
+        state.circuit_breaker.record_success(&conn.provider);
+        state.circuit_breaker.record_success(candidate);
+        state.db.queue_usage(UsageRecord {
+            provider: Some(conn.provider.clone()),
+            model: Some(clean_model.clone()),
+            api_key: Some(api_key.key.clone()),
+            api_key_id: Some(api_key.id.clone()),
+            endpoint: Some("/v1/messages".to_string()),
+            status: "ok".to_string(),
+            ..Default::default()
+        });
+        return Ok(cached.to_response(is_stream));
+    }
+
     if let Some(mapping) = &conn.schema_mapping {
         let endpoint_url = mapping.endpoint_url.clone().or_else(|| conn.base_url.clone()).unwrap_or_else(|| {
             "http://127.0.0.1:20139/api/worst/flat/execute".to_string()
@@ -792,6 +861,8 @@ async fn execute_candidate_claude(
             let req_val = serde_json::to_value(&openai_req).unwrap_or_default();
             match state.proxy.forward_custom_request(&endpoint_url, &req_val, &conn).await {
                 Ok(upstream_res) if upstream_res.status().is_success() => {
+                    state.circuit_breaker.record_success(&conn.provider);
+                    state.circuit_breaker.record_success(candidate);
                     let sse_res = crate::custom_adapter::custom_sse_to_claude_stream(
                         upstream_res.bytes_stream(),
                         mapping.clone(),
@@ -809,9 +880,14 @@ async fn execute_candidate_claude(
                     return Ok(sse_res.into_response());
                 }
                 Ok(upstream_res) => {
+                    let status = upstream_res.status();
+                    state.circuit_breaker.record_status(&conn.provider, status);
+                    state.circuit_breaker.record_status(candidate, status);
                     return Err((upstream_res.status(), format!("Custom claude stream error: {}", upstream_res.status())));
                 }
                 Err(e) => {
+                    state.circuit_breaker.record_failure(&conn.provider);
+                    state.circuit_breaker.record_failure(candidate);
                     return Err((StatusCode::BAD_GATEWAY, e.to_string()));
                 }
             }
@@ -827,6 +903,8 @@ async fn execute_candidate_claude(
                         if let Ok(raw_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                             match crate::custom_adapter::transform_custom_to_claude_response(&raw_json, mapping, &clean_model) {
                                 Ok(claude_resp) => {
+                                    state.circuit_breaker.record_success(&conn.provider);
+                                    state.circuit_breaker.record_success(candidate);
                                     state.db.queue_usage(UsageRecord {
                                         provider: Some(conn.provider),
                                         model: Some(clean_model.clone()),
@@ -852,9 +930,13 @@ async fn execute_candidate_claude(
                             }
                         }
                     }
+                    state.circuit_breaker.record_status(&conn.provider, status);
+                    state.circuit_breaker.record_status(candidate, status);
                     return Err((status, format!("Custom claude status: {}", status)));
                 }
                 Err(e) => {
+                    state.circuit_breaker.record_failure(&conn.provider);
+                    state.circuit_breaker.record_failure(candidate);
                     return Err((StatusCode::BAD_GATEWAY, e.to_string()));
                 }
             }
@@ -865,7 +947,7 @@ async fn execute_candidate_claude(
                 let status = upstream_res.status();
                 let body_bytes = upstream_res.bytes().await.unwrap_or_default();
                 state.db.queue_usage(UsageRecord {
-                    provider: Some(conn.provider),
+                    provider: Some(conn.provider.clone()),
                     model: Some(clean_model),
                     api_key: Some(api_key.key.clone()),
                     api_key_id: Some(api_key.id.clone()),
@@ -874,12 +956,18 @@ async fn execute_candidate_claude(
                     ..Default::default()
                 });
                 if status.is_success() {
+                    state.circuit_breaker.record_success(&conn.provider);
+                    state.circuit_breaker.record_success(candidate);
                     return Ok((status, [(header::CONTENT_TYPE, "application/json")], body_bytes).into_response());
                 } else {
+                    state.circuit_breaker.record_status(&conn.provider, status);
+                    state.circuit_breaker.record_status(candidate, status);
                     return Err((status, format!("[{}] Anthropic error", status)));
                 }
             }
             Err(e) => {
+                state.circuit_breaker.record_failure(&conn.provider);
+                state.circuit_breaker.record_failure(candidate);
                 return Err((StatusCode::BAD_GATEWAY, format!("Upstream connection failed: {}", e)));
             }
         }
@@ -890,6 +978,8 @@ async fn execute_candidate_claude(
                 let status = upstream_res.status();
                 let body_bytes = upstream_res.bytes().await.unwrap_or_default();
                 if status.is_success() {
+                    state.circuit_breaker.record_success(&conn.provider);
+                    state.circuit_breaker.record_success(candidate);
                     if let Ok(chat_resp) =
                         serde_json::from_slice::<translator::ChatCompletionResponse>(&body_bytes)
                     {
@@ -913,9 +1003,13 @@ async fn execute_candidate_claude(
                             .into_response());
                     }
                 }
+                state.circuit_breaker.record_status(&conn.provider, status);
+                state.circuit_breaker.record_status(candidate, status);
                 return Err((status, format!("[{}] Claude to OpenAI translation failure", status)));
             }
             Err(e) => {
+                state.circuit_breaker.record_failure(&conn.provider);
+                state.circuit_breaker.record_failure(candidate);
                 return Err((StatusCode::BAD_GATEWAY, format!("Upstream connection failed: {}", e)));
             }
         }
@@ -1076,6 +1170,11 @@ pub async fn messages_handler(
     let start_idx = if is_hedged_eligible { 2 } else { 0 };
 
     for (idx, candidate) in ordered_candidates.iter().enumerate().skip(start_idx) {
+        let (conn, _target_model) = resolve_target_for_candidate(candidate, &provider_nodes, &all_connections);
+        if state.circuit_breaker.is_open(&conn.provider) || state.circuit_breaker.is_open(candidate) {
+            tracing::warn!("Claude candidate '{}' (provider '{}') circuit breaker is OPEN, skipping without socket connection", candidate, conn.provider);
+            continue;
+        }
         let _in_flight = state.combo_tracker.track_in_flight(candidate);
         match execute_candidate_claude(candidate, &req, is_stream, &state, &api_key, &provider_nodes, &all_connections).await {
             Ok(resp) => {
@@ -1085,12 +1184,16 @@ pub async fn messages_handler(
                 return state.token_cache.wrap_and_cache(cache_key.clone(), resp, is_stream).await;
             }
             Err((status, err)) => {
-                state.combo_tracker.record_error(candidate);
+                state.combo_tracker.record_error_with_status(candidate, status);
                 tracing::warn!("Claude candidate {}/{} '{}' failed: {}", idx + 1, ordered_candidates.len(), candidate, err);
                 last_status = status;
                 last_error = err;
             }
         }
+    }
+
+    if last_error.is_empty() {
+        last_error = "All candidates tripped or circuit breaker is open".to_string();
     }
 
     state.db.queue_usage(UsageRecord {
@@ -2983,7 +3086,8 @@ mod tests {
         let original = crate::original::Original::empty();
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache };
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker };
         let app = create_router(state);
 
         let req = Request::builder()
@@ -3014,7 +3118,8 @@ mod tests {
         let original = crate::original::Original::empty();
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache };
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker };
         let app = create_router(state);
 
         // GET /v1/models without key
@@ -3140,7 +3245,8 @@ mod tests {
         let original = crate::original::Original::empty();
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache };
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker };
         let app = create_router(state);
 
         let req = Request::builder()
@@ -3174,7 +3280,8 @@ mod tests {
         let original = crate::original::Original::empty();
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache };
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker };
         let app = create_router(state);
 
         // 1. Create a combo
@@ -3256,7 +3363,8 @@ mod tests {
         let original = crate::original::Original::empty(); // Standalone embedded mode
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache };
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker };
         let app = create_router(state);
 
         // GET / should serve embedded index.html
@@ -3298,7 +3406,8 @@ mod tests {
         let original = crate::original::Original::empty();
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
-        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache };
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker };
         let app = create_router(state);
 
         // Create combo with strategy: "hedged"
@@ -3378,7 +3487,8 @@ mod tests {
             axum::body::Bytes::from_static(b"{\"id\":\"chatcmpl-cached\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"4\"}}]}"),
         );
 
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache: token_cache.clone() };
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache: token_cache.clone(), circuit_breaker };
         let app = create_router(state);
 
         // 2. Dispatch POST /v1/chat/completions with whitespace variation: "  what   is   2+2?  \n"
@@ -3452,6 +3562,143 @@ mod tests {
         let claude_body = axum::body::to_bytes(claude_resp.into_body(), usize::MAX).await.unwrap();
         let claude_val: serde_json::Value = serde_json::from_slice(&claude_body).unwrap();
         assert!(claude_val["content"].as_array().unwrap()[0]["text"].as_str().unwrap().contains("pong"));
+    }
+
+    #[tokio::test]
+    async fn test_upstream_circuit_breaker_failover_and_canary_in_routes() {
+        use std::time::Duration;
+        let db = Database::open_in_memory().unwrap();
+        db.save_settings(&json!({ "requireLogin": false })).unwrap();
+
+        let test_key = ApiKey {
+            id: "key-cb-test".to_string(),
+            key: "sk-cb-test-key".to_string(),
+            name: Some("CB Test".to_string()),
+            machine_id: None,
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            rate_limit_requests: 0,
+            rate_limit_window_seconds: 60,
+            token_limit_daily: 0,
+            token_limit_monthly: 0,
+            allowed_models: "*".to_string(),
+            blocked_models: String::new(),
+            allowed_ips: String::new(),
+            blocked_ips: String::new(),
+            expires_at: String::new(),
+            description: String::new(),
+            owner_ref: None,
+            max_concurrent_requests: 0,
+            allowed_providers: String::new(),
+            blocked_providers: String::new(),
+            force_provider: String::new(),
+            force_model: String::new(),
+            allowed_endpoints: String::new(),
+            blocked_endpoints: String::new(),
+        };
+        db.save_api_key(&test_key).unwrap();
+
+        // Create combo with 2 candidates
+        let combo = crate::db::Combo {
+            id: "combo-cb-failover".to_string(),
+            name: "resilient-combo".to_string(),
+            kind: None,
+            models: vec!["openai/gpt-4o".to_string(), "azure/gpt-4o".to_string()],
+            strategy: Some("fallback".to_string()),
+            match_rules: None,
+            custom_prompt: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        db.save_combo(&combo).unwrap();
+
+        let cb_config = crate::circuit_breaker::CircuitBreakerConfig {
+            failure_threshold: 3,
+            cooldown_duration: Duration::from_millis(50),
+            rolling_window: Duration::from_secs(60),
+            canary_timeout: Duration::from_secs(30),
+        };
+        let circuit_breaker = Arc::new(crate::circuit_breaker::CircuitBreakerRegistry::new(cb_config));
+        let combo_tracker = crate::combo_router::ComboTracker::with_circuit_breakers(Arc::clone(&circuit_breaker));
+        let token_cache = crate::cache::TokenCache::default();
+
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+        });
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let state = AppState {
+            config,
+            db,
+            proxy,
+            original,
+            combo_tracker,
+            token_cache: token_cache.clone(),
+            circuit_breaker: Arc::clone(&circuit_breaker),
+        };
+        let app = create_router(state);
+
+        // Pre-seed cache for secondary candidate (azure/gpt-4o)
+        let secondary_chat_req = ChatCompletionRequest {
+            model: "azure/gpt-4o".to_string(),
+            messages: vec![crate::translator::ChatMessage::user("hello cb")],
+            ..Default::default()
+        };
+        let secondary_hash = token_cache.compute_chat_hash(&secondary_chat_req);
+        token_cache.set_json(
+            &secondary_hash,
+            axum::body::Bytes::from_static(b"{\"id\":\"chatcmpl-azure\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"azure hello\"}}]}"),
+        );
+
+        // 1. Trip the primary candidate "openai/gpt-4o" to Open
+        circuit_breaker.trip("openai/gpt-4o");
+        assert!(circuit_breaker.is_open("openai/gpt-4o"));
+
+        // 2. Dispatch request to "resilient-combo"
+        // Primary candidate "openai/gpt-4o" is tripped, so router must immediately divert to "azure/gpt-4o" without error
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-cb-test-key")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"resilient-combo","messages":[{"role":"user","content":"hello cb"}]}"#))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json_val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_val["choices"][0]["message"]["content"], "azure hello");
+
+        // 3. Now trip both candidates
+        circuit_breaker.trip("azure/gpt-4o");
+        assert!(circuit_breaker.is_open("azure/gpt-4o"));
+
+        // Dispatch request when all candidates are tripped Open (different query to bypass token cache)
+        let req_all_open = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-cb-test-key")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"resilient-combo","messages":[{"role":"user","content":"uncached all open query"}]}"#))
+            .unwrap();
+
+        let resp_all_open = app.clone().oneshot(req_all_open).await.unwrap();
+        assert_eq!(resp_all_open.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_all_open = axum::body::to_bytes(resp_all_open.into_body(), usize::MAX).await.unwrap();
+        let err_json: serde_json::Value = serde_json::from_slice(&body_all_open).unwrap();
+        assert_eq!(err_json["error"]["type"], "combo_routing_error");
+
+        // 4. Test canary probe after cooldown
+        std::thread::sleep(Duration::from_millis(60)); // Cooldown is 50ms
+        // Candidate transitions to HalfOpen, allowing canary probe
+        assert!(circuit_breaker.is_available("openai/gpt-4o"));
+        // Canary success resets state to Closed
+        circuit_breaker.record_success("openai/gpt-4o");
+        assert_eq!(circuit_breaker.state("openai/gpt-4o"), crate::circuit_breaker::CircuitState::Closed);
     }
 }
 

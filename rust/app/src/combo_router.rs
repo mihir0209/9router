@@ -69,17 +69,53 @@ impl Drop for InFlightGuard {
     }
 }
 
-#[derive(Default)]
 pub struct ComboTracker {
     pub rr_counters: DashMap<String, AtomicUsize>,
     pub sticky_models: DashMap<String, String>,
     pub in_flight: DashMap<String, AtomicUsize>,
     pub recent_errors: DashMap<String, AtomicUsize>,
+    pub circuit_breakers: Arc<crate::circuit_breaker::CircuitBreakerRegistry>,
+}
+
+impl Default for ComboTracker {
+    fn default() -> Self {
+        Self {
+            rr_counters: DashMap::new(),
+            sticky_models: DashMap::new(),
+            in_flight: DashMap::new(),
+            recent_errors: DashMap::new(),
+            circuit_breakers: Arc::new(crate::circuit_breaker::CircuitBreakerRegistry::default()),
+        }
+    }
 }
 
 impl ComboTracker {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub fn with_circuit_breakers(circuit_breakers: Arc<crate::circuit_breaker::CircuitBreakerRegistry>) -> Arc<Self> {
+        Arc::new(Self {
+            rr_counters: DashMap::new(),
+            sticky_models: DashMap::new(),
+            in_flight: DashMap::new(),
+            recent_errors: DashMap::new(),
+            circuit_breakers,
+        })
+    }
+
+    /// Checks if a candidate is available, taking into account candidate and provider circuit breakers.
+    pub fn is_candidate_available(&self, candidate: &str) -> bool {
+        self.circuit_breakers.is_candidate_available(candidate)
+    }
+
+    /// Filters candidate list, skipping any candidates whose circuit breaker is tripped to Open.
+    pub fn filter_available_candidates(&self, candidates: &[String]) -> Vec<String> {
+        candidates
+            .iter()
+            .filter(|c| self.is_candidate_available(c))
+            .cloned()
+            .collect()
     }
 
     /// Track an in-flight request to a candidate model using an RAII guard.
@@ -104,6 +140,16 @@ impl ComboTracker {
     }
 
     pub fn record_error(&self, candidate: &str) {
+        self.circuit_breakers.record_failure(candidate);
+        let entry = self
+            .recent_errors
+            .entry(candidate.to_string())
+            .or_insert_with(|| AtomicUsize::new(0));
+        entry.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn record_error_with_status(&self, candidate: &str, status: reqwest::StatusCode) {
+        self.circuit_breakers.record_status(candidate, status);
         let entry = self
             .recent_errors
             .entry(candidate.to_string())
@@ -112,6 +158,7 @@ impl ComboTracker {
     }
 
     pub fn record_success(&self, combo_name: &str, candidate: &str) {
+        self.circuit_breakers.record_success(candidate);
         // Clear or decrement recent errors on success
         if let Some(errs) = self.recent_errors.get(candidate) {
             errs.store(0, Ordering::SeqCst);
@@ -121,7 +168,7 @@ impl ComboTracker {
             .insert(combo_name.to_string(), candidate.to_string());
     }
 
-    /// Orders candidate models based on the combo strategy.
+    /// Orders candidate models based on the combo strategy, skipping tripped Open providers.
     pub fn order_candidates(
         &self,
         combo_name: &str,
@@ -132,27 +179,33 @@ impl ComboTracker {
             return Vec::new();
         }
 
+        // Filter out candidates whose circuit breaker is Open (immediately diverting traffic without socket connection)
+        let available = self.filter_available_candidates(candidates);
+        if available.is_empty() {
+            return Vec::new();
+        }
+
         match strategy {
-            ComboStrategy::Fallback => candidates.to_vec(),
+            ComboStrategy::Fallback => available,
 
             ComboStrategy::RoundRobin => {
                 let counter = self
                     .rr_counters
                     .entry(combo_name.to_string())
                     .or_insert_with(|| AtomicUsize::new(0));
-                let idx = counter.fetch_add(1, Ordering::SeqCst) % candidates.len();
-                let mut reordered = Vec::with_capacity(candidates.len());
-                reordered.extend_from_slice(&candidates[idx..]);
-                reordered.extend_from_slice(&candidates[..idx]);
+                let idx = counter.fetch_add(1, Ordering::SeqCst) % available.len();
+                let mut reordered = Vec::with_capacity(available.len());
+                reordered.extend_from_slice(&available[idx..]);
+                reordered.extend_from_slice(&available[..idx]);
                 reordered
             }
 
             ComboStrategy::Sticky => {
                 if let Some(sticky) = self.sticky_models.get(combo_name) {
-                    if let Some(pos) = candidates.iter().position(|c| c == sticky.value()) {
-                        let mut reordered = Vec::with_capacity(candidates.len());
-                        reordered.push(candidates[pos].clone());
-                        for (i, c) in candidates.iter().enumerate() {
+                    if let Some(pos) = available.iter().position(|c| c == sticky.value()) {
+                        let mut reordered = Vec::with_capacity(available.len());
+                        reordered.push(available[pos].clone());
+                        for (i, c) in available.iter().enumerate() {
                             if i != pos {
                                 reordered.push(c.clone());
                             }
@@ -160,12 +213,12 @@ impl ComboTracker {
                         return reordered;
                     }
                 }
-                candidates.to_vec()
+                available
             }
 
             ComboStrategy::Capacity => {
                 // Capacity-aware: sort candidates by (in_flight_load * 1000 + recent_errors * 100)
-                let mut scored: Vec<(usize, String)> = candidates
+                let mut scored: Vec<(usize, String)> = available
                     .iter()
                     .map(|c| {
                         let in_f = self.get_in_flight(c);
@@ -183,8 +236,8 @@ impl ComboTracker {
             }
 
             ComboStrategy::Fusion | ComboStrategy::HedgedRacing => {
-                // Fusion and HedgedRacing preserve defined candidate order
-                candidates.to_vec()
+                // Fusion and HedgedRacing preserve defined candidate order among available candidates
+                available
             }
         }
     }
@@ -840,5 +893,112 @@ mod tests {
         let (winner, _) = res.unwrap();
         assert_eq!(winner, "secondary");
         assert!(primary_dropped.load(Ordering::SeqCst), "Primary future must be dropped on secondary win");
+    }
+
+    #[test]
+    fn test_order_candidates_skips_tripped_open_candidates() {
+        let tracker = ComboTracker::new();
+        let candidates = vec![
+            "cand-1".to_string(),
+            "cand-2".to_string(),
+            "cand-3".to_string(),
+        ];
+
+        // Normal state: all 3 available
+        let ordered = tracker.order_candidates("test_combo", &candidates, ComboStrategy::Fallback);
+        assert_eq!(ordered, candidates);
+
+        // Trip cand-1
+        tracker.circuit_breakers.trip("cand-1");
+        assert!(tracker.circuit_breakers.is_open("cand-1"));
+
+        // order_candidates must skip cand-1 and immediately divert to cand-2 and cand-3
+        let ordered = tracker.order_candidates("test_combo", &candidates, ComboStrategy::Fallback);
+        assert_eq!(ordered, vec!["cand-2".to_string(), "cand-3".to_string()]);
+
+        // Trip cand-2 as well
+        tracker.circuit_breakers.trip("cand-2");
+        let ordered = tracker.order_candidates("test_combo", &candidates, ComboStrategy::Fallback);
+        assert_eq!(ordered, vec!["cand-3".to_string()]);
+
+        // Reset cand-1
+        tracker.circuit_breakers.reset("cand-1");
+        let ordered = tracker.order_candidates("test_combo", &candidates, ComboStrategy::Fallback);
+        assert_eq!(ordered, vec!["cand-1".to_string(), "cand-3".to_string()]);
+    }
+
+    #[test]
+    fn test_order_candidates_returns_empty_when_all_tripped() {
+        let tracker = ComboTracker::new();
+        let candidates = vec!["cand-1".to_string(), "cand-2".to_string()];
+
+        tracker.circuit_breakers.trip("cand-1");
+        tracker.circuit_breakers.trip("cand-2");
+
+        let ordered = tracker.order_candidates("test_combo", &candidates, ComboStrategy::Fallback);
+        assert!(ordered.is_empty(), "All candidates tripped -> return empty immediately without socket connection");
+    }
+
+    #[test]
+    fn test_order_candidates_half_open_single_canary_allocation() {
+        let cb_config = crate::circuit_breaker::CircuitBreakerConfig {
+            failure_threshold: 3,
+            cooldown_duration: Duration::from_millis(50),
+            rolling_window: Duration::from_secs(60),
+            canary_timeout: Duration::from_secs(30),
+        };
+        let registry = Arc::new(crate::circuit_breaker::CircuitBreakerRegistry::new(cb_config));
+        let tracker = ComboTracker::with_circuit_breakers(registry);
+        let candidates = vec!["cand-1".to_string(), "cand-2".to_string()];
+
+        // Trip cand-1
+        tracker.circuit_breakers.trip("cand-1");
+        assert!(!tracker.circuit_breakers.is_available("cand-1"));
+
+        // Wait for cooldown to elapse
+        std::thread::sleep(Duration::from_millis(60));
+
+        // 1st call to order_candidates: transitions cand-1 to HalfOpen and allocates 1 canary probe
+        let ordered_first = tracker.order_candidates("test_combo", &candidates, ComboStrategy::Fallback);
+        assert_eq!(ordered_first, vec!["cand-1".to_string(), "cand-2".to_string()]);
+
+        // 2nd concurrent call to order_candidates: cand-1 canary is already in flight,
+        // so traffic is diverted to cand-2!
+        let ordered_second = tracker.order_candidates("test_combo", &candidates, ComboStrategy::Fallback);
+        assert_eq!(ordered_second, vec!["cand-2".to_string()]);
+
+        // When canary succeeds:
+        tracker.record_success("test_combo", "cand-1");
+        assert_eq!(tracker.circuit_breakers.state("cand-1"), crate::circuit_breaker::CircuitState::Closed);
+
+        // Now both candidates are healthy again
+        let ordered_after_success = tracker.order_candidates("test_combo", &candidates, ComboStrategy::Fallback);
+        assert_eq!(ordered_after_success, vec!["cand-1".to_string(), "cand-2".to_string()]);
+    }
+
+    #[test]
+    fn test_combo_tracker_consecutive_failures_trips_circuit_breaker() {
+        let cb_config = crate::circuit_breaker::CircuitBreakerConfig {
+            failure_threshold: 3,
+            cooldown_duration: Duration::from_secs(15),
+            rolling_window: Duration::from_secs(60),
+            canary_timeout: Duration::from_secs(30),
+        };
+        let registry = Arc::new(crate::circuit_breaker::CircuitBreakerRegistry::new(cb_config));
+        let tracker = ComboTracker::with_circuit_breakers(registry);
+        let candidates = vec!["failing-provider".to_string(), "backup-provider".to_string()];
+
+        // 2 errors do not trip
+        tracker.record_error("failing-provider");
+        tracker.record_error("failing-provider");
+        assert_eq!(tracker.order_candidates("test_combo", &candidates, ComboStrategy::Fallback).len(), 2);
+
+        // 3rd error trips to Open
+        tracker.record_error("failing-provider");
+        assert!(tracker.circuit_breakers.is_open("failing-provider"));
+
+        // Next order_candidates skips failing-provider
+        let ordered = tracker.order_candidates("test_combo", &candidates, ComboStrategy::Fallback);
+        assert_eq!(ordered, vec!["backup-provider".to_string()]);
     }
 }
