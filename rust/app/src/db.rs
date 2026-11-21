@@ -78,6 +78,9 @@ pub struct Combo {
     pub name: String,
     pub kind: Option<String>,
     pub models: Vec<String>,
+    pub strategy: Option<String>,
+    pub match_rules: Option<String>,
+    pub custom_prompt: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -316,6 +319,9 @@ impl Database {
                 name TEXT UNIQUE NOT NULL,
                 kind TEXT,
                 models TEXT NOT NULL,
+                strategy TEXT DEFAULT 'fallback',
+                matchRules TEXT DEFAULT '[]',
+                customPrompt TEXT DEFAULT '',
                 createdAt TEXT NOT NULL,
                 updatedAt TEXT NOT NULL
             );
@@ -345,6 +351,11 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_uh_apikey_id ON usageHistory(apiKeyId);
             "#,
         )?;
+
+        // Idempotent column migrations for existing databases
+        let _ = conn.execute("ALTER TABLE combos ADD COLUMN strategy TEXT DEFAULT 'fallback'", []);
+        let _ = conn.execute("ALTER TABLE combos ADD COLUMN matchRules TEXT DEFAULT '[]'", []);
+        let _ = conn.execute("ALTER TABLE combos ADD COLUMN customPrompt TEXT DEFAULT ''", []);
 
         let (usage_tx, usage_rx) = mpsc::channel(10_000);
         let conn_arc = Arc::new(Mutex::new(conn));
@@ -607,6 +618,16 @@ impl Database {
         Ok(list)
     }
 
+    /// Delete an API key by ID or Key string.
+    pub fn delete_api_key(&self, id: &str) -> anyhow::Result<bool> {
+        let guard = self.conn.lock().unwrap();
+        let affected = guard.execute(
+            "DELETE FROM apiKeys WHERE id = ?1 OR key = ?1",
+            params![id],
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Validates an API key: checks active flag, expiration date, and rate limits.
     pub fn validate_key(&self, api_key: &ApiKey) -> Result<(), KeyValidationError> {
         if !api_key.is_active {
@@ -833,7 +854,7 @@ impl Database {
     pub fn load_combos(&self) -> anyhow::Result<Vec<Combo>> {
         let guard = self.conn.lock().unwrap();
         let mut stmt = guard.prepare(
-            "SELECT id, name, kind, models, createdAt, updatedAt FROM combos ORDER BY createdAt ASC",
+            "SELECT id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt FROM combos ORDER BY createdAt ASC",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -844,8 +865,11 @@ impl Database {
                 name: row.get(1)?,
                 kind: row.get(2)?,
                 models,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                strategy: row.get(4)?,
+                match_rules: row.get(5)?,
+                custom_prompt: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         })?;
 
@@ -860,7 +884,7 @@ impl Database {
     pub fn get_combo_by_name(&self, name: &str) -> anyhow::Result<Option<Combo>> {
         let guard = self.conn.lock().unwrap();
         let mut stmt = guard.prepare_cached(
-            "SELECT id, name, kind, models, createdAt, updatedAt FROM combos WHERE name = ?",
+            "SELECT id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt FROM combos WHERE name = ?",
         )?;
 
         let result = stmt
@@ -872,8 +896,39 @@ impl Database {
                     name: row.get(1)?,
                     kind: row.get(2)?,
                     models,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
+                    strategy: row.get(4)?,
+                    match_rules: row.get(5)?,
+                    custom_prompt: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })
+            .optional()?;
+
+        Ok(result)
+    }
+
+    /// Retrieves a combo by its ID.
+    pub fn get_combo_by_id(&self, id: &str) -> anyhow::Result<Option<Combo>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare_cached(
+            "SELECT id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt FROM combos WHERE id = ?",
+        )?;
+
+        let result = stmt
+            .query_row(params![id], |row| {
+                let models_str: String = row.get(3)?;
+                let models: Vec<String> = serde_json::from_str(&models_str).unwrap_or_default();
+                Ok(Combo {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    models,
+                    strategy: row.get(4)?,
+                    match_rules: row.get(5)?,
+                    custom_prompt: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
                 })
             })
             .optional()?;
@@ -885,23 +940,55 @@ impl Database {
     pub fn save_combo(&self, combo: &Combo) -> anyhow::Result<()> {
         let guard = self.conn.lock().unwrap();
         let models_json = serde_json::to_string(&combo.models)?;
+        let strategy = combo.strategy.as_deref().unwrap_or("fallback");
+        let match_rules = combo.match_rules.as_deref().unwrap_or("[]");
+        let custom_prompt = combo.custom_prompt.as_deref().unwrap_or("");
         guard.execute(
             r#"
-            INSERT INTO combos(id, name, kind, models, createdAt, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO combos(id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-                name=excluded.name, kind=excluded.kind, models=excluded.models, updatedAt=excluded.updatedAt
+                name=excluded.name, kind=excluded.kind, models=excluded.models,
+                strategy=excluded.strategy, matchRules=excluded.matchRules,
+                customPrompt=excluded.customPrompt, updatedAt=excluded.updatedAt
             "#,
             params![
                 combo.id,
                 combo.name,
                 combo.kind,
                 models_json,
+                strategy,
+                match_rules,
+                custom_prompt,
                 combo.created_at,
                 combo.updated_at,
             ],
         )?;
         Ok(())
+    }
+
+    /// Deletes a combo by ID or name.
+    pub fn delete_combo(&self, id: &str) -> anyhow::Result<bool> {
+        let guard = self.conn.lock().unwrap();
+        let affected = guard.execute(
+            "DELETE FROM combos WHERE id = ?1 OR name = ?1",
+            params![id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Bulk deletes combos by IDs.
+    pub fn bulk_delete_combos(&self, ids: &[String]) -> anyhow::Result<usize> {
+        let guard = self.conn.lock().unwrap();
+        let mut count = 0;
+        for id in ids {
+            let affected = guard.execute(
+                "DELETE FROM combos WHERE id = ?1 OR name = ?1",
+                params![id],
+            )?;
+            count += affected;
+        }
+        Ok(count)
     }
 
     /// Returns count of total rows in usageHistory.
@@ -954,6 +1041,78 @@ impl Database {
             list.push(r?);
         }
         Ok(list)
+    }
+
+    /// Saves or updates a provider node.
+    pub fn save_provider_node(&self, node: &ProviderNode) -> anyhow::Result<()> {
+        let guard = self.conn.lock().unwrap();
+        let data_str = serde_json::to_string(&node.data)?;
+        guard.execute(
+            r#"
+            INSERT INTO providerNodes(id, type, name, data, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                type=excluded.type, name=excluded.name, data=excluded.data, updatedAt=excluded.updatedAt
+            "#,
+            params![
+                node.id,
+                node.node_type,
+                node.name,
+                data_str,
+                node.created_at,
+                node.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes a provider node by ID.
+    pub fn delete_provider_node(&self, id: &str) -> anyhow::Result<bool> {
+        let guard = self.conn.lock().unwrap();
+        let affected = guard.execute(
+            "DELETE FROM providerNodes WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Retrieves a single provider node by ID.
+    pub fn get_provider_node_by_id(&self, id: &str) -> anyhow::Result<Option<ProviderNode>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare_cached(
+            "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes WHERE id = ?",
+        )?;
+
+        let result = stmt
+            .query_row(params![id], |row| {
+                let id: String = row.get(0)?;
+                let node_type: Option<String> = row.get(1)?;
+                let name: Option<String> = row.get(2)?;
+                let data_str: String = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let updated_at: String = row.get(5)?;
+
+                let val: serde_json::Value =
+                    serde_json::from_str(&data_str).unwrap_or(serde_json::Value::Null);
+                let prefix = val.get("prefix").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let base_url = val.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let api_type = val.get("apiType").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                Ok(ProviderNode {
+                    id,
+                    node_type,
+                    name,
+                    prefix,
+                    base_url,
+                    api_type,
+                    data: val,
+                    created_at,
+                    updated_at,
+                })
+            })
+            .optional()?;
+
+        Ok(result)
     }
 
     // ==========================================
@@ -1266,6 +1425,9 @@ mod tests {
                 "anthropic/claude-3-5-sonnet".to_string(),
                 "openai/gpt-4o".to_string(),
             ],
+            strategy: Some("fallback".to_string()),
+            match_rules: Some("[]".to_string()),
+            custom_prompt: Some("".to_string()),
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         };
@@ -1284,6 +1446,9 @@ mod tests {
             name: "group-a".to_string(),
             kind: None,
             models: vec!["group-b".to_string(), "leaf-1".to_string()],
+            strategy: None,
+            match_rules: None,
+            custom_prompt: None,
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         };
@@ -1292,6 +1457,9 @@ mod tests {
             name: "group-b".to_string(),
             kind: None,
             models: vec!["group-a".to_string(), "leaf-2".to_string()],
+            strategy: None,
+            match_rules: None,
+            custom_prompt: None,
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         };

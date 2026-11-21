@@ -1,0 +1,20 @@
+# Micro-container for 9Router Native Rust with Embedded Single-Binary Dashboard
+# Final Image: Standalone Single Binary with Embedded Svelte 5 Dashboard
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates tzdata && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /app/data && \
+    chown -R ubuntu:ubuntu /app
+
+WORKDIR /app
+COPY --chown=ubuntu:ubuntu rust/app/target/release/ninerouter /app/ninerouter
+
+USER ubuntu
+ENV PORT=20127
+ENV STANDALONE=1
+ENV DATA_DIR=/app/data
+EXPOSE 20127
+
+ENTRYPOINT ["/app/ninerouter"]

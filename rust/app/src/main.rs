@@ -1,7 +1,10 @@
 pub mod auth;
+pub mod combo_router;
 pub mod config;
+pub mod custom_adapter;
 pub mod db;
 pub mod embed;
+pub mod original;
 pub mod proxy;
 pub mod routes;
 pub mod sse;
@@ -71,15 +74,22 @@ async fn main() -> anyhow::Result<()> {
     // 4. Initialize ProxyService
     let proxy = Arc::new(proxy::ProxyService::new());
 
-    // 5. Compose Axum router
+    // 5. Initialize Original Next.js dashboard backend
+    let original = original::Original::start().await;
+    tracing::info!("Original Next.js dashboard backend initialized at {}", original.base);
+
+    // 6. Compose Axum router
+    let combo_tracker = combo_router::ComboTracker::new();
     let state = routes::AppState {
         config: Arc::clone(&config),
         db,
         proxy,
+        original: original.clone(),
+        combo_tracker,
     };
     let app = routes::create_router(state);
 
-    // 6. Bind to port and run with graceful shutdown
+    // 7. Bind to port and run with graceful shutdown
     let port = config.port;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -89,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    original.stop();
     tracing::info!("9Router shutdown gracefully");
     Ok(())
 }

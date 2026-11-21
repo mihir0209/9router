@@ -13,6 +13,13 @@ out
 build
 dist
 coverage
+target
+**/target
+!rust/app/target/release/ninerouter
+web/dist
+web/node_modules
+scratch
+tests
 
 # Runtime data and logs
 data

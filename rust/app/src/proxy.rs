@@ -266,6 +266,7 @@ pub struct UpstreamConnection {
     pub project_id: Option<String>,
     pub location: Option<String>,
     pub custom_headers: Option<HeaderMap>,
+    pub schema_mapping: Option<crate::custom_adapter::CustomSchemaMapping>,
 }
 
 /// Constructs the chat completions upstream URL based on baseUrl conventions:
@@ -405,6 +406,33 @@ impl ProxyService {
             .post(&url)
             .headers(headers)
             .json(req)
+            .send()
+            .await
+    }
+
+    /// Forwards an arbitrary payload to a custom provider endpoint.
+    pub async fn forward_custom_request(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        conn: &UpstreamConnection,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        if let Some(key) = &conn.api_key {
+            if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", key)) {
+                headers.insert(AUTHORIZATION, val);
+            }
+        }
+        if let Some(custom) = &conn.custom_headers {
+            headers.extend(custom.clone());
+        }
+
+        self.client
+            .post(url)
+            .headers(headers)
+            .json(body)
             .send()
             .await
     }

@@ -20,8 +20,7 @@ ARG NPM_REGISTRY
 RUN apk add --no-cache python3 make g++ linux-headers
 
 COPY package.json ./
-RUN --mount=type=cache,target=/root/.npm \
-    npm install \
+RUN npm install \
       --registry="${NPM_REGISTRY}" \
       --fetch-retries=5 \
       --fetch-retry-factor=2 \
@@ -39,8 +38,7 @@ RUN npm run build
 # them, so OpenCode Free fails with HTTP 502 ("resolve is undefined").
 # Install them (with their native bindings/transitive deps) in an isolated dir
 # so the runner stage can copy them into /app/node_modules.
-RUN --mount=type=cache,target=/root/.npm \
-    mkdir -p /opt/lazy-runtime && cd /opt/lazy-runtime && \
+RUN mkdir -p /opt/lazy-runtime && cd /opt/lazy-runtime && \
     npm init -y >/dev/null && \
     npm install --no-save \
       --registry="${NPM_REGISTRY}" \
@@ -88,6 +86,7 @@ COPY --from=builder /app/node_modules/node-machine-id ./node_modules/node-machin
 # wreq-js + playwright-core (and deps) are lazy-loaded at runtime and omitted by
 # tracing. See https://github.com/decolua/9router/issues/5245
 COPY --from=builder /opt/lazy-runtime/node_modules/. ./node_modules/
+COPY rust/app/target/release/ninerouter ./ninerouter
 
 RUN mkdir -p /app/data && chown -R node:node /app && \
   mkdir -p /app/data-home && chown node:node /app/data-home && \
@@ -95,11 +94,12 @@ RUN mkdir -p /app/data && chown -R node:node /app && \
 
 # Avoid a full distribution upgrade in the runtime image. It makes builds less
 # reproducible and is unrelated to installing the runtime entrypoint helper.
-RUN apk add --no-cache su-exec ffmpeg && \
+RUN apk add --no-cache su-exec ffmpeg gcompat && \
+  chmod +x /app/ninerouter && \
   printf '#!/bin/sh\nchown -R node:node /app/data /app/data-home 2>/dev/null\nexec su-exec node "$@"\n' > /entrypoint.sh && \
   chmod +x /entrypoint.sh
 
 EXPOSE 20128
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["node", "custom-server.js"]
+CMD ["/app/ninerouter"]

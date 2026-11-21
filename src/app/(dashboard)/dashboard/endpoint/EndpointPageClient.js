@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import PropTypes from "prop-types";
+import Link from "next/link";
 import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal, ModelSelectModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import {
@@ -892,6 +893,31 @@ export default function APIPageClient({ machineId }) {
 
   return (
     <div className="flex flex-col gap-8">
+      {/* Quick Access Chat Assistant Banner */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-xl border border-primary/20 bg-gradient-to-r from-primary/10 via-primary/5 to-transparent">
+        <div className="flex items-center gap-3">
+          <div className="size-10 rounded-lg bg-primary/20 flex items-center justify-center text-primary shrink-0">
+            <span className="material-symbols-outlined text-[24px]">chat</span>
+          </div>
+          <div>
+            <h3 className="font-semibold text-sm sm:text-base text-text-main flex items-center gap-2">
+              9Router Chat Assistant
+              <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-primary/10 text-primary font-bold">Live</span>
+            </h3>
+            <p className="text-xs text-text-muted">
+              Interactive AI assistant to test models, debug endpoints, and manage custom providers client-side.
+            </p>
+          </div>
+        </div>
+        <Link
+          href="/dashboard/basic-chat"
+          className="px-4 py-2 rounded-lg bg-primary text-white hover:bg-primary-hover font-medium text-xs sm:text-sm flex items-center gap-2 shadow-sm transition-colors shrink-0"
+        >
+          <span className="material-symbols-outlined text-[18px]">chat</span>
+          Open Chat
+        </Link>
+      </div>
+
       {/* Endpoint Card */}
       <Card>
         <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">

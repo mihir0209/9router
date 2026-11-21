@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { ACCEPT_ENCODING } from "open-sse/utils/zstdCompat.js";
 import { getProviderNodeById } from "@/models";
-import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider, isCustomMediaProvider, AI_PROVIDERS } from "@/shared/constants/providers";
+import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider, isCustomMediaProvider, isCustomProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS } from "open-sse/config/providers.js";
 import { openaiToCommandCodeRequest } from "open-sse/translator/request/openai-to-commandcode.js";
@@ -116,6 +116,39 @@ export async function POST(request) {
           valid: !!node,
           error: node ? null : "Custom media node not found",
         }, { status: node ? 200 : 404 });
+      }
+
+      const candidateNode = await getProviderNodeById(provider);
+      if (isCustomProvider(provider) || candidateNode?.type === "custom") {
+        const node = candidateNode;
+        if (!node) {
+          return NextResponse.json({ error: "Custom provider node not found" }, { status: 404 });
+        }
+        let targetUrl = node.schemaMapping?.endpointUrl || node.data?.schemaMapping?.endpointUrl || node.endpointUrl || node.baseUrl;
+        if (!targetUrl) {
+          return NextResponse.json({ valid: true });
+        }
+        try {
+          const authHdr = node.customHeaders || node.data?.customHeaders || {};
+          const headers = {
+            "Content-Type": "application/json",
+            ...authHdr,
+            ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
+          };
+          const res = await fetch(targetUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ prompt: "ping", messages: [{ role: "user", content: "ping" }] }),
+            signal: AbortSignal.timeout(5000),
+          });
+          const valid = res.status !== 401 && res.status !== 403;
+          return NextResponse.json({
+            valid,
+            error: valid ? null : "Invalid API key or unauthorized",
+          });
+        } catch {
+          return NextResponse.json({ valid: true });
+        }
       }
 
       if (isOpenAICompatibleProvider(provider)) {

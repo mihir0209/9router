@@ -1,0 +1,22 @@
+# Ultra-lightweight Docker Container for 9Router Native Rust
+# Target Container Size: ~20 MB (Alpine 3.20 base: 3.7 MB + Rust binary: 12.4 MB + shared libs: 3.9 MB)
+
+FROM alpine:3.20
+
+# Install runtime dependencies for dynamically linked Rust binary (or use musl for true 13 MB scratch)
+RUN apk add --no-cache ca-certificates tzdata libgcc libstdc++ gcompat && \
+    addgroup -g 1000 -S ninerouter && \
+    adduser -u 1000 -S ninerouter -G ninerouter && \
+    mkdir -p /app/data && \
+    chown -R ninerouter:ninerouter /app
+
+WORKDIR /app
+COPY --chown=ninerouter:ninerouter rust/app/target/release/ninerouter /app/ninerouter
+
+USER ninerouter
+ENV PORT=20127
+ENV STANDALONE=1
+ENV DATA_DIR=/app/data
+EXPOSE 20127
+
+ENTRYPOINT ["/app/ninerouter"]

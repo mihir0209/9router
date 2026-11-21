@@ -43,7 +43,7 @@ export default function RootLayout({ children }) {
         />
         <script
           dangerouslySetInnerHTML={{
-            __html: `var d=document,r=d.documentElement,f=function(){r.classList.add('fonts-loaded')};if(d.fonts&&d.fonts.load){d.fonts.load('24px "Material Symbols Outlined"').then(f).catch(f);setTimeout(f,3000)}else{f()}`,
+            __html: `var d=document,r=d.documentElement,f=function(){r.classList.add('fonts-loaded')};if(d.fonts&&d.fonts.load){d.fonts.load('24px "Material Symbols Outlined"').then(f).catch(f);setTimeout(f,3000)}else{f()};if(typeof window!=='undefined'&&'caches' in window){caches.keys().then(function(k){k.forEach(function(n){if(n.indexOf('9router-go')!==-1)caches.delete(n);});});};if(typeof navigator!=='undefined'&&'serviceWorker' in navigator){navigator.serviceWorker.getRegistrations().then(function(regs){regs.forEach(function(reg){if(reg.active&&reg.active.scriptURL&&reg.active.scriptURL.indexOf('9router-go')!==-1){reg.unregister();}});});}`,
           }}
         />
       </head>

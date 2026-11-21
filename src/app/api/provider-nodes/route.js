@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createProviderNode, getProviderNodes } from "@/models";
-import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX, CUSTOM_MEDIA_PREFIX } from "@/shared/constants/providers";
+import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX, CUSTOM_MEDIA_PREFIX, CUSTOM_PROVIDER_PREFIX } from "@/shared/constants/providers";
 import { generateId } from "@/shared/utils";
 import { normalizeUserRetryConfig } from "open-sse/retry/index.js";
 import { CUSTOM_MEDIA_KINDS, sanitizeCustomHeaders } from "open-sse/config/customMedia.js";
@@ -108,6 +108,24 @@ export async function POST(request) {
         authHeader: ["bearer", "x-api-key", "api-key"].includes(authHeader) ? authHeader : "bearer",
         models: Array.isArray(models) ? models.map(String).map((v) => v.trim()).filter(Boolean) : [],
         customHeaders: sanitizeCustomHeaders(customHeaders),
+        ...retryFields,
+      });
+      return NextResponse.json({ node }, { status: 201 });
+    }
+
+    if (nodeType === "custom" || nodeType === "custom-provider") {
+      const node = await createProviderNode({
+        id: body.id || `${CUSTOM_PROVIDER_PREFIX}${generateId()}`,
+        type: "custom",
+        name: name.trim(),
+        prefix: prefix.trim(),
+        baseUrl: (baseUrl || "").trim(),
+        curlCommand: body.curlCommand || "",
+        sampleOutput: body.sampleOutput || "",
+        schemaMapping: body.schemaMapping || {},
+        streaming: body.streaming || { enabled: false },
+        customHeaders: body.customHeaders || {},
+        models: Array.isArray(models) ? models.map(String).map((v) => v.trim()).filter(Boolean) : [],
         ...retryFields,
       });
       return NextResponse.json({ node }, { status: 201 });

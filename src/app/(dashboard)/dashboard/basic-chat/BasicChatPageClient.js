@@ -4,12 +4,30 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button } from "@/shared/components";
 import { getModelsByProviderId } from "@/shared/constants/models";
 import { isAnthropicCompatibleProvider, isOpenAICompatibleProvider } from "@/shared/constants/providers";
+import { parseCurlInBrowser, collectJsonPaths, extractValueByPath } from "@/shared/utils/curlParser";
 
 const STORAGE_KEYS = {
   sessions: "basic-chat.sessions",
   activeSessionId: "basic-chat.activeSessionId",
   activeProviderId: "basic-chat.activeProviderId",
   draft: "basic-chat.draft",
+};
+
+const COPILOT_GROUP = {
+  providerId: "router-copilot",
+  providerName: "9Router Copilot",
+  providerType: "copilot",
+  connections: [{ id: "router-copilot", provider: "router-copilot", name: "9Router Copilot" }],
+  models: [
+    {
+      id: "router-copilot/assistant",
+      requestModel: "router-copilot/assistant",
+      name: "9Router Copilot (Autonomous Tools)",
+      providerId: "router-copilot",
+      providerName: "9Router Copilot",
+      source: "internal",
+    },
+  ],
 };
 
 function createId() {
@@ -226,8 +244,8 @@ export default function BasicChatPageClient() {
 
         if (connections.length === 0) {
           if (!cancelled) {
-            setProviderGroups([]);
-            setLoadError("No providers connected yet.");
+            setProviderGroups([COPILOT_GROUP]);
+            setLoadError("");
           }
           return;
         }
@@ -296,10 +314,8 @@ export default function BasicChatPageClient() {
           .sort((a, b) => a.providerName.localeCompare(b.providerName));
 
         if (!cancelled) {
-          setProviderGroups(normalized);
-          if (normalized.length === 0) {
-            setLoadError("Providers connected but no models available.");
-          }
+          setProviderGroups([COPILOT_GROUP, ...normalized]);
+          setLoadError("");
         }
       } catch (error) {
         if (!cancelled) {
@@ -570,6 +586,338 @@ export default function BasicChatPageClient() {
     }));
   };
 
+  const handleSaveFromCopilot = async (probeData) => {
+    if (!probeData?.parsed?.url || !probeData?.detectedPaths?.responseTextPath) return;
+    try {
+      let nodeName = "Custom Provider";
+      try {
+        const u = new URL(probeData.parsed.url);
+        nodeName = `Custom-${u.pathname.split("/").filter(Boolean).pop() || "provider"}`;
+      } catch {}
+      const nodePrefix = `custom-${Math.random().toString(36).substring(2, 6)}`;
+
+      const payload = {
+        name: nodeName,
+        prefix: nodePrefix,
+        type: "custom",
+        baseUrl: probeData.parsed.url,
+        apiType: "chat",
+        schemaMapping: {
+          endpointUrl: probeData.parsed.url,
+          responseTextPath: probeData.detectedPaths.responseTextPath,
+          promptTokensPath: probeData.detectedPaths.promptTokensPath || null,
+          completionTokensPath: probeData.detectedPaths.completionTokensPath || null,
+          implementationTags: ["openai-compatible", "anthropic-compatible"],
+        },
+      };
+
+      const res = await fetch("/api/provider-nodes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const notifyMessage = {
+          id: createId(),
+          role: "assistant",
+          content: `✅ **Custom Provider Created Successfully!**\n\n- **Name**: \`${nodeName}\`\n- **Prefix**: \`${nodePrefix}\`\n- **Base URL**: \`${probeData.parsed.url}\`\n\nYou can now call this model via \`/v1/chat/completions\` with model \`${nodePrefix}\` or Anthropic \`/v1/messages\`!`,
+          createdAt: new Date().toISOString(),
+          status: "done",
+        };
+        updateSession(activeSessionId, (s) => ({
+          ...s,
+          messages: [...s.messages, notifyMessage],
+          updatedAt: new Date().toISOString(),
+        }));
+      }
+    } catch (err) {
+      console.error("Failed to save provider from copilot:", err);
+    }
+  };
+
+  const handleTestFromCopilot = async (probeData) => {
+    if (!probeData?.parsed?.url || !probeData?.detectedPaths?.responseTextPath) return;
+    try {
+      const dummyNode = {
+        id: `test-${Date.now()}`,
+        type: "custom",
+        name: "Test Node",
+        prefix: "test",
+        baseUrl: probeData.parsed.url,
+        data: {
+          schemaMapping: {
+            endpointUrl: probeData.parsed.url,
+            responseTextPath: probeData.detectedPaths.responseTextPath,
+            implementationTags: ["openai-compatible", "anthropic-compatible"],
+          },
+        },
+      };
+      const res = await fetch("/api/provider-nodes/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          node: dummyNode,
+          prompt: "Verify 9router custom provider live test.",
+        }),
+      });
+      const data = await res.json();
+      const testMsg = {
+        id: createId(),
+        role: "assistant",
+        content: data.ok
+          ? `⚡ **Live Gateway Test Passed (HTTP ${data.status} in ${data.latencyMs}ms)**\n\n\`\`\`\n${data.extractedText || "OK"}\n\`\`\``
+          : `⚠️ **Live Test Failed**: ${data.error || "Unknown error"}`,
+        createdAt: new Date().toISOString(),
+        status: "done",
+      };
+      updateSession(activeSessionId, (s) => ({
+        ...s,
+        messages: [...s.messages, testMsg],
+        updatedAt: new Date().toISOString(),
+      }));
+    } catch (err) {
+      console.error("Test failed:", err);
+    }
+  };
+
+  const handleTestNodeById = async (nodeId) => {
+    try {
+      const res = await fetch("/api/provider-nodes/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: nodeId, prompt: "9router test ping" }),
+      });
+      const data = await res.json();
+      const testMsg = {
+        id: createId(),
+        role: "assistant",
+        content: data.ok
+          ? `⚡ **Live Test for \`${nodeId}\` Passed (HTTP ${data.status} in ${data.latencyMs}ms)**\n\n\`\`\`\n${data.extractedText || "OK"}\n\`\`\``
+          : `⚠️ **Live Test for \`${nodeId}\` Failed**: ${data.error || "Unknown error"}`,
+        createdAt: new Date().toISOString(),
+        status: "done",
+      };
+      updateSession(activeSessionId, (s) => ({
+        ...s,
+        messages: [...s.messages, testMsg],
+        updatedAt: new Date().toISOString(),
+      }));
+    } catch (err) {
+      console.error("Test failed:", err);
+    }
+  };
+
+  const handleCopilotInteraction = async (sessionId, assistantMessageId, userText) => {
+    const trimmed = userText.trim();
+    const lower = trimmed.toLowerCase();
+
+    if (trimmed.startsWith("curl") || lower.includes("probe") || (lower.includes("http") && lower.includes("execute"))) {
+      try {
+        // Pure browser-side parsing & execution (0 backend SSRF risk)
+        const parsed = parseCurlInBrowser(trimmed);
+        if (!parsed.url && trimmed.includes("http")) {
+          parsed.url = trimmed.match(/https?:\/\/[^\s'"]+/)?.[0] || "";
+        }
+
+        if (!parsed.url) {
+          throw new Error("No valid HTTP(S) URL detected in command.");
+        }
+
+        const startMs = performance.now();
+        let status = 0;
+        let responseText = "";
+        let parsedJson = null;
+        let latencyMs = 0;
+        let clientExecutionError = null;
+
+        try {
+          const fetchOptions = {
+            method: parsed.method || "POST",
+            headers: {
+              ...(parsed.headers || {}),
+            },
+            signal: AbortSignal.timeout(12000),
+          };
+          if (parsed.method !== "GET" && parsed.method !== "HEAD") {
+            fetchOptions.body = parsed.rawBody || (parsed.body ? JSON.stringify(parsed.body) : JSON.stringify({ prompt: "ping" }));
+            if (!fetchOptions.headers["content-type"] && !fetchOptions.headers["Content-Type"]) {
+              fetchOptions.headers["Content-Type"] = "application/json";
+            }
+          }
+
+          // Directly executed from user's browser runtime
+          const browserFetchRes = await fetch(parsed.url, fetchOptions);
+          latencyMs = Math.round(performance.now() - startMs);
+          status = browserFetchRes.status;
+          responseText = await browserFetchRes.text();
+          try {
+            parsedJson = JSON.parse(responseText);
+          } catch {}
+        } catch (fetchErr) {
+          latencyMs = Math.round(performance.now() - startMs);
+          clientExecutionError = fetchErr.message;
+        }
+
+        let detectedPaths = {
+          responseTextPath: "",
+          promptTokensPath: "",
+          completionTokensPath: "",
+        };
+
+        if (parsedJson) {
+          const paths = collectJsonPaths(parsedJson);
+          for (const item of paths) {
+            const pLower = item.path.toLowerCase();
+            if (!detectedPaths.responseTextPath && (pLower.includes("utterance") || pLower.includes("content") || pLower.includes("text") || pLower.includes("message") || pLower.includes("response"))) {
+              detectedPaths.responseTextPath = item.path;
+            }
+            if (!detectedPaths.promptTokensPath && (pLower.includes("prompt_tokens") || pLower.includes("in_tokens") || pLower.includes("inbound") || pLower.includes("input_tokens"))) {
+              detectedPaths.promptTokensPath = item.path;
+            }
+            if (!detectedPaths.completionTokensPath && (pLower.includes("completion_tokens") || pLower.includes("out_tokens") || pLower.includes("outbound") || pLower.includes("output_tokens"))) {
+              detectedPaths.completionTokensPath = item.path;
+            }
+          }
+          if (!detectedPaths.responseTextPath && paths.length > 0) {
+            detectedPaths.responseTextPath = paths[0].path;
+          }
+        }
+
+        const extractedSample = detectedPaths.responseTextPath && parsedJson
+          ? extractValueByPath(parsedJson, detectedPaths.responseTextPath)
+          : responseText.slice(0, 300);
+
+        const probeData = {
+          ok: !clientExecutionError && status >= 200 && status < 400,
+          status: status || 0,
+          latencyMs,
+          parsed,
+          detectedPaths,
+          preview: {
+            extractedText: typeof extractedSample === "object" ? JSON.stringify(extractedSample) : String(extractedSample || ""),
+          },
+          error: clientExecutionError,
+        };
+
+        let replyText = "";
+        if (probeData.ok) {
+          replyText = `### 🌐 Browser Tool Execution: \`probe_endpoint\` (Client-Side)\n\n` +
+            `Successfully probed **${probeData.parsed?.url || "Target"}** directly from your browser (HTTP ${probeData.status} in ${probeData.latencyMs}ms).\n\n` +
+            `- **Auto-Detected Response Text Path**: \`${probeData.detectedPaths?.responseTextPath || "None"}\`\n` +
+            `- **Prompt Tokens Path**: \`${probeData.detectedPaths?.promptTokensPath || "None"}\`\n` +
+            `- **Completion Tokens Path**: \`${probeData.detectedPaths?.completionTokensPath || "None"}\`\n` +
+            `- **Execution Scope**: **Pure Client-Side** (0 backend server SSRF risk)\n\n` +
+            `**Sample Extracted Output:**\n` +
+            `\`\`\`\n${probeData.preview?.extractedText || "[No output text extracted]"}\n\`\`\`\n\n` +
+            `*Use the action buttons below to save this custom provider or test the gateway live!*`;
+        } else {
+          replyText = `### ⚠️ Browser Tool Execution: \`probe_endpoint\` (Client-Side)\n\n` +
+            `Browser request to **${probeData.parsed?.url || "Target"}** ended with: ${probeData.error || `HTTP ${probeData.status}`}.\n\n` +
+            `*Note: When testing remote endpoints directly from the browser, the target must allow CORS or be on localhost. You can also paste the response JSON into the Custom Provider Studio.*`;
+        }
+
+        updateSession(sessionId, (s) => ({
+          ...s,
+          messages: s.messages.map((m) =>
+            m.id === assistantMessageId
+              ? {
+                  ...m,
+                  content: replyText,
+                  status: "done",
+                  toolData: probeData.ok ? { type: "probe", probeData } : null,
+                }
+              : m
+          ),
+          updatedAt: new Date().toISOString(),
+        }));
+      } catch (err) {
+        updateSession(sessionId, (s) => ({
+          ...s,
+          messages: s.messages.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, content: `Error executing probe: ${err.message}`, status: "error" }
+              : m
+          ),
+        }));
+      } finally {
+        setIsSending(false);
+        setStreamingMessageId("");
+      }
+      return;
+    }
+
+    if (lower.includes("list") || lower.includes("show provider") || lower.includes("get provider")) {
+      try {
+        const listRes = await fetch("/api/provider-nodes");
+        const listData = await listRes.json();
+        const nodes = Array.isArray(listData.nodes) ? listData.nodes : [];
+
+        let replyText = `### 📋 Copilot Tool Execution: \`list_provider_nodes\`\n\n` +
+          `Found **${nodes.length}** active provider nodes:\n\n`;
+
+        if (nodes.length === 0) {
+          replyText += `*No custom provider nodes configured yet. Paste a cURL command and sample output to create one!*`;
+        } else {
+          nodes.forEach((n, idx) => {
+            replyText += `${idx + 1}. **${n.name || n.prefix}** (\`${n.prefix}\`) - Endpoint: \`${n.baseUrl}\` (Type: \`${n.node_type || n.type || "custom"}\`)\n`;
+          });
+        }
+
+        updateSession(sessionId, (s) => ({
+          ...s,
+          messages: s.messages.map((m) =>
+            m.id === assistantMessageId
+              ? {
+                  ...m,
+                  content: replyText,
+                  status: "done",
+                  toolData: { type: "list", nodes },
+                }
+              : m
+          ),
+          updatedAt: new Date().toISOString(),
+        }));
+      } catch (err) {
+        updateSession(sessionId, (s) => ({
+          ...s,
+          messages: s.messages.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, content: `Error listing providers: ${err.message}`, status: "error" }
+              : m
+          ),
+        }));
+      } finally {
+        setIsSending(false);
+        setStreamingMessageId("");
+      }
+      return;
+    }
+
+    const welcomeText = `### 🤖 9Router Autonomous Copilot\n\n` +
+      `I can help you configure and test custom AI providers directly within 9Router.\n\n` +
+      `**How to get started:**\n` +
+      `1. Paste your **cURL command** along with sample output to analyze and register a custom provider.\n` +
+      `2. Go to **Providers -> Add Custom Provider Studio** for complete visual schema mapping.\n` +
+      `3. Type **"list providers"** to view and test all registered custom nodes.`;
+
+    updateSession(sessionId, (s) => ({
+      ...s,
+      messages: s.messages.map((m) =>
+        m.id === assistantMessageId
+          ? {
+              ...m,
+              content: welcomeText,
+              status: "done",
+            }
+          : m
+      ),
+      updatedAt: new Date().toISOString(),
+    }));
+    setIsSending(false);
+    setStreamingMessageId("");
+  };
+
   const sendMessage = async () => {
     const model = activeModel || activeProviderGroup?.models?.[0] || null;
     if (!model) return;
@@ -634,6 +982,11 @@ export default function BasicChatPageClient() {
         role: message.role,
         content: message.role === "user" ? buildUserContent(message) : message.content,
       }));
+
+    if (model.providerId === "router-copilot" || userText.startsWith("curl") || userText.startsWith("/probe") || userText.startsWith("/list")) {
+      await handleCopilotInteraction(sessionId, assistantMessageId, userText);
+      return;
+    }
 
     try {
       const response = await fetch("/api/dashboard/chat/completions", {
@@ -901,6 +1254,75 @@ export default function BasicChatPageClient() {
                         {content}
                         {isAssistant && isStreaming && !streamingText ? <span className="inline-block animate-pulse">▋</span> : null}
                       </div>
+
+                      {/* Interactive Copilot Tool Cards */}
+                      {message.toolData?.type === "probe" && message.toolData.probeData && (
+                        <div className="mt-3 p-3 bg-black/40 border border-white/10 rounded-xl flex flex-col gap-2.5 text-xs">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-amber-400">cURL Analysis & Probe Result</span>
+                            <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-mono text-[11px]">
+                              HTTP {message.toolData.probeData.status} ({message.toolData.probeData.latencyMs}ms)
+                            </span>
+                          </div>
+                          <div className="text-white/70 font-mono text-[11px] truncate">
+                            URL: {message.toolData.probeData.parsed?.url}
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <span className="px-2 py-1 bg-white/5 border border-white/10 rounded text-[11px] font-mono">
+                              Text: {message.toolData.probeData.detectedPaths?.responseTextPath || "None"}
+                            </span>
+                            {message.toolData.probeData.detectedPaths?.promptTokensPath && (
+                              <span className="px-2 py-1 bg-white/5 border border-white/10 rounded text-[11px] font-mono">
+                                In Tokens: {message.toolData.probeData.detectedPaths.promptTokensPath}
+                              </span>
+                            )}
+                            {message.toolData.probeData.detectedPaths?.completionTokensPath && (
+                              <span className="px-2 py-1 bg-white/5 border border-white/10 rounded text-[11px] font-mono">
+                                Out Tokens: {message.toolData.probeData.detectedPaths.completionTokensPath}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 pt-1 border-t border-white/10">
+                            <button
+                              type="button"
+                              onClick={() => handleSaveFromCopilot(message.toolData.probeData)}
+                              className="px-3 py-1.5 rounded-lg bg-white text-black font-semibold text-xs hover:bg-gray-100 flex items-center gap-1.5 transition"
+                            >
+                              <span className="material-symbols-outlined text-[15px]">save</span>
+                              Save as Provider
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleTestFromCopilot(message.toolData.probeData)}
+                              className="px-3 py-1.5 rounded-lg bg-white/10 text-white font-medium text-xs hover:bg-white/20 flex items-center gap-1.5 transition"
+                            >
+                              <span className="material-symbols-outlined text-[15px]">bolt</span>
+                              Test Gateway Live
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+
+                      {message.toolData?.type === "list" && (
+                        <div className="mt-3 flex flex-col gap-2">
+                          {message.toolData.nodes?.map((node) => (
+                            <div key={node.id} className="p-2.5 bg-black/40 border border-white/10 rounded-xl flex items-center justify-between text-xs">
+                              <div className="min-w-0 pr-2">
+                                <span className="font-medium text-white">{node.name || node.prefix}</span>
+                                <span className="ml-2 font-mono text-[10px] text-white/50 truncate block sm:inline">{node.baseUrl}</span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleTestNodeById(node.id)}
+                                className="px-2.5 py-1 bg-white/10 hover:bg-white/20 rounded-lg text-xs text-white shrink-0"
+                              >
+                                Test Live
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

@@ -110,3 +110,9 @@ debug.log
 .env.deploy
 .env.antideploy-build
 .scratch/
+scratch/
+9router.db
+*.db-journal
+*.db-wal
+*.db-shm
+

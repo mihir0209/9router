@@ -22,6 +22,7 @@ export default function Modal({
     lg: "max-w-lg",
     xl: "max-w-xl",
     full: "max-w-4xl",
+    fullscreen: "w-[96vw] max-w-[96vw] h-[94vh] flex flex-col",
   };
 
   useEffect(() => {
@@ -99,7 +100,7 @@ export default function Modal({
         )}
 
         {/* Body */}
-        <div className="p-6 max-h-[calc(85vh-100px)] overflow-y-auto custom-scrollbar">{children}</div>
+        <div className={cn("p-6 overflow-y-auto custom-scrollbar", size === "fullscreen" ? "flex-1 min-h-0" : "max-h-[calc(85vh-100px)]")}>{children}</div>
 
         {/* Footer */}
         {footer && (

@@ -659,7 +659,6 @@ export async function buildModelsList(kindFilter, options = {}) {
           if (originalModel.thinking_levels) aliasModel.thinking_levels = originalModel.thinking_levels;
           providerOutput.push(aliasModel);
         }
-        }
       }
 
       // Web search/fetch — provider IS the model, expose as {alias}/search and/or {alias}/fetch with explicit kind
