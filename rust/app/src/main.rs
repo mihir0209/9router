@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     report_fallbacks();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if cli::dispatch(&args)? {
+    if cli::dispatch(&args).await? {
         return Ok(());
     }
 
