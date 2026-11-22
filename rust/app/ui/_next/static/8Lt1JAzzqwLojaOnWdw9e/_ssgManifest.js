@@ -1,1 +1,0 @@
-self.__SSG_MANIFEST=new Set(["\u002Fdashboard\u002Fcli-tools\u002F[toolId]","\u002Fdashboard\u002Fmedia-providers\u002F[kind]","\u002Fdashboard\u002Fmedia-providers\u002F[kind]\u002F[id]","\u002Fdashboard\u002Fmedia-providers\u002Fcombo\u002F[id]","\u002Fdashboard\u002Fproviders\u002F[id]"]);self.__SSG_MANIFEST_CB&&self.__SSG_MANIFEST_CB()
