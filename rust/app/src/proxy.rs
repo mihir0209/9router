@@ -260,6 +260,225 @@ pub fn build_vertex_url(
 }
 
 // ============================================================================
+// Azure OpenAI Parameter Injection & URL Resolution
+// ============================================================================
+
+pub const DEFAULT_AZURE_API_VERSION: &str = "2024-08-01-preview";
+
+/// Resolves the Azure API version according to:
+/// 1. Explicit configured version (from connection settings)
+/// 2. AZURE_API_VERSION environment variable
+/// 3. Default: "2024-08-01-preview"
+pub fn resolve_azure_api_version(configured_version: Option<&str>) -> String {
+    if let Some(v) = configured_version {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(v) = std::env::var("AZURE_API_VERSION") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    DEFAULT_AZURE_API_VERSION.to_string()
+}
+
+/// Resolves the Azure OpenAI endpoint URL:
+/// 1. Configured base URL (e.g. from connection)
+/// 2. AZURE_ENDPOINT environment variable
+/// 3. Default: "https://api.openai.com"
+pub fn resolve_azure_endpoint(configured_endpoint: Option<&str>) -> String {
+    if let Some(ep) = configured_endpoint {
+        let trimmed = ep.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_end_matches('/').to_string();
+        }
+    }
+    if let Ok(ep) = std::env::var("AZURE_ENDPOINT") {
+        let trimmed = ep.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_end_matches('/').to_string();
+        }
+    }
+    "https://api.openai.com".to_string()
+}
+
+/// Resolves which Azure deployment should be called:
+/// 1. Configured deployment if explicitly supplied
+/// 2. Requested model (stripping "azure/" prefix)
+/// 3. AZURE_DEPLOYMENT environment variable
+/// 4. Default: "gpt-4"
+pub fn resolve_azure_deployment(
+    model: Option<&str>,
+    configured_deployment: Option<&str>,
+) -> String {
+    if let Some(dep) = configured_deployment {
+        let trimmed = dep.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    if let Some(m) = model {
+        let trimmed = m.trim();
+        let stripped = if let Some(s) = trimmed.strip_prefix("azure/").or_else(|| trimmed.strip_prefix("AZURE/")) {
+            s.trim()
+        } else {
+            trimmed
+        };
+        if !stripped.is_empty() {
+            return stripped.to_string();
+        }
+    }
+
+    if let Ok(env_dep) = std::env::var("AZURE_DEPLOYMENT") {
+        let trimmed = env_dep.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    "gpt-4".to_string()
+}
+
+/// Appends the Azure api-version query parameter to a URL safely:
+/// - If "api-version=" is already present, preserves existing URL
+/// - If URL contains '?', appends "&api-version={version}"
+/// - Otherwise appends "?api-version={version}"
+pub fn append_azure_api_version(url: &str, api_version: &str) -> String {
+    let version = api_version.trim();
+    if url.contains("api-version=") {
+        return url.to_string();
+    }
+    if url.contains('?') {
+        format!("{}&api-version={}", url, version)
+    } else {
+        format!("{}?api-version={}", url, version)
+    }
+}
+
+/// Constructs the Azure chat completions endpoint URL.
+pub fn build_azure_chat_completions_url(
+    endpoint: &str,
+    deployment: &str,
+    api_version: &str,
+) -> String {
+    let ep = endpoint.trim().trim_end_matches('/');
+    let base = if ep.ends_with("/chat/completions") {
+        ep.to_string()
+    } else if ep.contains("/openai/deployments/") {
+        format!("{}/chat/completions", ep)
+    } else {
+        format!("{}/openai/deployments/{}/chat/completions", ep, deployment.trim())
+    };
+    append_azure_api_version(&base, api_version)
+}
+
+// ============================================================================
+// AWS Bedrock Region Resolution & URL Builder
+// ============================================================================
+
+pub const DEFAULT_BEDROCK_REGION: &str = "us-east-1";
+
+/// Validates AWS region format: lowercase alphanumerics and hyphens (1..=31 chars).
+pub fn is_valid_aws_region(region: &str) -> bool {
+    let r = region.trim();
+    if r.is_empty() || r.len() > 31 {
+        return false;
+    }
+    r.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !r.starts_with('-')
+}
+
+/// Resolves the AWS Bedrock region with the following precedence:
+/// 1. Configured region (e.g. from connection or providerSpecificData)
+/// 2. AWS_REGION environment variable
+/// 3. AWS_DEFAULT_REGION environment variable
+/// 4. Default: "us-east-1"
+pub fn resolve_bedrock_region(configured_region: Option<&str>) -> String {
+    if let Some(r) = configured_region {
+        let trimmed = r.trim();
+        if !trimmed.is_empty() && is_valid_aws_region(trimmed) {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(r) = std::env::var("AWS_REGION") {
+        let trimmed = r.trim();
+        if !trimmed.is_empty() && is_valid_aws_region(trimmed) {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(r) = std::env::var("AWS_DEFAULT_REGION") {
+        let trimmed = r.trim();
+        if !trimmed.is_empty() && is_valid_aws_region(trimmed) {
+            return trimmed.to_string();
+        }
+    }
+    DEFAULT_BEDROCK_REGION.to_string()
+}
+
+/// Constructs the Amazon Bedrock URL for model invocation.
+pub fn build_bedrock_url(region: &str, model: &str, stream: bool) -> String {
+    let action = if stream {
+        "invoke-with-response-stream"
+    } else {
+        "invoke"
+    };
+    format!(
+        "https://bedrock-runtime.{}.amazonaws.com/model/{}/{}",
+        region.trim(),
+        model.trim(),
+        action
+    )
+}
+
+// ============================================================================
+// Models List Source Resolution
+// ============================================================================
+
+pub const DEFAULT_MODELS_LIST_SOURCE: &str = "cached";
+
+/// Resolves the models list source ("live" or "cached"):
+/// Precedence:
+/// 1. MODELS_LIST_SOURCE env var (or explicit env override)
+/// 2. Database settings or config override
+/// 3. Default: "cached"
+pub fn resolve_models_list_source(
+    explicit_env: Option<&str>,
+    explicit_setting: Option<&str>,
+    explicit_config: Option<&str>,
+) -> String {
+    let from_env = explicit_env
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("MODELS_LIST_SOURCE").ok());
+
+    if let Some(val) = from_env {
+        let v = val.trim().to_ascii_lowercase();
+        if v == "live" || v == "cached" {
+            return v;
+        }
+    }
+
+    if let Some(val) = explicit_setting {
+        let v = val.trim().to_ascii_lowercase();
+        if v == "live" || v == "cached" {
+            return v;
+        }
+    }
+
+    if let Some(val) = explicit_config {
+        let v = val.trim().to_ascii_lowercase();
+        if v == "live" || v == "cached" {
+            return v;
+        }
+    }
+
+    DEFAULT_MODELS_LIST_SOURCE.to_string()
+}
+
+// ============================================================================
 // Request-Scoped Retries
 // ============================================================================
 
@@ -375,6 +594,9 @@ pub struct UpstreamConnection {
     pub access_token: Option<String>,
     pub project_id: Option<String>,
     pub location: Option<String>,
+    pub region: Option<String>,
+    pub deployment: Option<String>,
+    pub api_version: Option<String>,
     pub custom_headers: Option<HeaderMap>,
     pub schema_mapping: Option<crate::custom_adapter::CustomSchemaMapping>,
 }
@@ -455,29 +677,50 @@ impl ProxyService {
         req: &ChatCompletionRequest,
         conn: &UpstreamConnection,
     ) -> Result<reqwest::Response, reqwest::Error> {
-        let default_base = match conn.provider.to_ascii_lowercase().as_str() {
-            "deepseek" => "https://api.deepseek.com",
-            "groq" => "https://api.groq.com/openai",
-            "openrouter" => "https://openrouter.ai/api",
-            "mistral" => "https://api.mistral.ai",
-            "together" => "https://api.together.xyz",
-            "perplexity" => "https://api.perplexity.ai",
-            _ => "https://api.openai.com",
+        let provider_lower = conn.provider.to_ascii_lowercase();
+
+        let url = if provider_lower == "azure" {
+            let endpoint = resolve_azure_endpoint(conn.base_url.as_deref());
+            let deployment = resolve_azure_deployment(Some(&req.model), conn.deployment.as_deref());
+            let api_version = resolve_azure_api_version(conn.api_version.as_deref());
+            build_azure_chat_completions_url(&endpoint, &deployment, &api_version)
+        } else if provider_lower == "bedrock" || provider_lower == "bedrock-xai" {
+            let region = resolve_bedrock_region(conn.region.as_deref());
+            if let Some(base) = &conn.base_url {
+                let resolved_base = base.replace("{region}", &region);
+                build_chat_completions_url(&resolved_base, &req.model)
+            } else {
+                let base = format!("https://bedrock-runtime.{}.amazonaws.com", region);
+                build_chat_completions_url(&base, &req.model)
+            }
+        } else {
+            let default_base = match provider_lower.as_str() {
+                "deepseek" => "https://api.deepseek.com",
+                "groq" => "https://api.groq.com/openai",
+                "openrouter" => "https://openrouter.ai/api",
+                "mistral" => "https://api.mistral.ai",
+                "together" => "https://api.together.xyz",
+                "perplexity" => "https://api.perplexity.ai",
+                _ => "https://api.openai.com",
+            };
+            let base = conn
+                .base_url
+                .as_deref()
+                .unwrap_or(default_base);
+            build_chat_completions_url(base, &req.model)
         };
-        let base = conn
-            .base_url
-            .as_deref()
-            .unwrap_or(default_base);
-        let url = build_chat_completions_url(base, &req.model);
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        let provider_lower = conn.provider.to_ascii_lowercase();
         if provider_lower == "azure" {
             if let Some(key) = &conn.api_key {
                 if let Ok(val) = HeaderValue::from_str(key) {
                     headers.insert(reqwest::header::HeaderName::from_static("api-key"), val);
+                }
+            } else if let Some(token) = &conn.access_token {
+                if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", token)) {
+                    headers.insert(AUTHORIZATION, val);
                 }
             }
         } else if provider_lower == "gemini" || provider_lower == "google" {
@@ -811,5 +1054,244 @@ mod tests {
             std::env::remove_var("NO_PROXY");
             std::env::remove_var("STRICT_SSL");
         }
+    }
+
+    #[test]
+    fn test_azure_api_version_query_param_appending() {
+        let _lock = PROXY_ENV_LOCK.lock().unwrap();
+
+        // 1. Default API version is 2024-08-01-preview
+        assert_eq!(resolve_azure_api_version(None), "2024-08-01-preview");
+
+        // 2. Explicit version takes precedence
+        assert_eq!(
+            resolve_azure_api_version(Some("2024-12-01-preview")),
+            "2024-12-01-preview"
+        );
+
+        // 3. Env var AZURE_API_VERSION
+        unsafe {
+            std::env::set_var("AZURE_API_VERSION", "2024-10-21");
+        }
+        assert_eq!(resolve_azure_api_version(None), "2024-10-21");
+        unsafe {
+            std::env::remove_var("AZURE_API_VERSION");
+        }
+
+        // 4. Query param appending to URL without query params
+        let url_no_query = "https://test.openai.azure.com/openai/deployments/gpt-4o/chat/completions";
+        let res1 = append_azure_api_version(url_no_query, "2024-08-01-preview");
+        assert_eq!(
+            res1,
+            "https://test.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-08-01-preview"
+        );
+
+        // 5. Query param appending to URL with existing query params
+        let url_with_query = "https://test.openai.azure.com/openai/deployments/gpt-4o/chat/completions?foo=bar";
+        let res2 = append_azure_api_version(url_with_query, "2024-08-01-preview");
+        assert_eq!(
+            res2,
+            "https://test.openai.azure.com/openai/deployments/gpt-4o/chat/completions?foo=bar&api-version=2024-08-01-preview"
+        );
+
+        // 6. Query param appending when api-version is already present
+        let url_with_ver = "https://test.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-02-01";
+        let res3 = append_azure_api_version(url_with_ver, "2024-08-01-preview");
+        assert_eq!(res3, url_with_ver);
+
+        // 7. Full Azure URL building
+        let built_url = build_azure_chat_completions_url(
+            "https://my-resource.openai.azure.com",
+            "my-gpt4",
+            "2024-08-01-preview",
+        );
+        assert_eq!(
+            built_url,
+            "https://my-resource.openai.azure.com/openai/deployments/my-gpt4/chat/completions?api-version=2024-08-01-preview"
+        );
+
+        // 8. Azure deployment resolution
+        assert_eq!(
+            resolve_azure_deployment(Some("azure/gpt-4o"), None),
+            "gpt-4o"
+        );
+        assert_eq!(
+            resolve_azure_deployment(Some("gpt-4o"), None),
+            "gpt-4o"
+        );
+        assert_eq!(
+            resolve_azure_deployment(None, Some("custom-dep")),
+            "custom-dep"
+        );
+
+        unsafe {
+            std::env::set_var("AZURE_DEPLOYMENT", "env-deploy");
+        }
+        assert_eq!(resolve_azure_deployment(None, None), "env-deploy");
+        unsafe {
+            std::env::remove_var("AZURE_DEPLOYMENT");
+        }
+        assert_eq!(resolve_azure_deployment(None, None), "gpt-4");
+
+        // 9. Azure endpoint resolution
+        assert_eq!(
+            resolve_azure_endpoint(Some("https://custom.openai.azure.com/")),
+            "https://custom.openai.azure.com"
+        );
+        unsafe {
+            std::env::set_var("AZURE_ENDPOINT", "https://env.openai.azure.com/");
+        }
+        assert_eq!(
+            resolve_azure_endpoint(None),
+            "https://env.openai.azure.com"
+        );
+        unsafe {
+            std::env::remove_var("AZURE_ENDPOINT");
+        }
+        assert_eq!(
+            resolve_azure_endpoint(None),
+            "https://api.openai.com"
+        );
+    }
+
+    #[test]
+    fn test_bedrock_region_defaults() {
+        let _lock = PROXY_ENV_LOCK.lock().unwrap();
+
+        // Clean env
+        unsafe {
+            std::env::remove_var("AWS_REGION");
+            std::env::remove_var("AWS_DEFAULT_REGION");
+        }
+
+        // 1. Default region is us-east-1
+        assert_eq!(resolve_bedrock_region(None), "us-east-1");
+
+        // 2. Explicit configured region
+        assert_eq!(resolve_bedrock_region(Some("eu-west-1")), "eu-west-1");
+
+        // 3. AWS_REGION environment variable
+        unsafe {
+            std::env::set_var("AWS_REGION", "ap-northeast-1");
+        }
+        assert_eq!(resolve_bedrock_region(None), "ap-northeast-1");
+
+        // 4. AWS_DEFAULT_REGION when AWS_REGION unset
+        unsafe {
+            std::env::remove_var("AWS_REGION");
+            std::env::set_var("AWS_DEFAULT_REGION", "sa-east-1");
+        }
+        assert_eq!(resolve_bedrock_region(None), "sa-east-1");
+
+        // 5. AWS_REGION takes precedence over AWS_DEFAULT_REGION
+        unsafe {
+            std::env::set_var("AWS_REGION", "us-west-2");
+        }
+        assert_eq!(resolve_bedrock_region(None), "us-west-2");
+
+        // 6. Configured region takes precedence over both
+        assert_eq!(
+            resolve_bedrock_region(Some("ap-south-1")),
+            "ap-south-1"
+        );
+
+        // 7. Invalid region format fallback to env/default
+        assert_eq!(
+            resolve_bedrock_region(Some("evil.com/x")),
+            "us-west-2" // falls back to AWS_REGION
+        );
+
+        unsafe {
+            std::env::remove_var("AWS_REGION");
+            std::env::remove_var("AWS_DEFAULT_REGION");
+        }
+
+        // Invalid region with no env falls back to built-in default us-east-1
+        assert_eq!(resolve_bedrock_region(Some("INVALID_UPPERCASE")), "us-east-1");
+        assert_eq!(resolve_bedrock_region(Some("")), "us-east-1");
+
+        // 8. Build Bedrock URL
+        let non_stream_url = build_bedrock_url("us-east-1", "anthropic.claude-3-sonnet-20240229-v1:0", false);
+        assert_eq!(
+            non_stream_url,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-sonnet-20240229-v1:0/invoke"
+        );
+
+        let stream_url = build_bedrock_url("us-west-2", "anthropic.claude-3-sonnet-20240229-v1:0", true);
+        assert_eq!(
+            stream_url,
+            "https://bedrock-runtime.us-west-2.amazonaws.com/model/anthropic.claude-3-sonnet-20240229-v1:0/invoke-with-response-stream"
+        );
+    }
+
+    #[test]
+    fn test_models_list_source_resolution() {
+        let _lock = PROXY_ENV_LOCK.lock().unwrap();
+
+        // Clean env
+        unsafe {
+            std::env::remove_var("MODELS_LIST_SOURCE");
+        }
+
+        // 1. Default when unset is "cached"
+        assert_eq!(
+            resolve_models_list_source(None, None, None),
+            "cached"
+        );
+
+        // 2. Explicit env "live"
+        assert_eq!(
+            resolve_models_list_source(Some("live"), None, None),
+            "live"
+        );
+
+        // 3. Explicit env "cached"
+        assert_eq!(
+            resolve_models_list_source(Some("cached"), None, None),
+            "cached"
+        );
+
+        // 4. Case and whitespace tolerance
+        assert_eq!(
+            resolve_models_list_source(Some("  LIVE  "), None, None),
+            "live"
+        );
+        assert_eq!(
+            resolve_models_list_source(Some("Cached"), None, None),
+            "cached"
+        );
+
+        // 5. Environment variable MODELS_LIST_SOURCE
+        unsafe {
+            std::env::set_var("MODELS_LIST_SOURCE", "live");
+        }
+        assert_eq!(resolve_models_list_source(None, None, None), "live");
+
+        unsafe {
+            std::env::set_var("MODELS_LIST_SOURCE", "cached");
+        }
+        assert_eq!(resolve_models_list_source(None, None, None), "cached");
+
+        unsafe {
+            std::env::remove_var("MODELS_LIST_SOURCE");
+        }
+
+        // 6. DB setting fallback when env unset
+        assert_eq!(
+            resolve_models_list_source(None, Some("live"), Some("cached")),
+            "live"
+        );
+
+        // 7. Config fallback when setting unset
+        assert_eq!(
+            resolve_models_list_source(None, None, Some("live")),
+            "live"
+        );
+
+        // 8. Invalid string falls back to default "cached"
+        assert_eq!(
+            resolve_models_list_source(Some("invalid-source"), None, None),
+            "cached"
+        );
     }
 }

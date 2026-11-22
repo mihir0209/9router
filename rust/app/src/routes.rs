@@ -163,8 +163,28 @@ pub async fn options_handler() -> impl IntoResponse {
 }
 
 // ============================================================================
-// Models Catalog Handler
+// Models Catalog Handler & Source Resolution
 // ============================================================================
+
+pub fn resolve_models_list_source(config: &Config, db: &Database) -> String {
+    let setting = db.load_settings().ok().and_then(|s| {
+        s.get("modelsListSource")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string())
+    });
+
+    let config_val = if config.routing.models_list_source != "live" {
+        Some(config.routing.models_list_source.as_str())
+    } else {
+        None
+    };
+
+    crate::proxy::resolve_models_list_source(
+        None,
+        setting.as_deref(),
+        config_val,
+    )
+}
 
 pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let api_key = match authenticate(&headers, &state.db) {
@@ -172,6 +192,12 @@ pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -
         Err(res) => return res,
     };
 
+    let source = resolve_models_list_source(&state.config, &state.db);
+    let now = chrono::Utc::now().timestamp();
+    let mut data = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    // 1. Base models from catalog
     let base_models = [
         ("gpt-4o", "openai"),
         ("gpt-4o-mini", "openai"),
@@ -183,37 +209,118 @@ pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -
         ("text-embedding-3-small", "openai"),
     ];
 
-    let now = chrono::Utc::now().timestamp();
-    let mut data = Vec::new();
-
     for (model, owner) in base_models {
         if state.db.check_model_allowed(&api_key, model).is_ok() {
-            data.push(json!({
-                "id": model,
-                "object": "model",
-                "created": now,
-                "owned_by": owner,
-                "permission": [],
-                "root": model,
-                "parent": null
-            }));
-        }
-    }
-
-    if let Ok(combos) = state.db.load_combos() {
-        for combo in combos {
-            if state.db.check_model_allowed(&api_key, &combo.name).is_ok() {
+            if seen_ids.insert(model.to_string()) {
                 data.push(json!({
-                    "id": combo.name,
+                    "id": model,
                     "object": "model",
                     "created": now,
-                    "owned_by": "custom",
+                    "owned_by": owner,
                     "permission": [],
-                    "root": combo.name,
+                    "root": model,
                     "parent": null
                 }));
             }
         }
+    }
+
+    // 2. Combos from SQLite
+    if let Ok(combos) = state.db.load_combos() {
+        for combo in combos {
+            if state.db.check_model_allowed(&api_key, &combo.name).is_ok() {
+                if seen_ids.insert(combo.name.clone()) {
+                    data.push(json!({
+                        "id": combo.name,
+                        "object": "model",
+                        "created": now,
+                        "owned_by": "custom",
+                        "permission": [],
+                        "root": combo.name,
+                        "parent": null
+                    }));
+                }
+            }
+        }
+    }
+
+    // 3. Custom models from SQLite (kv table scope 'customModels')
+    if let Ok(custom_models) = state.db.load_custom_models() {
+        for cm in custom_models {
+            let id = cm.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let owner = cm
+                .get("providerAlias")
+                .or_else(|| cm.get("provider"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("custom");
+            if !id.is_empty() && state.db.check_model_allowed(&api_key, id).is_ok() {
+                if seen_ids.insert(id.to_string()) {
+                    data.push(json!({
+                        "id": id,
+                        "object": "model",
+                        "created": now,
+                        "owned_by": owner,
+                        "permission": [],
+                        "root": id,
+                        "parent": null
+                    }));
+                }
+            }
+        }
+    }
+
+    // 4. Configured models on active provider connections in SQLite
+    if let Ok(connections) = state.db.load_provider_connections() {
+        for conn in connections.iter().filter(|c| c.is_active) {
+            if let Some(dm) = &conn.data.default_model {
+                let trimmed = dm.trim();
+                if !trimmed.is_empty() && state.db.check_model_allowed(&api_key, trimmed).is_ok() {
+                    if seen_ids.insert(trimmed.to_string()) {
+                        data.push(json!({
+                            "id": trimmed,
+                            "object": "model",
+                            "created": now,
+                            "owned_by": conn.provider,
+                            "permission": [],
+                            "root": trimmed,
+                            "parent": null
+                        }));
+                    }
+                }
+            }
+
+            let psd = conn.data.extra.get("providerSpecificData").and_then(|v| v.as_object());
+            let pool_models = psd
+                .and_then(|p| p.get("models").or_else(|| p.get("enabledModels")))
+                .or_else(|| conn.data.extra.get("models"))
+                .and_then(|v| v.as_array());
+
+            if let Some(arr) = pool_models {
+                for m in arr {
+                    if let Some(m_str) = m.as_str() {
+                        let trimmed = m_str.trim();
+                        if !trimmed.is_empty() && state.db.check_model_allowed(&api_key, trimmed).is_ok() {
+                            if seen_ids.insert(trimmed.to_string()) {
+                                data.push(json!({
+                                    "id": trimmed,
+                                    "object": "model",
+                                    "created": now,
+                                    "owned_by": conn.provider,
+                                    "permission": [],
+                                    "root": trimmed,
+                                    "parent": null
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. If source == "live", query upstream providers
+    if source == "live" {
+        query_live_upstream_models(&state, &api_key, &mut data, &mut seen_ids, now).await;
     }
 
     (
@@ -230,9 +337,119 @@ pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -
         .into_response()
 }
 
+async fn query_live_upstream_models(
+    state: &AppState,
+    api_key: &ApiKey,
+    data: &mut Vec<serde_json::Value>,
+    seen_ids: &mut std::collections::HashSet<String>,
+    now: i64,
+) {
+    let connections = match state.db.load_provider_connections() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let active_connections: Vec<_> = connections
+        .into_iter()
+        .filter(|c| c.is_active && (c.data.api_key.is_some() || c.data.base_url.is_some()))
+        .collect();
+
+    for conn in active_connections {
+        let models_url = if let Some(base) = &conn.data.base_url {
+            let b = base.trim_end_matches('/');
+            if b.ends_with("/models") {
+                b.to_string()
+            } else if b.ends_with("/v1") {
+                format!("{}/models", b)
+            } else {
+                format!("{}/v1/models", b)
+            }
+        } else {
+            match conn.provider.to_ascii_lowercase().as_str() {
+                "openai" => "https://api.openai.com/v1/models".to_string(),
+                "groq" => "https://api.groq.com/openai/v1/models".to_string(),
+                "openrouter" => "https://openrouter.ai/api/v1/models".to_string(),
+                "mistral" => "https://api.mistral.ai/v1/models".to_string(),
+                "together" => "https://api.together.xyz/v1/models".to_string(),
+                "perplexity" => "https://api.perplexity.ai/v1/models".to_string(),
+                _ => continue,
+            }
+        };
+
+        let mut req = state
+            .proxy
+            .client()
+            .get(&models_url)
+            .timeout(std::time::Duration::from_millis(1500));
+
+        if let Some(key) = &conn.data.api_key {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {}", key));
+        }
+
+        if let Ok(resp) = req.send().await {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(models_arr) = body.get("data").and_then(|d| d.as_array()) {
+                        for m in models_arr {
+                            if let Some(id) = m.get("id").and_then(|i| i.as_str()) {
+                                if state.db.check_model_allowed(api_key, id).is_ok()
+                                    && seen_ids.insert(id.to_string())
+                                {
+                                    data.push(json!({
+                                        "id": id,
+                                        "object": "model",
+                                        "created": now,
+                                        "owned_by": conn.provider,
+                                        "permission": [],
+                                        "root": id,
+                                        "parent": null
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Target Resolution Helper for Candidates
 // ============================================================================
+
+fn populate_connection_parameters(conn: &mut UpstreamConnection, pc: &ProviderConnection) {
+    conn.provider = pc.provider.clone();
+    conn.base_url = pc.data.base_url.clone();
+    conn.api_key = pc.data.api_key.clone();
+
+    let psd = pc.data.extra.get("providerSpecificData").and_then(|v| v.as_object());
+    if pc.provider.eq_ignore_ascii_case("azure") {
+        if conn.base_url.is_none() {
+            conn.base_url = psd
+                .and_then(|p| p.get("azureEndpoint"))
+                .or_else(|| pc.data.extra.get("azureEndpoint"))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+        }
+        conn.deployment = psd
+            .and_then(|p| p.get("deployment"))
+            .or_else(|| pc.data.extra.get("deployment"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        conn.api_version = psd
+            .and_then(|p| p.get("apiVersion"))
+            .or_else(|| pc.data.extra.get("apiVersion"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+    } else if pc.provider.eq_ignore_ascii_case("bedrock") || pc.provider.eq_ignore_ascii_case("bedrock-xai") {
+        conn.region = psd
+            .and_then(|p| p.get("region"))
+            .or_else(|| pc.data.extra.get("region"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+    }
+}
 
 fn resolve_target_for_candidate(
     candidate: &str,
@@ -340,13 +557,11 @@ fn resolve_target_for_candidate(
         }
     }
 
-    // 3. Check standard provider prefix (e.g. "vertex/gemini-4-carbon", "azure/gpt-5.6-terra")
+    // 3. Check standard provider prefix (e.g. "vertex/gemini-4-carbon", "azure/gpt-5.6-terra", "bedrock/claude-3-sonnet")
     if let Some((p_prefix, m_part)) = candidate.split_once('/') {
         if let Some(pc) = all_connections.iter().find(|c| c.is_active && c.provider.eq_ignore_ascii_case(p_prefix)) {
             let mut conn = UpstreamConnection::default();
-            conn.provider = pc.provider.clone();
-            conn.base_url = pc.data.base_url.clone();
-            conn.api_key = pc.data.api_key.clone();
+            populate_connection_parameters(&mut conn, pc);
             return (conn, m_part.to_string());
         }
     }
@@ -354,30 +569,33 @@ fn resolve_target_for_candidate(
     // 4. Match by defaultModel
     if let Some(pc) = all_connections.iter().find(|c| c.is_active && c.data.default_model.as_deref() == Some(candidate)) {
         let mut conn = UpstreamConnection::default();
-        conn.provider = pc.provider.clone();
-        conn.base_url = pc.data.base_url.clone();
-        conn.api_key = pc.data.api_key.clone();
+        populate_connection_parameters(&mut conn, pc);
         return (conn, candidate.to_string());
     }
 
     // 5. Default provider inference
-    let provider = if candidate.starts_with("claude") {
-        "anthropic".to_string()
+    let (provider, target_model) = if candidate.starts_with("azure/") {
+        ("azure".to_string(), candidate[6..].to_string())
+    } else if candidate.starts_with("bedrock/") {
+        ("bedrock".to_string(), candidate[8..].to_string())
+    } else if candidate.starts_with("bedrock-xai/") {
+        ("bedrock-xai".to_string(), candidate[12..].to_string())
+    } else if candidate.starts_with("claude") {
+        ("anthropic".to_string(), candidate.to_string())
     } else if candidate.contains("gemini") {
-        "vertex".to_string()
+        ("vertex".to_string(), candidate.to_string())
     } else {
-        "openai".to_string()
+        ("openai".to_string(), candidate.to_string())
     };
 
     let conn_opt = all_connections.iter().find(|c| c.is_active && c.provider.eq_ignore_ascii_case(&provider));
     let mut conn = UpstreamConnection::default();
     conn.provider = provider;
     if let Some(pc) = conn_opt {
-        conn.base_url = pc.data.base_url.clone();
-        conn.api_key = pc.data.api_key.clone();
+        populate_connection_parameters(&mut conn, pc);
     }
 
-    (conn, candidate.to_string())
+    (conn, target_model)
 }
 
 // ============================================================================
@@ -5094,6 +5312,145 @@ mod tests {
         let json_val: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json_val["object"], "list");
         assert!(json_val["data"].as_array().unwrap().len() >= 6);
+    }
+
+    #[tokio::test]
+    async fn test_models_list_source_and_catalog_resolution() {
+        let db = Database::open_in_memory().unwrap();
+
+        // 1. Save an API key
+        let test_key = ApiKey {
+            id: "key-source-test".to_string(),
+            key: "sk-source-test-123".to_string(),
+            name: Some("SourceTest".to_string()),
+            machine_id: None,
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            rate_limit_requests: 0,
+            rate_limit_window_seconds: 60,
+            token_limit_daily: 0,
+            token_limit_monthly: 0,
+            allowed_models: "*".to_string(),
+            blocked_models: String::new(),
+            allowed_ips: String::new(),
+            blocked_ips: String::new(),
+            expires_at: String::new(),
+            description: String::new(),
+            owner_ref: None,
+            max_concurrent_requests: 0,
+            allowed_providers: String::new(),
+            blocked_providers: String::new(),
+            force_provider: String::new(),
+            force_model: String::new(),
+            allowed_endpoints: String::new(),
+            blocked_endpoints: String::new(),
+        };
+        db.save_api_key(&test_key).unwrap();
+
+        // 2. Add a combo to SQLite
+        db.save_combo(&crate::db::Combo {
+            id: "combo-catalog-1".to_string(),
+            name: "cached-combo-model".to_string(),
+            kind: Some("llm".to_string()),
+            models: vec!["openai/gpt-4o".to_string()],
+            strategy: Some("fallback".to_string()),
+            match_rules: None,
+            custom_prompt: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }).unwrap();
+
+        // 3. Add a provider connection with configured defaultModel and pool models
+        db.save_provider_connection(&ProviderConnection {
+            id: "conn-azure-test".to_string(),
+            provider: "azure".to_string(),
+            auth_type: "api_key".to_string(),
+            name: Some("Azure Connection".to_string()),
+            email: None,
+            priority: Some(1),
+            is_active: true,
+            data: ConnectionData {
+                api_key: Some("azure-secret-key".to_string()),
+                base_url: Some("https://example.openai.azure.com".to_string()),
+                headers: None,
+                default_model: Some("azure-default-deployment".to_string()),
+                extra: {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "providerSpecificData".to_string(),
+                        json!({
+                            "deployment": "azure-gpt4",
+                            "apiVersion": "2024-08-01-preview",
+                            "models": ["azure/gpt-4o", "azure/gpt-4o-mini"]
+                        }),
+                    );
+                    m
+                },
+            },
+            raw_data: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }).unwrap();
+
+        // 4. Test resolve_models_list_source:
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            ..Default::default()
+        });
+
+        assert_eq!(resolve_models_list_source(&config, &db), "cached");
+
+        // When DB settings has modelsListSource: "live"
+        db.save_settings(&json!({ "modelsListSource": "live" })).unwrap();
+        assert_eq!(resolve_models_list_source(&config, &db), "live");
+
+        // Back to "cached"
+        db.save_settings(&json!({ "modelsListSource": "cached" })).unwrap();
+        assert_eq!(resolve_models_list_source(&config, &db), "cached");
+
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState {
+            config: Arc::clone(&config),
+            db: Arc::clone(&db),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+        };
+        let app = create_router(state);
+
+        // GET /v1/models with cached source
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/models")
+            .header("Authorization", "Bearer sk-source-test-123")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json_val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_val["object"], "list");
+        let list = json_val["data"].as_array().unwrap();
+
+        // Must contain base models, SQLite combos, and provider connection models
+        let ids: Vec<&str> = list.iter().filter_map(|m| m["id"].as_str()).collect();
+        assert!(ids.contains(&"gpt-4o"));
+        assert!(ids.contains(&"cached-combo-model"));
+        assert!(ids.contains(&"azure-default-deployment"));
+        assert!(ids.contains(&"azure/gpt-4o"));
     }
 
     #[tokio::test]

@@ -1061,6 +1061,25 @@ impl Database {
         Ok(())
     }
 
+    /// Loads custom models stored under kv scope 'customModels'.
+    pub fn load_custom_models(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare_cached("SELECT value FROM kv WHERE scope = 'customModels'")?;
+        let rows = stmt.query_map([], |row| {
+            let val_str: String = row.get(0)?;
+            let val: serde_json::Value =
+                serde_json::from_str(&val_str).unwrap_or(serde_json::Value::Null);
+            Ok(val)
+        })?;
+        let mut list = Vec::new();
+        for r in rows.flatten() {
+            if !r.is_null() {
+                list.push(r);
+            }
+        }
+        Ok(list)
+    }
+
     // ==========================================
     // Combos Operations
     // ==========================================
