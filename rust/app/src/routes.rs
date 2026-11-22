@@ -4252,6 +4252,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
             port: 20127,
             jwt_secret: "secret".to_string(),
+            ..Default::default()
         });
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
@@ -4284,6 +4285,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
             port: 20127,
             jwt_secret: "secret".to_string(),
+            ..Default::default()
         });
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
@@ -4411,6 +4413,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
             port: 20127,
             jwt_secret: "secret".to_string(),
+            ..Default::default()
         });
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
@@ -4446,6 +4449,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
             port: 20127,
             jwt_secret: "secret".to_string(),
+            ..Default::default()
         });
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
@@ -4529,6 +4533,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
             port: 20127,
             jwt_secret: "secret".to_string(),
+            ..Default::default()
         });
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty(); // Standalone embedded mode
@@ -4572,6 +4577,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
             port: 20127,
             jwt_secret: "secret".to_string(),
+            ..Default::default()
         });
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
@@ -4640,6 +4646,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
             port: 20127,
             jwt_secret: "secret".to_string(),
+            ..Default::default()
         });
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
@@ -4798,6 +4805,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
             port: 20127,
             jwt_secret: "secret".to_string(),
+            ..Default::default()
         });
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
@@ -4881,6 +4889,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/9r-test/test.sqlite"),
             port: 20128,
             jwt_secret: "secret-test-jwt".to_string(),
+            ..Default::default()
         });
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
