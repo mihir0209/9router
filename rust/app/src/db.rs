@@ -1111,6 +1111,230 @@ impl Database {
         Ok(list)
     }
 
+    /// Saves a custom model to kv table under scope 'customModels'.
+    pub fn save_custom_model(&self, model: &serde_json::Value) -> anyhow::Result<()> {
+        let provider_alias = model
+            .get("providerAlias")
+            .or_else(|| model.get("provider"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("custom");
+        let id = model
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let model_type = model
+            .get("type")
+            .or_else(|| model.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("llm");
+
+        if id.is_empty() {
+            anyhow::bail!("Model id cannot be empty");
+        }
+
+        let key = format!("{}|{}|{}", provider_alias, id, model_type);
+        let value_str = serde_json::to_string(model)?;
+
+        let guard = self.conn.lock().unwrap();
+        guard.execute(
+            r#"
+            INSERT INTO kv(scope, key, value) VALUES ('customModels', ?, ?)
+            ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
+            "#,
+            params![key, value_str],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes a custom model from kv table under scope 'customModels'.
+    pub fn delete_custom_model(&self, provider_alias: &str, id: &str, model_type: &str) -> anyhow::Result<()> {
+        let key = format!("{}|{}|{}", provider_alias, id, model_type);
+        let guard = self.conn.lock().unwrap();
+        guard.execute(
+            "DELETE FROM kv WHERE scope = 'customModels' AND key = ?",
+            params![key],
+        )?;
+        Ok(())
+    }
+
+    /// Loads model display names from kv scope 'modelDisplayNames'.
+    pub fn load_model_display_names(&self) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare_cached("SELECT key, value FROM kv WHERE scope = 'modelDisplayNames'")?;
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let val_str: String = row.get(1)?;
+            let val: String = serde_json::from_str(&val_str).unwrap_or(val_str);
+            Ok((key, val))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for r in rows.flatten() {
+            map.insert(r.0, r.1);
+        }
+        Ok(map)
+    }
+
+    /// Sets a model display name in kv scope 'modelDisplayNames'.
+    pub fn set_model_display_name(&self, model_id: &str, display_name: &str) -> anyhow::Result<()> {
+        let guard = self.conn.lock().unwrap();
+        let val_str = serde_json::to_string(display_name)?;
+        guard.execute(
+            r#"
+            INSERT INTO kv(scope, key, value) VALUES ('modelDisplayNames', ?, ?)
+            ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
+            "#,
+            params![model_id, val_str],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes a model display name in kv scope 'modelDisplayNames'.
+    pub fn delete_model_display_name(&self, model_id: &str) -> anyhow::Result<()> {
+        let guard = self.conn.lock().unwrap();
+        guard.execute(
+            "DELETE FROM kv WHERE scope = 'modelDisplayNames' AND key = ?",
+            params![model_id],
+        )?;
+        Ok(())
+    }
+
+    /// Loads disabled models by provider alias from kv scope 'disabledModels'.
+    pub fn load_disabled_models(&self) -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare_cached("SELECT key, value FROM kv WHERE scope = 'disabledModels'")?;
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let val_str: String = row.get(1)?;
+            let ids: Vec<String> = serde_json::from_str(&val_str).unwrap_or_default();
+            Ok((key, ids))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for r in rows.flatten() {
+            map.insert(r.0, r.1);
+        }
+        Ok(map)
+    }
+
+    /// Disables models for a provider alias.
+    pub fn disable_models(&self, provider_alias: &str, ids: &[String]) -> anyhow::Result<()> {
+        let guard = self.conn.lock().unwrap();
+        let existing_str: Option<String> = guard
+            .query_row(
+                "SELECT value FROM kv WHERE scope = 'disabledModels' AND key = ?",
+                params![provider_alias],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let mut current: Vec<String> = existing_str
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        for id in ids {
+            if !current.contains(id) {
+                current.push(id.clone());
+            }
+        }
+
+        let val_str = serde_json::to_string(&current)?;
+        guard.execute(
+            r#"
+            INSERT INTO kv(scope, key, value) VALUES ('disabledModels', ?, ?)
+            ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
+            "#,
+            params![provider_alias, val_str],
+        )?;
+        Ok(())
+    }
+
+    /// Enables models for a provider alias (removes from disabled list).
+    pub fn enable_models(&self, provider_alias: &str, ids: &[String]) -> anyhow::Result<()> {
+        let guard = self.conn.lock().unwrap();
+        if ids.is_empty() {
+            guard.execute(
+                "DELETE FROM kv WHERE scope = 'disabledModels' AND key = ?",
+                params![provider_alias],
+            )?;
+            return Ok(());
+        }
+
+        let existing_str: Option<String> = guard
+            .query_row(
+                "SELECT value FROM kv WHERE scope = 'disabledModels' AND key = ?",
+                params![provider_alias],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let current: Vec<String> = existing_str
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        let remove_set: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let next: Vec<String> = current
+            .into_iter()
+            .filter(|id| !remove_set.contains(id.as_str()))
+            .collect();
+
+        if next.is_empty() {
+            guard.execute(
+                "DELETE FROM kv WHERE scope = 'disabledModels' AND key = ?",
+                params![provider_alias],
+            )?;
+        } else {
+            let val_str = serde_json::to_string(&next)?;
+            guard.execute(
+                r#"
+                INSERT INTO kv(scope, key, value) VALUES ('disabledModels', ?, ?)
+                ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
+                "#,
+                params![provider_alias, val_str],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Loads all model aliases from kv scope 'modelAliases'.
+    pub fn load_model_aliases(&self) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare_cached("SELECT key, value FROM kv WHERE scope = 'modelAliases'")?;
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let val_str: String = row.get(1)?;
+            let val: String = serde_json::from_str(&val_str).unwrap_or(val_str);
+            Ok((key, val))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for r in rows.flatten() {
+            map.insert(r.0, r.1);
+        }
+        Ok(map)
+    }
+
+    /// Sets a model alias in kv scope 'modelAliases'.
+    pub fn set_model_alias(&self, alias: &str, model: &str) -> anyhow::Result<()> {
+        let guard = self.conn.lock().unwrap();
+        let val_str = serde_json::to_string(model)?;
+        guard.execute(
+            r#"
+            INSERT INTO kv(scope, key, value) VALUES ('modelAliases', ?, ?)
+            ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
+            "#,
+            params![alias, val_str],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes a model alias from kv scope 'modelAliases'.
+    pub fn delete_model_alias(&self, alias: &str) -> anyhow::Result<()> {
+        let guard = self.conn.lock().unwrap();
+        guard.execute(
+            "DELETE FROM kv WHERE scope = 'modelAliases' AND key = ?",
+            params![alias],
+        )?;
+        Ok(())
+    }
+
     // ==========================================
     // Combos Operations
     // ==========================================

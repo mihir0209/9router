@@ -123,10 +123,19 @@ function ModelCombobox({ models, value, onChange, capsMap = {}, capFilter = "all
         if (!b[0]) return -1;
         return a[0].localeCompare(b[0]);
       })
-      .map(([provider, items]) => [
-        provider,
-        items.sort((a, b) => a.id.slice(a.id.indexOf("/") + 1).localeCompare(b.id.slice(b.id.indexOf("/") + 1))),
-      ]);
+      .map(([provider, items]) => {
+        const providerName = items[0]?.owned_by && items[0].owned_by !== provider && items[0].owned_by !== "custom"
+          ? `${items[0].owned_by} (${provider})`
+          : (provider || "Other");
+        return [
+          providerName,
+          items.sort((a, b) => {
+            const nameA = a.name || (a.id.includes("/") ? a.id.slice(a.id.indexOf("/") + 1) : a.id);
+            const nameB = b.name || (b.id.includes("/") ? b.id.slice(b.id.indexOf("/") + 1) : b.id);
+            return nameA.localeCompare(nameB);
+          }),
+        ];
+      });
   }, [filtered]);
 
   const capCounts = useMemo(() => {
@@ -169,7 +178,9 @@ function ModelCombobox({ models, value, onChange, capsMap = {}, capFilter = "all
         className="flex w-full items-center justify-between gap-2 rounded-lg border border-border-subtle bg-surface px-3 py-2 text-left text-xs transition-colors hover:border-border hover:bg-surface-2"
       >
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate font-mono text-text-main">{value || placeholder}</span>
+          <span className="truncate font-sans font-medium text-text-main">
+            {models.find((m) => m.id === value)?.name || value || placeholder}
+          </span>
           <CapabilityBadges caps={value ? capsMap[value] : null} />
         </span>
         <span className="material-symbols-outlined shrink-0 text-[18px] text-text-muted">expand_more</span>
@@ -239,16 +250,22 @@ function ModelCombobox({ models, value, onChange, capsMap = {}, capFilter = "all
                         setOpen(false);
                       }}
                       className={cn(
-                        "flex w-full items-center justify-between gap-2 rounded px-2.5 py-1.5 text-left text-xs font-mono transition-colors",
+                        "flex w-full items-center justify-between gap-2 rounded px-2.5 py-1.5 text-left text-xs transition-colors",
                         m.id === value ? "bg-primary/10 text-primary" : "text-text-main hover:bg-surface-3"
                       )}
                     >
-                      <span className="truncate">{m.id.includes("/") ? m.id.slice(m.id.indexOf("/") + 1) : m.id}</span>
+                      <div className="flex flex-col min-w-0 flex-1">
+                        <span className="truncate font-sans font-medium text-text-main">
+                          {m.name || (m.id.includes("/") ? m.id.slice(m.id.indexOf("/") + 1) : m.id)}
+                        </span>
+                        {m.name && m.name !== m.id && (
+                          <span className="truncate font-mono text-[10px] text-text-muted">
+                            {m.id}
+                          </span>
+                        )}
+                      </div>
                       <span className="flex shrink-0 items-center gap-1.5">
                         <CapabilityBadges caps={capsMap[m.id]} />
-                        {m.owned_by && m.id !== value && (
-                          <span className="rounded bg-surface px-1.5 py-0.5 text-[9px] text-text-muted">{m.owned_by}</span>
-                        )}
                       </span>
                     </button>
                   ))}
@@ -368,7 +385,10 @@ export default function PlaygroundClient() {
       .then((data) => {
         const list = data?.data || [];
         setModels(list);
-        setSelectedModel((prev) => prev || (list.length > 0 ? list[0].id : prev));
+        setSelectedModel((prev) => {
+          if (prev && list.some((m) => m.id === prev)) return prev;
+          return list.length > 0 ? list[0].id : "";
+        });
       })
       .catch(() => {});
   }, [selectedKey]);

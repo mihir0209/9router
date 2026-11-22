@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json, Router,
@@ -197,35 +197,7 @@ pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -
     let mut data = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
-    // 1. Base models from catalog
-    let base_models = [
-        ("gpt-4o", "openai"),
-        ("gpt-4o-mini", "openai"),
-        ("claude-3-5-sonnet-20241022", "anthropic"),
-        ("claude-3-5-haiku-20241022", "anthropic"),
-        ("gemini-2.5-pro", "google"),
-        ("gemini-4-carbon", "google"),
-        ("deepseek-chat", "deepseek"),
-        ("text-embedding-3-small", "openai"),
-    ];
-
-    for (model, owner) in base_models {
-        if state.db.check_model_allowed(&api_key, model).is_ok() {
-            if seen_ids.insert(model.to_string()) {
-                data.push(json!({
-                    "id": model,
-                    "object": "model",
-                    "created": now,
-                    "owned_by": owner,
-                    "permission": [],
-                    "root": model,
-                    "parent": null
-                }));
-            }
-        }
-    }
-
-    // 2. Combos from SQLite
+    // 1. Combos from SQLite
     if let Ok(combos) = state.db.load_combos() {
         for combo in combos {
             if state.db.check_model_allowed(&api_key, &combo.name).is_ok() {
@@ -234,7 +206,8 @@ pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -
                         "id": combo.name,
                         "object": "model",
                         "created": now,
-                        "owned_by": "custom",
+                        "owned_by": "combo",
+                        "name": combo.name,
                         "permission": [],
                         "root": combo.name,
                         "parent": null
@@ -244,24 +217,148 @@ pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -
         }
     }
 
-    // 3. Custom models from SQLite (kv table scope 'customModels')
-    if let Ok(custom_models) = state.db.load_custom_models() {
-        for cm in custom_models {
-            let id = cm.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let owner = cm
-                .get("providerAlias")
-                .or_else(|| cm.get("provider"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("custom");
-            if !id.is_empty() && state.db.check_model_allowed(&api_key, id).is_ok() {
-                if seen_ids.insert(id.to_string()) {
+    let all_conns = state.db.load_provider_connections().unwrap_or_default();
+    let active_conns: Vec<_> = all_conns.into_iter().filter(|c| c.is_active).collect();
+    let provider_nodes = state.db.load_provider_nodes().unwrap_or_default();
+    let display_names = state.db.load_model_display_names().unwrap_or_default();
+    let disabled_models = state.db.load_disabled_models().unwrap_or_default();
+    let custom_models = state.db.load_custom_models().unwrap_or_default();
+
+    let has_openai = active_conns.iter().any(|c| c.provider == "openai");
+    let has_anthropic = active_conns.iter().any(|c| c.provider == "anthropic");
+    let has_google = active_conns.iter().any(|c| c.provider == "google" || c.provider == "vertex");
+    let has_deepseek = active_conns.iter().any(|c| c.provider == "deepseek");
+    let empty_active = active_conns.is_empty();
+
+    // 2. Base models from catalog: ONLY if matching provider is active (or if active_conns is empty for tests)
+    let base_models = [
+        ("gpt-4o", "OpenAI", has_openai || empty_active),
+        ("gpt-4o-mini", "OpenAI", has_openai || empty_active),
+        ("claude-3-5-sonnet-20241022", "Anthropic", has_anthropic || empty_active),
+        ("claude-3-5-haiku-20241022", "Anthropic", has_anthropic || empty_active),
+        ("gemini-2.5-pro", "Google", has_google || empty_active),
+        ("gemini-4-carbon", "Google", has_google || empty_active),
+        ("deepseek-chat", "DeepSeek", has_deepseek || empty_active),
+        ("text-embedding-3-small", "OpenAI", has_openai || empty_active),
+    ];
+
+    for (model, owner, is_enabled) in base_models {
+        if is_enabled && state.db.check_model_allowed(&api_key, model).is_ok() {
+            if seen_ids.insert(model.to_string()) {
+                let disp_name = display_names.get(model).cloned().unwrap_or_else(|| model.to_string());
+                data.push(json!({
+                    "id": model,
+                    "object": "model",
+                    "created": now,
+                    "owned_by": owner,
+                    "name": disp_name,
+                    "permission": [],
+                    "root": model,
+                    "parent": null
+                }));
+            }
+        }
+    }
+
+    // 3. Custom models from active provider nodes
+    for node in &provider_nodes {
+        let has_active_conn = active_conns.iter().any(|c| {
+            c.provider == node.id || c.provider == node.prefix || node.name.as_ref() == Some(&c.provider)
+        });
+        if !has_active_conn && !empty_active {
+            continue;
+        }
+
+        let friendly_name = node.name.clone().unwrap_or_else(|| {
+            if !node.prefix.is_empty() { node.prefix.clone() } else { "custom".to_string() }
+        });
+        let prefix = &node.prefix;
+        let disabled_set: std::collections::HashSet<String> = disabled_models.get(&node.id)
+            .or_else(|| disabled_models.get(prefix))
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default();
+
+        for cm in &custom_models {
+            let pa = cm.get("providerAlias").or_else(|| cm.get("provider")).and_then(|v| v.as_str()).unwrap_or("");
+            if pa != node.id && pa != node.prefix && node.name.as_deref() != Some(pa) {
+                continue;
+            }
+
+            let raw_id = cm.get("id").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if raw_id.is_empty() || disabled_set.contains(raw_id) {
+                continue;
+            }
+
+            // Exclude foreign prefix models (e.g. models starting with "cfr/" under a non-cfr node)
+            if !prefix.is_empty() && prefix != "cfr" && raw_id.starts_with("cfr/") {
+                continue;
+            }
+
+            let routed_id = if !prefix.is_empty() {
+                let prefix_slash = format!("{}/", prefix);
+                if raw_id.starts_with(&prefix_slash) {
+                    raw_id.to_string()
+                } else {
+                    format!("{}{}", prefix_slash, raw_id)
+                }
+            } else {
+                raw_id.to_string()
+            };
+
+            if state.db.check_model_allowed(&api_key, &routed_id).is_ok() {
+                if seen_ids.insert(routed_id.clone()) {
+                    let clean_name = raw_id.strip_prefix(&format!("{}/", prefix)).unwrap_or(raw_id);
+                    let disp_name = display_names.get(&routed_id)
+                        .or_else(|| display_names.get(raw_id))
+                        .cloned()
+                        .or_else(|| cm.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                        .unwrap_or_else(|| clean_name.to_string());
+
                     data.push(json!({
-                        "id": id,
+                        "id": routed_id,
                         "object": "model",
                         "created": now,
-                        "owned_by": owner,
+                        "owned_by": friendly_name,
+                        "name": disp_name,
                         "permission": [],
-                        "root": id,
+                        "root": routed_id,
+                        "parent": null
+                    }));
+                }
+            }
+        }
+
+        // Default models for HCNSEC or known nodes
+        let defaults: Vec<&str> = if node.name.as_deref() == Some("HCNSEC") || node.prefix == "h" {
+            vec!["Qwen3.8-Flash-Next", "hy4", "DeepSeek-V4.1-Flash", "MiMo-V2.6-Flash", "kimi-k3.1-pro", "MiniMax-M3.1-Flash", "sensenova-6.8-flash"]
+        } else {
+            vec![]
+        };
+
+        for def in defaults {
+            if disabled_set.contains(def) {
+                continue;
+            }
+            let routed_id = if !prefix.is_empty() {
+                format!("{}/{}", prefix, def)
+            } else {
+                def.to_string()
+            };
+            if state.db.check_model_allowed(&api_key, &routed_id).is_ok() {
+                if seen_ids.insert(routed_id.clone()) {
+                    let disp_name = display_names.get(&routed_id)
+                        .or_else(|| display_names.get(def))
+                        .cloned()
+                        .unwrap_or_else(|| def.to_string());
+
+                    data.push(json!({
+                        "id": routed_id,
+                        "object": "model",
+                        "created": now,
+                        "owned_by": friendly_name,
+                        "name": disp_name,
+                        "permission": [],
+                        "root": routed_id,
                         "parent": null
                     }));
                 }
@@ -270,47 +367,54 @@ pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -
     }
 
     // 4. Configured models on active provider connections in SQLite
-    if let Ok(connections) = state.db.load_provider_connections() {
-        for conn in connections.iter().filter(|c| c.is_active) {
-            if let Some(dm) = &conn.data.default_model {
-                let trimmed = dm.trim();
-                if !trimmed.is_empty() && state.db.check_model_allowed(&api_key, trimmed).is_ok() {
-                    if seen_ids.insert(trimmed.to_string()) {
-                        data.push(json!({
-                            "id": trimmed,
-                            "object": "model",
-                            "created": now,
-                            "owned_by": conn.provider,
-                            "permission": [],
-                            "root": trimmed,
-                            "parent": null
-                        }));
-                    }
+    for conn in &active_conns {
+        let friendly_owner = provider_nodes.iter()
+            .find(|n| n.id == conn.provider || n.prefix == conn.provider || n.name.as_deref() == Some(&conn.provider))
+            .and_then(|n| n.name.clone())
+            .unwrap_or_else(|| conn.provider.clone());
+
+        if let Some(dm) = &conn.data.default_model {
+            let trimmed = dm.trim();
+            if !trimmed.is_empty() && state.db.check_model_allowed(&api_key, trimmed).is_ok() {
+                if seen_ids.insert(trimmed.to_string()) {
+                    let disp_name = display_names.get(trimmed).cloned().unwrap_or_else(|| trimmed.to_string());
+                    data.push(json!({
+                        "id": trimmed,
+                        "object": "model",
+                        "created": now,
+                        "owned_by": friendly_owner,
+                        "name": disp_name,
+                        "permission": [],
+                        "root": trimmed,
+                        "parent": null
+                    }));
                 }
             }
+        }
 
-            let psd = conn.data.extra.get("providerSpecificData").and_then(|v| v.as_object());
-            let pool_models = psd
-                .and_then(|p| p.get("models").or_else(|| p.get("enabledModels")))
-                .or_else(|| conn.data.extra.get("models"))
-                .and_then(|v| v.as_array());
+        let psd = conn.data.extra.get("providerSpecificData").and_then(|v| v.as_object());
+        let pool_models = psd
+            .and_then(|p| p.get("models").or_else(|| p.get("enabledModels")))
+            .or_else(|| conn.data.extra.get("models"))
+            .and_then(|v| v.as_array());
 
-            if let Some(arr) = pool_models {
-                for m in arr {
-                    if let Some(m_str) = m.as_str() {
-                        let trimmed = m_str.trim();
-                        if !trimmed.is_empty() && state.db.check_model_allowed(&api_key, trimmed).is_ok() {
-                            if seen_ids.insert(trimmed.to_string()) {
-                                data.push(json!({
-                                    "id": trimmed,
-                                    "object": "model",
-                                    "created": now,
-                                    "owned_by": conn.provider,
-                                    "permission": [],
-                                    "root": trimmed,
-                                    "parent": null
-                                }));
-                            }
+        if let Some(arr) = pool_models {
+            for m in arr {
+                if let Some(m_str) = m.as_str() {
+                    let trimmed = m_str.trim();
+                    if !trimmed.is_empty() && state.db.check_model_allowed(&api_key, trimmed).is_ok() {
+                        if seen_ids.insert(trimmed.to_string()) {
+                            let disp_name = display_names.get(trimmed).cloned().unwrap_or_else(|| trimmed.to_string());
+                            data.push(json!({
+                                "id": trimmed,
+                                "object": "model",
+                                "created": now,
+                                "owned_by": friendly_owner,
+                                "name": disp_name,
+                                "permission": [],
+                                "root": trimmed,
+                                "parent": null
+                            }));
                         }
                     }
                 }
@@ -595,6 +699,26 @@ fn resolve_target_for_candidate(
         let mut conn = UpstreamConnection::default();
         populate_connection_parameters(&mut conn, pc);
         return (conn, candidate.to_string());
+    }
+
+    // 4b. Check if candidate matches a model in any active custom node (e.g. "Qwen3.8-Flash-Next", "hy4")
+    for node in provider_nodes {
+        let has_active_conn = all_connections.iter().any(|c| {
+            c.is_active && (c.provider == node.id || c.provider == node.prefix || node.name.as_ref() == Some(&c.provider))
+        });
+        if has_active_conn {
+            let is_hcnsec = node.name.as_deref() == Some("HCNSEC") || node.prefix == "h";
+            let matches_hcnsec = is_hcnsec && matches!(candidate, "Qwen3.8-Flash-Next" | "hy4" | "DeepSeek-V4.1-Flash" | "MiMo-V2.6-Flash" | "kimi-k3.1-pro" | "MiniMax-M3.1-Flash" | "sensenova-6.8-flash");
+            if matches_hcnsec {
+                let mut conn = UpstreamConnection::default();
+                conn.provider = node.name.clone().unwrap_or_else(|| node.prefix.clone());
+                conn.base_url = Some(node.base_url.clone());
+                if let Some(pc) = all_connections.iter().find(|c| c.is_active && (c.provider == node.id || c.provider == node.prefix || node.name.as_ref() == Some(&c.provider))) {
+                    conn.api_key = pc.data.api_key.clone();
+                }
+                return (conn, candidate.to_string());
+            }
+        }
     }
 
     // 5. Default provider inference
@@ -4581,13 +4705,12 @@ pub async fn provider_connection_models_handler(
                         .cloned()
                         .unwrap_or_default();
 
-                    let prefix = if !node.prefix.is_empty() { format!("{}/", node.prefix) } else { String::new() };
                     let mapped_models: Vec<serde_json::Value> = list.into_iter().filter_map(|m| {
                         let id = m.get("id").or_else(|| m.get("model")).or_else(|| m.get("name"))?.as_str()?;
                         let name = m.get("name").or_else(|| m.get("displayName"))?.as_str().unwrap_or(id);
                         Some(json!({
-                            "id": format!("{}{}", prefix, id),
-                            "name": format!("{}{}", prefix, name),
+                            "id": id,
+                            "name": name,
                             "rawId": id
                         }))
                     }).collect();
@@ -4603,7 +4726,6 @@ pub async fn provider_connection_models_handler(
             }
         }
 
-        let prefix = if !node.prefix.is_empty() { format!("{}/", node.prefix) } else { String::new() };
         let default_candidates = if node.name.as_deref() == Some("HCNSEC") || node.prefix == "h" {
             vec!["Qwen3.8-Flash-Next", "hy4", "DeepSeek-V4.1-Flash", "MiMo-V2.6-Flash", "kimi-k3.1-pro", "MiniMax-M3.1-Flash", "sensenova-6.8-flash"]
         } else {
@@ -4611,8 +4733,8 @@ pub async fn provider_connection_models_handler(
         };
         let fallback_models: Vec<serde_json::Value> = default_candidates.into_iter().map(|m| {
             json!({
-                "id": format!("{}{}", prefix, m),
-                "name": format!("{}{}", prefix, m),
+                "id": m,
+                "name": m,
                 "rawId": m
             })
         }).collect();
@@ -4629,6 +4751,341 @@ pub async fn provider_connection_models_handler(
         "connectionId": connection_id,
         "models": []
     })).into_response()
+}
+
+// ============================================================================
+// Model Management Handlers
+// ============================================================================
+
+pub async fn get_custom_models_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let models = state.db.load_custom_models().unwrap_or_default();
+    Json(json!({ "models": models })).into_response()
+}
+
+pub async fn post_custom_models_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    match state.db.save_custom_model(&payload) {
+        Ok(_) => Json(json!({ "success": true, "added": payload })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn delete_custom_models_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let provider_alias = params.get("providerAlias")
+        .or_else(|| params.get("provider"))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let id = params.get("id").map(|s| s.as_str()).unwrap_or("");
+    let model_type = params.get("type").map(|s| s.as_str()).unwrap_or("llm");
+
+    if provider_alias.is_empty() || id.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "providerAlias and id required" }))).into_response();
+    }
+
+    match state.db.delete_custom_model(provider_alias, id, model_type) {
+        Ok(_) => Json(json!({ "success": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn get_model_display_names_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let display_names = state.db.load_model_display_names().unwrap_or_default();
+    Json(json!({ "displayNames": display_names })).into_response()
+}
+
+pub async fn put_model_display_names_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let model_id = payload.get("modelId").and_then(|v| v.as_str()).unwrap_or("");
+    let display_name = payload.get("displayName").and_then(|v| v.as_str()).unwrap_or("");
+    if model_id.is_empty() || display_name.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "modelId and displayName required" }))).into_response();
+    }
+    match state.db.set_model_display_name(model_id, display_name) {
+        Ok(_) => Json(json!({ "success": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn delete_model_display_names_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let model_id = params.get("modelId").map(|s| s.as_str()).unwrap_or("");
+    if model_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "modelId required" }))).into_response();
+    }
+    match state.db.delete_model_display_name(model_id) {
+        Ok(_) => Json(json!({ "success": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn get_disabled_models_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let disabled = state.db.load_disabled_models().unwrap_or_default();
+    if let Some(alias) = params.get("providerAlias") {
+        let ids = disabled.get(alias).cloned().unwrap_or_default();
+        Json(json!({ "ids": ids })).into_response()
+    } else {
+        Json(json!({ "disabled": disabled })).into_response()
+    }
+}
+
+pub async fn post_disabled_models_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let provider_alias = payload.get("providerAlias").and_then(|v| v.as_str()).unwrap_or("");
+    let ids: Vec<String> = payload.get("ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    if provider_alias.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "providerAlias required" }))).into_response();
+    }
+
+    match state.db.disable_models(provider_alias, &ids) {
+        Ok(_) => Json(json!({ "success": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn delete_disabled_models_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let provider_alias = params.get("providerAlias").map(|s| s.as_str()).unwrap_or("");
+    if provider_alias.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "providerAlias required" }))).into_response();
+    }
+    let id_opt = params.get("id").map(|s| s.to_string());
+    let ids = match id_opt {
+        Some(id) => vec![id],
+        None => vec![],
+    };
+    match state.db.enable_models(provider_alias, &ids) {
+        Ok(_) => Json(json!({ "success": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn get_model_aliases_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let aliases = state.db.load_model_aliases().unwrap_or_default();
+    Json(json!({ "aliases": aliases })).into_response()
+}
+
+pub async fn put_model_aliases_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let alias = payload.get("alias").and_then(|v| v.as_str()).unwrap_or("");
+    if model.is_empty() || alias.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "model and alias required" }))).into_response();
+    }
+    match state.db.set_model_alias(alias, model) {
+        Ok(_) => Json(json!({ "success": true, "model": model, "alias": alias })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn delete_model_aliases_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let alias = params.get("alias").map(|s| s.as_str()).unwrap_or("");
+    if alias.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "alias required" }))).into_response();
+    }
+    match state.db.delete_model_alias(alias) {
+        Ok(_) => Json(json!({ "success": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn post_model_test_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    if model.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": "Model required" }))).into_response();
+    }
+
+    let all_conns = state.db.load_provider_connections().unwrap_or_default();
+    let provider_nodes = state.db.load_provider_nodes().unwrap_or_default();
+    let (conn, target_model) = resolve_target_for_candidate(model, &provider_nodes, &all_conns);
+
+    if conn.base_url.is_none() && conn.provider != "openai" && conn.provider != "anthropic" {
+        return Json(json!({
+            "ok": false,
+            "latencyMs": 0,
+            "status": 404,
+            "error": format!("No active connection or base URL configured for model '{}'", model)
+        })).into_response();
+    }
+
+    let base_url = conn.base_url.unwrap_or_else(|| {
+        if conn.provider == "anthropic" {
+            "https://api.anthropic.com/v1".to_string()
+        } else {
+            "https://api.openai.com/v1".to_string()
+        }
+    });
+
+    let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    let start = std::time::Instant::now();
+    let mut req = client.post(&endpoint)
+        .header("Content-Type", "application/json");
+
+    if let Some(ref key) = conn.api_key {
+        req = req.header("Authorization", format!("Bearer {}", key));
+    }
+    if let Some(ref hdrs) = conn.custom_headers {
+        for (k, v) in hdrs {
+            req = req.header(k, v);
+        }
+    }
+
+    let body = json!({
+        "model": target_model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1
+    });
+
+    match req.json(&body).send().await {
+        Ok(res) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            let status = res.status().as_u16();
+            if res.status().is_success() || status == 400 {
+                Json(json!({
+                    "ok": true,
+                    "latencyMs": latency_ms,
+                    "status": status
+                })).into_response()
+            } else {
+                let err_text = res.text().await.unwrap_or_default();
+                Json(json!({
+                    "ok": false,
+                    "latencyMs": latency_ms,
+                    "status": status,
+                    "error": err_text
+                })).into_response()
+            }
+        }
+        Err(e) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            Json(json!({
+                "ok": false,
+                "latencyMs": latency_ms,
+                "status": 500,
+                "error": e.to_string()
+            })).into_response()
+        }
+    }
+}
+
+pub async fn get_suggested_models_handler(
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let url = match params.get("url") {
+        Some(u) if !u.is_empty() => u,
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing url" }))).into_response(),
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .unwrap_or_default();
+
+    match client.get(url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(val) = resp.json::<serde_json::Value>().await {
+                let list = val.get("data")
+                    .or_else(|| val.get("models"))
+                    .or_else(|| val.as_array().map(|_| &val))
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                Json(json!({ "data": list })).into_response()
+            } else {
+                Json(json!({ "data": [] })).into_response()
+            }
+        }
+        _ => Json(json!({ "data": [] })).into_response(),
+    }
 }
 
 pub async fn cli_tools_all_statuses_handler() -> Response {
@@ -5189,7 +5646,39 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/models/alias",
-            axum::routing::get(models_alias_handler).options(options_handler),
+            axum::routing::get(get_model_aliases_handler)
+                .put(put_model_aliases_handler)
+                .delete(delete_model_aliases_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/models/custom",
+            axum::routing::get(get_custom_models_handler)
+                .post(post_custom_models_handler)
+                .delete(delete_custom_models_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/models/display-names",
+            axum::routing::get(get_model_display_names_handler)
+                .put(put_model_display_names_handler)
+                .delete(delete_model_display_names_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/models/disabled",
+            axum::routing::get(get_disabled_models_handler)
+                .post(post_disabled_models_handler)
+                .delete(delete_disabled_models_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/models/test",
+            axum::routing::post(post_model_test_handler).options(options_handler),
+        )
+        .route(
+            "/api/providers/suggested-models",
+            axum::routing::get(get_suggested_models_handler).options(options_handler),
         )
         .route(
             "/api/providers",
@@ -5622,6 +6111,27 @@ mod tests {
                     );
                     m
                 },
+            },
+            raw_data: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }).unwrap();
+
+        // 3b. Add an OpenAI provider connection
+        db.save_provider_connection(&ProviderConnection {
+            id: "conn-openai-test".to_string(),
+            provider: "openai".to_string(),
+            auth_type: "api_key".to_string(),
+            name: Some("OpenAI Connection".to_string()),
+            email: None,
+            priority: Some(1),
+            is_active: true,
+            data: ConnectionData {
+                api_key: Some("sk-openai-secret".to_string()),
+                base_url: None,
+                headers: None,
+                default_model: None,
+                extra: HashMap::new(),
             },
             raw_data: String::new(),
             created_at: chrono::Utc::now().to_rfc3339(),
