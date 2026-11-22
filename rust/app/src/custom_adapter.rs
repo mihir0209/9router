@@ -8,8 +8,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::sse::SseParser;
 use crate::translator::{
-    ChatChoice, ChatCompletionChunk, ChatCompletionResponse, ChatResponseMessage, ChunkChoice,
-    ChunkDelta, ClaudeBlock, ClaudeMessageResponse, ClaudeUsage, UsageInfo,
+    ChatChoice, ChatCompletionChunk, ChatCompletionResponse, ChatResponseMessage,
+    ChunkChoice, ChunkDelta, ClaudeBlock, ClaudeMessageResponse, ClaudeUsage, UsageInfo,
+};
+
+pub use crate::translator::{
+    build_json_schema_prompt, normalize_openai_strict_schema, resolve_kiro_tool_call_repair,
+    resolve_kiro_tool_call_repair_buffer_max_bytes, resolve_structured_output_mode,
+    should_retry_cursor_empty_turn, tail_only_cursor_messages, CursorRetryConfig,
+    CursorTurnRetryManager, KiroToolCallRepairBuffer, StructuredOutputMode, ToolRepairError,
+    DEFAULT_CURSOR_EMPTY_TURN_MAX_RETRIES, DEFAULT_CURSOR_EMPTY_TURN_RETRY_DELAY_MS,
+    DEFAULT_CURSOR_TAIL_ONLY_THRESHOLD, DEFAULT_KIRO_TOOL_CALL_REPAIR_BUFFER_MAX_BYTES,
+    STRUCTURED_OUTPUT_MODE_AUTO, STRUCTURED_OUTPUT_MODE_FALLBACK,
+    STRUCTURED_OUTPUT_MODE_PASSTHROUGH,
 };
 
 pub const TAG_OPENAI_COMPATIBLE: &str = "openai-compatible";
@@ -37,6 +48,10 @@ pub struct CustomSchemaMapping {
     pub stream_done_flag: Option<String>,
     #[serde(default)]
     pub implementation_tags: Vec<String>,
+    #[serde(default)]
+    pub structured_output_mode: Option<String>,
+    #[serde(default)]
+    pub response_schema_path: Option<String>,
 }
 
 /// Robust JSON path extractor navigating dotted keys, array indices (`a.b[0].c`, `[2][1][0]`),
@@ -177,11 +192,22 @@ pub fn extract_bool_by_path(root: &serde_json::Value, path: &str) -> Option<bool
     }
 }
 
-/// Transforms an arbitrary custom JSON response into a standard OpenAI ChatCompletionResponse.
+/// Transforms an arbitrary custom JSON response into a standard OpenAI ChatCompletionResponse using configured StructuredOutputMode.
 pub fn transform_custom_to_openai_response(
     raw: &serde_json::Value,
     mapping: &CustomSchemaMapping,
     model: &str,
+) -> Result<ChatCompletionResponse, String> {
+    let mode = resolve_structured_output_mode(mapping.structured_output_mode.as_deref());
+    transform_custom_to_openai_response_with_mode(raw, mapping, model, mode)
+}
+
+/// Transforms an arbitrary custom JSON response into a standard OpenAI ChatCompletionResponse with explicit StructuredOutputMode.
+pub fn transform_custom_to_openai_response_with_mode(
+    raw: &serde_json::Value,
+    mapping: &CustomSchemaMapping,
+    model: &str,
+    mode: StructuredOutputMode,
 ) -> Result<ChatCompletionResponse, String> {
     let text_path = mapping.response_text_path.as_deref().unwrap_or("text");
     let content_text = extract_text_by_path(raw, text_path).ok_or_else(|| {
@@ -203,6 +229,26 @@ pub fn transform_custom_to_openai_response(
         .and_then(|p| extract_i64_by_path(raw, p))
         .unwrap_or(25) as u32;
 
+    let raw_schema = mapping
+        .response_schema_path
+        .as_deref()
+        .and_then(|p| extract_json_value(raw, p))
+        .or_else(|| raw.get("schema").cloned())
+        .or_else(|| raw.get("response_format").cloned())
+        .or_else(|| raw.get("response_schema").cloned());
+
+    let response_schema = match (raw_schema, mode) {
+        (Some(schema), StructuredOutputMode::Passthrough) => {
+            // When mode is passthrough, preserve raw response schemas
+            Some(schema)
+        }
+        (Some(schema), StructuredOutputMode::Auto | StructuredOutputMode::Fallback) => {
+            // When auto or fallback, run JSON schema conversion
+            Some(normalize_openai_strict_schema(&schema))
+        }
+        (None, _) => None,
+    };
+
     Ok(ChatCompletionResponse {
         id: format!("chatcmpl-custom-{}", chrono::Utc::now().timestamp_millis()),
         object: "chat.completion".to_string(),
@@ -223,14 +269,26 @@ pub fn transform_custom_to_openai_response(
             total_tokens: prompt_tokens + completion_tokens,
             prompt_tokens_details: None,
         }),
+        response_schema,
     })
 }
 
-/// Transforms an arbitrary custom JSON response into a standard Claude ClaudeMessageResponse.
+/// Transforms an arbitrary custom JSON response into a standard Claude ClaudeMessageResponse using configured StructuredOutputMode.
 pub fn transform_custom_to_claude_response(
     raw: &serde_json::Value,
     mapping: &CustomSchemaMapping,
     model: &str,
+) -> Result<ClaudeMessageResponse, String> {
+    let mode = resolve_structured_output_mode(mapping.structured_output_mode.as_deref());
+    transform_custom_to_claude_response_with_mode(raw, mapping, model, mode)
+}
+
+/// Transforms an arbitrary custom JSON response into a standard Claude ClaudeMessageResponse with explicit StructuredOutputMode.
+pub fn transform_custom_to_claude_response_with_mode(
+    raw: &serde_json::Value,
+    mapping: &CustomSchemaMapping,
+    model: &str,
+    mode: StructuredOutputMode,
 ) -> Result<ClaudeMessageResponse, String> {
     let text_path = mapping.response_text_path.as_deref().unwrap_or("text");
     let content_text = extract_text_by_path(raw, text_path).ok_or_else(|| {
@@ -252,6 +310,26 @@ pub fn transform_custom_to_claude_response(
         .and_then(|p| extract_i64_by_path(raw, p))
         .unwrap_or(25) as u32;
 
+    let raw_schema = mapping
+        .response_schema_path
+        .as_deref()
+        .and_then(|p| extract_json_value(raw, p))
+        .or_else(|| raw.get("schema").cloned())
+        .or_else(|| raw.get("response_format").cloned())
+        .or_else(|| raw.get("response_schema").cloned());
+
+    let response_schema = match (raw_schema, mode) {
+        (Some(schema), StructuredOutputMode::Passthrough) => {
+            // When mode is passthrough, preserve raw response schemas
+            Some(schema)
+        }
+        (Some(schema), StructuredOutputMode::Auto | StructuredOutputMode::Fallback) => {
+            // When auto or fallback, run JSON schema conversion
+            Some(normalize_openai_strict_schema(&schema))
+        }
+        (None, _) => None,
+    };
+
     Ok(ClaudeMessageResponse {
         id: format!("msg-custom-{}", chrono::Utc::now().timestamp_millis()),
         message_type: "message".to_string(),
@@ -269,6 +347,7 @@ pub fn transform_custom_to_claude_response(
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         },
+        response_schema,
     })
 }
 
@@ -644,6 +723,7 @@ pub fn synthesize_claude_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::translator::ChatMessage;
 
     #[test]
     fn test_extract_deeply_nested_worst_schema() {
@@ -773,5 +853,120 @@ mod tests {
             panic!("Expected text block");
         }
         assert_eq!(claude_resp.usage.input_tokens, 15);
+    }
+
+    #[test]
+    fn test_custom_adapter_structured_output_passthrough() {
+        let raw_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "custom_metric": { "type": "number" }
+            }
+        });
+
+        let payload = serde_json::json!({
+            "text": "{\"custom_metric\": 42.5}",
+            "response_schema": raw_schema
+        });
+
+        let mapping = CustomSchemaMapping {
+            response_text_path: Some("text".to_string()),
+            response_schema_path: Some("response_schema".to_string()),
+            structured_output_mode: Some("passthrough".to_string()),
+            ..Default::default()
+        };
+
+        // Passthrough preserves the raw response schema verbatim without normalizing strict fields
+        let res = transform_custom_to_openai_response(&payload, &mapping, "model-custom").unwrap();
+        assert_eq!(res.response_schema, Some(raw_schema.clone()));
+        assert_eq!(res.response_schema.unwrap().get("additionalProperties"), None);
+
+        let claude_res = transform_custom_to_claude_response(&payload, &mapping, "model-custom").unwrap();
+        assert_eq!(claude_res.response_schema, Some(raw_schema));
+    }
+
+    #[test]
+    fn test_custom_adapter_structured_output_auto_and_fallback() {
+        let raw_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "field_a": { "type": "string" },
+                "field_b": { "type": "integer" }
+            }
+        });
+
+        let payload = serde_json::json!({
+            "text": "result text",
+            "schema": raw_schema
+        });
+
+        // 1. Auto mode: runs JSON schema conversion
+        let mapping_auto = CustomSchemaMapping {
+            response_text_path: Some("text".to_string()),
+            structured_output_mode: Some("auto".to_string()),
+            ..Default::default()
+        };
+        let res_auto = transform_custom_to_openai_response(&payload, &mapping_auto, "m").unwrap();
+        let schema_auto = res_auto.response_schema.unwrap();
+        assert_eq!(schema_auto["additionalProperties"], false);
+        let req_auto = schema_auto["required"].as_array().unwrap();
+        assert!(req_auto.contains(&serde_json::json!("field_a")));
+        assert!(req_auto.contains(&serde_json::json!("field_b")));
+
+        // 2. Fallback mode: runs JSON schema conversion
+        let mapping_fallback = CustomSchemaMapping {
+            response_text_path: Some("text".to_string()),
+            structured_output_mode: Some("fallback".to_string()),
+            ..Default::default()
+        };
+        let res_fallback = transform_custom_to_openai_response(&payload, &mapping_fallback, "m").unwrap();
+        let schema_fallback = res_fallback.response_schema.unwrap();
+        assert_eq!(schema_fallback["additionalProperties"], false);
+    }
+
+    #[test]
+    fn test_custom_adapter_kiro_tool_repair_buffering() {
+        let mut buffer = KiroToolCallRepairBuffer::new();
+        assert_eq!(buffer.max_bytes, 8 * 1024 * 1024);
+
+        // Feed fragmented tool arguments
+        buffer
+            .append_tool_fragment("tool_call_42", Some("execute_command"), "{\"command\": \"ca")
+            .unwrap();
+        buffer
+            .append_tool_fragment("tool_call_42", None, "rgo test\", \"timeout\": 30")
+            .unwrap();
+
+        // Finalize tool call: missing closing brace is repaired
+        let tool = buffer.finalize_tool_call("tool_call_42").unwrap();
+        assert_eq!(tool.function.name, "execute_command");
+        let parsed: serde_json::Value = serde_json::from_str(&tool.function.arguments).unwrap();
+        assert_eq!(parsed["command"], "cargo test");
+        assert_eq!(parsed["timeout"], 30);
+    }
+
+    #[test]
+    fn test_custom_adapter_cursor_retries_and_tail_parser() {
+        let config = CursorRetryConfig::load_from_env();
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.tail_only_threshold, 80);
+
+        let mut messages = Vec::new();
+        messages.push(ChatMessage::system("instructions"));
+        for i in 0..85 {
+            messages.push(ChatMessage::user(format!("query {}", i)));
+        }
+        messages.push(ChatMessage::assistant("thought"));
+        messages.push(ChatMessage::user("latest query"));
+
+        let mut manager = CursorTurnRetryManager::new(config, messages.len());
+        assert!(manager.should_retry(true, false));
+        assert_eq!(manager.record_attempt(), 1);
+
+        let tail = manager.prepare_retry_messages(&messages);
+        assert_eq!(tail[0].role, "system");
+        assert_eq!(tail[0].content.as_ref().unwrap().as_text(), "instructions");
+        assert!(tail[1].content.as_ref().unwrap().as_text().contains("messages trimmed"));
+        assert_eq!(tail.last().unwrap().content.as_ref().unwrap().as_text(), "latest query");
     }
 }
