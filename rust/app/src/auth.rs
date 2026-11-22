@@ -148,6 +148,26 @@ pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
         }
     }
 
+    // 4. Check x-router-key header
+    if let Some(val) = headers.get("x-router-key") {
+        if let Ok(s) = val.to_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    // 5. Check x-admin-key header
+    if let Some(val) = headers.get("x-admin-key") {
+        if let Ok(s) = val.to_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
     None
 }
 
@@ -270,11 +290,20 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Resolves the configured Admin API token from environment variables or .env file.
+/// Supports ADMIN_API_TOKEN, ADMIN_KEY, ROUTER_API_KEY, NINEROUTER_API_KEY, and NINE_ROUTER_API_KEY.
 pub fn resolve_configured_admin_token() -> String {
-    if let Ok(tok) = std::env::var("ADMIN_API_TOKEN").or_else(|_| std::env::var("ADMIN_KEY")) {
-        let trimmed = tok.trim().to_string();
-        if !trimmed.is_empty() {
-            return trimmed;
+    for var in &[
+        "ADMIN_API_TOKEN",
+        "ADMIN_KEY",
+        "ROUTER_API_KEY",
+        "NINEROUTER_API_KEY",
+        "NINE_ROUTER_API_KEY",
+    ] {
+        if let Ok(tok) = std::env::var(var) {
+            let trimmed = tok.trim().to_string();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
         }
     }
 
@@ -291,7 +320,13 @@ pub fn resolve_configured_admin_token() -> String {
                     continue;
                 }
                 if let Some((k, v)) = trimmed.split_once('=') {
-                    if k.trim() == "ADMIN_API_TOKEN" || k.trim() == "ADMIN_KEY" {
+                    let k = k.trim();
+                    if k == "ADMIN_API_TOKEN"
+                        || k == "ADMIN_KEY"
+                        || k == "ROUTER_API_KEY"
+                        || k == "NINEROUTER_API_KEY"
+                        || k == "NINE_ROUTER_API_KEY"
+                    {
                         let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
                         if !val.is_empty() {
                             return val;
@@ -314,14 +349,22 @@ pub fn verify_admin_api_token(headers: &HeaderMap) -> bool {
     }
     if let Ok(internal_tok) = std::env::var("INTERNAL_API_TOKEN") {
         let trimmed = internal_tok.trim().to_string();
-        if !trimmed.is_empty() {
+        if !trimmed.is_empty() && !configured_tokens.contains(&trimmed) {
             configured_tokens.push(trimmed);
         }
     }
-    if let Ok(router_key) = std::env::var("ROUTER_API_KEY") {
-        let trimmed = router_key.trim().to_string();
-        if !trimmed.is_empty() {
-            configured_tokens.push(trimmed);
+    for var in &[
+        "ROUTER_API_KEY",
+        "NINEROUTER_API_KEY",
+        "NINE_ROUTER_API_KEY",
+        "ADMIN_API_TOKEN",
+        "ADMIN_KEY",
+    ] {
+        if let Ok(tok) = std::env::var(var) {
+            let trimmed = tok.trim().to_string();
+            if !trimmed.is_empty() && !configured_tokens.contains(&trimmed) {
+                configured_tokens.push(trimmed);
+            }
         }
     }
 
@@ -329,8 +372,14 @@ pub fn verify_admin_api_token(headers: &HeaderMap) -> bool {
         return false;
     }
 
-    // 1. Check x-admin-key, x-internal-token, x-router-key headers
-    for header_name in &["x-admin-key", "x-internal-token", "x-router-key", "x-9r-cli-token"] {
+    // 1. Check x-admin-key, x-internal-token, x-router-key, x-9r-cli-token, x-api-key headers
+    for header_name in &[
+        "x-admin-key",
+        "x-internal-token",
+        "x-router-key",
+        "x-9r-cli-token",
+        "x-api-key",
+    ] {
         if let Some(val) = headers.get(*header_name) {
             if let Ok(s) = val.to_str() {
                 let s = s.trim();
@@ -487,6 +536,7 @@ mod tests {
     use super::*;
     use axum::http::Request;
     use chrono::Utc;
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_extract_api_key_bearer() {
@@ -636,6 +686,7 @@ mod tests {
 
     #[test]
     fn test_admin_api_token_header() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("ADMIN_API_TOKEN", "super-secret-admin-key-999");
         }
@@ -650,5 +701,106 @@ mod tests {
         let mut wrong_headers = HeaderMap::new();
         wrong_headers.insert("x-admin-key", "wrong-key".parse().unwrap());
         assert!(!verify_admin_api_token(&wrong_headers));
+        unsafe {
+            std::env::remove_var("ADMIN_API_TOKEN");
+        }
+    }
+
+    #[test]
+    fn test_ninerouter_api_key_alias() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("ADMIN_API_TOKEN");
+            std::env::remove_var("ADMIN_KEY");
+            std::env::remove_var("ROUTER_API_KEY");
+            std::env::remove_var("NINE_ROUTER_API_KEY");
+            std::env::set_var("NINEROUTER_API_KEY", "nr-alias-key-12345");
+        }
+
+        assert_eq!(resolve_configured_admin_token(), "nr-alias-key-12345");
+
+        // x-admin-key
+        let mut h1 = HeaderMap::new();
+        h1.insert("x-admin-key", "nr-alias-key-12345".parse().unwrap());
+        assert!(verify_admin_api_token(&h1));
+
+        // x-router-key
+        let mut h2 = HeaderMap::new();
+        h2.insert("x-router-key", "nr-alias-key-12345".parse().unwrap());
+        assert!(verify_admin_api_token(&h2));
+
+        // x-api-key
+        let mut h3 = HeaderMap::new();
+        h3.insert("x-api-key", "nr-alias-key-12345".parse().unwrap());
+        assert!(verify_admin_api_token(&h3));
+
+        // Authorization: Bearer
+        let mut h4 = HeaderMap::new();
+        h4.insert(header::AUTHORIZATION, "Bearer nr-alias-key-12345".parse().unwrap());
+        assert!(verify_admin_api_token(&h4));
+
+        // Invalid key
+        let mut h_err = HeaderMap::new();
+        h_err.insert("x-admin-key", "invalid-key".parse().unwrap());
+        assert!(!verify_admin_api_token(&h_err));
+
+        unsafe {
+            std::env::remove_var("NINEROUTER_API_KEY");
+        }
+    }
+
+    #[test]
+    fn test_nine_router_api_key_alias() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("ADMIN_API_TOKEN");
+            std::env::remove_var("ADMIN_KEY");
+            std::env::remove_var("ROUTER_API_KEY");
+            std::env::remove_var("NINEROUTER_API_KEY");
+            std::env::set_var("NINE_ROUTER_API_KEY", "nine-router-alias-98765");
+        }
+
+        assert_eq!(resolve_configured_admin_token(), "nine-router-alias-98765");
+
+        // x-admin-key
+        let mut h1 = HeaderMap::new();
+        h1.insert("x-admin-key", "nine-router-alias-98765".parse().unwrap());
+        assert!(verify_admin_api_token(&h1));
+
+        // x-router-key
+        let mut h2 = HeaderMap::new();
+        h2.insert("x-router-key", "nine-router-alias-98765".parse().unwrap());
+        assert!(verify_admin_api_token(&h2));
+
+        // Authorization: Bearer
+        let mut h3 = HeaderMap::new();
+        h3.insert(header::AUTHORIZATION, "Bearer nine-router-alias-98765".parse().unwrap());
+        assert!(verify_admin_api_token(&h3));
+
+        unsafe {
+            std::env::remove_var("NINE_ROUTER_API_KEY");
+        }
+    }
+
+    #[test]
+    fn test_router_api_key_alias() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("ADMIN_API_TOKEN");
+            std::env::remove_var("ADMIN_KEY");
+            std::env::remove_var("NINEROUTER_API_KEY");
+            std::env::remove_var("NINE_ROUTER_API_KEY");
+            std::env::set_var("ROUTER_API_KEY", "router-api-key-555");
+        }
+
+        assert_eq!(resolve_configured_admin_token(), "router-api-key-555");
+
+        let mut h = HeaderMap::new();
+        h.insert("x-router-key", "router-api-key-555".parse().unwrap());
+        assert!(verify_admin_api_token(&h));
+
+        unsafe {
+            std::env::remove_var("ROUTER_API_KEY");
+        }
     }
 }
