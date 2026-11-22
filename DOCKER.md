@@ -1,6 +1,6 @@
 # Docker
 
-Run 9Router in a container. Published image: [`decolua/9router`](https://hub.docker.com/r/decolua/9router) — multi-platform `linux/amd64` + `linux/arm64`.
+Run 9Router in a container. Published image: [`mihir0209/9router`](https://hub.docker.com/r/mihir0209/9router) (zero-dependency native Rust single binary).
 
 ---
 
@@ -14,7 +14,7 @@ docker run -d \
   -v "$HOME/.9router:/app/data" \
   -e DATA_DIR=/app/data \
   --name 9router \
-  decolua/9router:latest
+  mihir0209/9router:latest
 ```
 
 App listens on port `20128`. Open: http://localhost:20128
@@ -58,26 +58,28 @@ docker run -d \
   -v "$HOME/.9router:/app/data" \
   -e DATA_DIR=/app/data \
   -e PORT=20128 \
-  -e HOSTNAME=0.0.0.0 \
-  -e DEBUG=true \
+  -e HOST=0.0.0.0 \
+  -e STANDALONE=1 \
   --name 9router \
-  decolua/9router:latest
+  mihir0209/9router:latest
 ```
 
 ## Optional Headroom sidecar
 
-The 9Router image does not bundle Python or Headroom. To use Headroom in Docker, run it as a separate service and point 9Router at that proxy:
+The 9Router container embeds native lossless RTK token saving directly in memory. To run with an external Headroom sidecar proxy:
 
 ```yaml
 services:
   9router:
-    image: decolua/9router:latest
+    image: mihir0209/9router:latest
     ports:
       - "20128:20128"
     volumes:
       - "$HOME/.9router:/app/data"
     environment:
       DATA_DIR: /app/data
+      PORT: "20128"
+      HOST: "0.0.0.0"
       HEADROOM_URL: http://headroom:8787
     depends_on:
       - headroom
@@ -88,14 +90,10 @@ services:
       - "8787:8787"
 ```
 
-In the dashboard, open `Endpoint` → `Token Saver` → `Headroom`, confirm the URL is `http://headroom:8787`, recheck status, then enable Headroom.
-
-If Headroom runs on the Docker host instead of as a sidecar, use `http://host.docker.internal:8787` on macOS/Windows. On Linux, add `--add-host=host.docker.internal:host-gateway` or the equivalent compose `extra_hosts` entry.
-
 ## Update to latest
 
 ```bash
-docker pull decolua/9router:latest
+docker pull mihir0209/9router:latest
 docker rm -f 9router
 # re-run the quick start command
 ```
@@ -103,7 +101,7 @@ docker rm -f 9router
 To pin a specific version instead of following `latest`, use a numbered image tag:
 
 ```bash
-docker pull decolua/9router:0.5.81
+docker pull mihir0209/9router:v0.6.0
 ```
 
 ---
@@ -134,8 +132,8 @@ docker build \
 
 Push a Docker-safe semver git tag `vX.Y.Z` (or a prerelease such as `vX.Y.Z-rc.1`) → GitHub Actions builds `linux/amd64` and `linux/arm64` on native runners, health-checks each platform image, verifies the resulting manifest and `/api/health`, then publishes:
 
-- `ghcr.io/decolua/9router:X.Y.Z` + `:latest`
-- `decolua/9router:X.Y.Z` + `:latest`
+- `ghcr.io/mihir0209/9router:X.Y.Z` + `:latest`
+- `mihir0209/9router:X.Y.Z` + `:latest`
 
 The `v` prefix is used only for the git tag; image tags omit it. A stable tag push promotes `latest`, but a prerelease tag such as `vX.Y.Z-rc.1` publishes only its numbered image by default. Prereleases require an explicit manual `promote_latest` opt-in. Promotion happens only after both native platform builds, both platform health checks, manifest inspection, and the resolved-manifest smoke test succeed. A failed or timed-out platform build therefore cannot move `latest`.
 
@@ -166,7 +164,7 @@ promote_latest:  true
 Numbered image tags are mutable because a republish can replace their manifest. For a deployment that must be immutable, pin the image digest instead:
 
 ```bash
-docker pull decolua/9router@sha256:<verified-digest>
+docker pull mihir0209/9router@sha256:<verified-digest>
 ```
 
 The release workflow runs `/api/health` on each native `amd64` and `arm64` platform image before it uploads the digest artifact or assembles the multi-platform manifest. It then runs a second health check against the resolved version manifest before any requested `latest` promotion.
@@ -180,7 +178,7 @@ The upstream repository needs these repository secrets for Docker Hub publishing
 - `DOCKERHUB_USERNAME`
 - `DOCKERHUB_TOKEN`
 
-GHCR publishing uses the workflow's `GITHUB_TOKEN` with package write permission. Forks can publish to their own GHCR namespace, but Docker Hub publication is restricted to the upstream `decolua/9router` repository.
+GHCR publishing uses the workflow's `GITHUB_TOKEN` with package write permission. Docker Hub publication publishes directly to `mihir0209/9router`.
 
 The optional repository variables `ALPINE_MIRROR` and `NPM_REGISTRY` can override the default package mirrors used by the CI Docker build.
 

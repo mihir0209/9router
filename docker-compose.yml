@@ -1,6 +1,6 @@
 services:
   9router:
-    image: decolua/9router:latest
+    image: mihir0209/9router:latest
     container_name: 9router
     restart: always
     ports:
@@ -12,8 +12,8 @@ services:
     environment:
       DATA_DIR: /app/data
       PORT: "20128"
-      HOSTNAME: "0.0.0.0"
-      NODE_ENV: production
+      HOST: "0.0.0.0"
+      STANDALONE: "1"
       HEADROOM_URL: http://headroom:8787
     depends_on:
       - headroom
