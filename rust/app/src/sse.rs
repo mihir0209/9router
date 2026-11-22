@@ -6,9 +6,109 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
+use crate::config::StreamingConfig;
 use crate::translator::{
     ChatCompletionChunk, ChunkChoice, ChunkDelta, ChunkFunctionCall, ChunkToolCall, UsageInfo,
 };
+
+// ============================================================================
+// Constants & Timeout Configuration
+// ============================================================================
+
+/// Default SSE stream chunk stall timeout in milliseconds (360s = 360,000ms).
+pub const DEFAULT_STREAM_STALL_TIMEOUT_MS: u64 = 360_000;
+
+/// Default SSE time to first chunk (TTFT) timeout in milliseconds (200s = 200,000ms).
+pub const DEFAULT_STREAM_FIRST_CHUNK_TIMEOUT_MS: u64 = 200_000;
+
+/// Configuration for SSE stream timeouts protecting upstream chunk streaming loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamTimeoutConfig {
+    /// Maximum duration allowed before the first chunk must be received (TTFT).
+    pub first_chunk_timeout: Duration,
+    /// Maximum duration allowed between consecutive chunks once streaming has begun.
+    pub stall_timeout: Duration,
+}
+
+impl Default for StreamTimeoutConfig {
+    fn default() -> Self {
+        Self {
+            first_chunk_timeout: Duration::from_millis(DEFAULT_STREAM_FIRST_CHUNK_TIMEOUT_MS),
+            stall_timeout: Duration::from_millis(DEFAULT_STREAM_STALL_TIMEOUT_MS),
+        }
+    }
+}
+
+impl StreamTimeoutConfig {
+    pub fn new(first_chunk_timeout: Duration, stall_timeout: Duration) -> Self {
+        Self {
+            first_chunk_timeout,
+            stall_timeout,
+        }
+    }
+
+    pub fn from_config(config: &StreamingConfig) -> Self {
+        Self {
+            first_chunk_timeout: Duration::from_millis(config.stream_first_chunk_timeout_ms),
+            stall_timeout: Duration::from_millis(config.stream_stall_timeout_ms),
+        }
+    }
+
+    pub fn load_from<F: Fn(&str) -> Option<String>>(lookup: F) -> Self {
+        let config = StreamingConfig::load_from(lookup);
+        Self::from_config(&config)
+    }
+
+    pub fn from_env() -> Self {
+        let config = StreamingConfig::load();
+        Self::from_config(&config)
+    }
+}
+
+impl From<&StreamingConfig> for StreamTimeoutConfig {
+    fn from(cfg: &StreamingConfig) -> Self {
+        Self::from_config(cfg)
+    }
+}
+
+impl From<StreamingConfig> for StreamTimeoutConfig {
+    fn from(cfg: StreamingConfig) -> Self {
+        Self::from_config(&cfg)
+    }
+}
+
+/// Helper to build a standard OpenAI-compatible SSE error event.
+pub fn create_timeout_error_event(message: &str, code: &str) -> Event {
+    Event::default().event("error").data(
+        serde_json::json!({
+            "error": {
+                "message": message,
+                "type": "timeout_error",
+                "code": code
+            }
+        })
+        .to_string(),
+    )
+}
+
+/// Helper to build a Claude-compatible SSE error event.
+pub fn create_claude_timeout_error_event(message: &str) -> Event {
+    Event::default().event("error").data(
+        serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "timeout_error",
+                "message": message
+            }
+        })
+        .to_string(),
+    )
+}
+
+/// Helper to build standard SSE stream termination close frame.
+pub fn create_close_frame() -> Event {
+    Event::default().data("[DONE]")
+}
 
 // ============================================================================
 // SSE Parser
@@ -128,8 +228,25 @@ fn parse_single_event(block: &str) -> Option<ServerSentEvent> {
 
 /// Pass-through streamer for OpenAI-compatible providers.
 /// Preserves chunks as raw SSE data payloads without JSON serialization overhead.
+/// Automatically applies timeout protection loaded from environment variables
+/// (`STREAM_STALL_TIMEOUT_MS` and `STREAM_FIRST_CHUNK_TIMEOUT_MS`).
 pub fn passthrough_sse_stream<S, E>(
     byte_stream: S,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
+where
+    S: Stream<Item = Result<axum::body::Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    passthrough_sse_stream_with_timeout(byte_stream, StreamTimeoutConfig::from_env())
+}
+
+/// Pass-through streamer for OpenAI-compatible providers with explicit timeout configuration.
+/// Uses `tokio::time::timeout` on the upstream chunk stream. If a timeout or stall occurs,
+/// cleanly terminates the stream with an SSE error frame and `[DONE]` close frame rather
+/// than hanging the client socket.
+pub fn passthrough_sse_stream_with_timeout<S, E>(
+    byte_stream: S,
+    timeout_config: StreamTimeoutConfig,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
 where
     S: Stream<Item = Result<axum::body::Bytes, E>> + Send + 'static,
@@ -138,8 +255,61 @@ where
     let mapped = stream! {
         let mut pinned = Box::pin(byte_stream);
         let mut parser = SseParser::new();
+        let mut is_first_chunk = true;
+        let mut timed_out = false;
 
-        while let Some(chunk_res) = pinned.next().await {
+        loop {
+            let timeout_duration = if is_first_chunk {
+                timeout_config.first_chunk_timeout
+            } else {
+                timeout_config.stall_timeout
+            };
+
+            let next_chunk = if timeout_duration.is_zero() {
+                Ok(pinned.next().await)
+            } else {
+                tokio::time::timeout(timeout_duration, pinned.next()).await
+            };
+
+            let chunk_res = match next_chunk {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_elapsed) => {
+                    let (code, msg) = if is_first_chunk {
+                        tracing::warn!(
+                            "Stream timed out waiting for first chunk after {}ms (STREAM_FIRST_CHUNK_TIMEOUT_MS)",
+                            timeout_config.first_chunk_timeout.as_millis()
+                        );
+                        (
+                            "stream_first_chunk_timeout",
+                            format!(
+                                "Stream timed out waiting for first chunk after {}ms",
+                                timeout_config.first_chunk_timeout.as_millis()
+                            ),
+                        )
+                    } else {
+                        tracing::warn!(
+                            "Stream stalled: no chunks received for {}ms (STREAM_STALL_TIMEOUT_MS)",
+                            timeout_config.stall_timeout.as_millis()
+                        );
+                        (
+                            "stream_stall_timeout",
+                            format!(
+                                "Stream stalled: no chunks received for {}ms",
+                                timeout_config.stall_timeout.as_millis()
+                            ),
+                        )
+                    };
+
+                    yield Ok(create_timeout_error_event(&msg, code));
+                    yield Ok(create_close_frame());
+                    timed_out = true;
+                    break;
+                }
+            };
+
+            is_first_chunk = false;
+
             match chunk_res {
                 Ok(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
@@ -157,17 +327,25 @@ where
                 }
                 Err(err) => {
                     tracing::error!("Error reading passthrough SSE stream: {}", err);
+                    yield Ok(create_timeout_error_event(
+                        &format!("Upstream stream error: {}", err),
+                        "upstream_stream_error",
+                    ));
+                    yield Ok(create_close_frame());
+                    timed_out = true;
                     break;
                 }
             }
         }
 
-        if let Some(remaining) = parser.flush() {
-            let mut event = Event::default().data(remaining.data);
-            if let Some(name) = remaining.event {
-                event = event.event(name);
+        if !timed_out {
+            if let Some(remaining) = parser.flush() {
+                let mut event = Event::default().data(remaining.data);
+                if let Some(name) = remaining.event {
+                    event = event.event(name);
+                }
+                yield Ok(event);
             }
-            yield Ok(event);
         }
     };
 
@@ -411,8 +589,26 @@ pub fn translate_claude_event_to_openai(
 }
 
 /// Translates an incoming Claude SSE byte stream to an OpenAI format SSE stream.
+/// Automatically applies timeout protection loaded from environment variables
+/// (`STREAM_STALL_TIMEOUT_MS` and `STREAM_FIRST_CHUNK_TIMEOUT_MS`).
 pub fn claude_to_openai_sse_stream<S, E>(
     byte_stream: S,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
+where
+    S: Stream<Item = Result<axum::body::Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    claude_to_openai_sse_stream_with_timeout(byte_stream, StreamTimeoutConfig::from_env())
+}
+
+/// Translates an incoming Claude SSE byte stream to an OpenAI format SSE stream
+/// with explicit timeout configuration.
+/// Uses `tokio::time::timeout` on the upstream chunk stream. If a timeout or stall occurs,
+/// cleanly terminates the stream with an SSE error frame and `[DONE]` close frame rather
+/// than hanging the client socket.
+pub fn claude_to_openai_sse_stream_with_timeout<S, E>(
+    byte_stream: S,
+    timeout_config: StreamTimeoutConfig,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
 where
     S: Stream<Item = Result<axum::body::Bytes, E>> + Send + 'static,
@@ -422,8 +618,61 @@ where
         let mut pinned = Box::pin(byte_stream);
         let mut parser = SseParser::new();
         let mut state = ClaudeToOpenAiStreamState::default();
+        let mut is_first_chunk = true;
+        let mut timed_out = false;
 
-        while let Some(chunk_res) = pinned.next().await {
+        loop {
+            let timeout_duration = if is_first_chunk {
+                timeout_config.first_chunk_timeout
+            } else {
+                timeout_config.stall_timeout
+            };
+
+            let next_chunk = if timeout_duration.is_zero() {
+                Ok(pinned.next().await)
+            } else {
+                tokio::time::timeout(timeout_duration, pinned.next()).await
+            };
+
+            let chunk_res = match next_chunk {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_elapsed) => {
+                    let (code, msg) = if is_first_chunk {
+                        tracing::warn!(
+                            "Claude SSE stream timed out waiting for first chunk after {}ms (STREAM_FIRST_CHUNK_TIMEOUT_MS)",
+                            timeout_config.first_chunk_timeout.as_millis()
+                        );
+                        (
+                            "stream_first_chunk_timeout",
+                            format!(
+                                "Stream timed out waiting for first chunk after {}ms",
+                                timeout_config.first_chunk_timeout.as_millis()
+                            ),
+                        )
+                    } else {
+                        tracing::warn!(
+                            "Claude SSE stream stalled: no chunks received for {}ms (STREAM_STALL_TIMEOUT_MS)",
+                            timeout_config.stall_timeout.as_millis()
+                        );
+                        (
+                            "stream_stall_timeout",
+                            format!(
+                                "Stream stalled: no chunks received for {}ms",
+                                timeout_config.stall_timeout.as_millis()
+                            ),
+                        )
+                    };
+
+                    yield Ok(create_timeout_error_event(&msg, code));
+                    yield Ok(create_close_frame());
+                    timed_out = true;
+                    break;
+                }
+            };
+
+            is_first_chunk = false;
+
             match chunk_res {
                 Ok(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
@@ -437,7 +686,22 @@ where
                 }
                 Err(err) => {
                     tracing::error!("Error reading Claude SSE stream: {}", err);
+                    yield Ok(create_timeout_error_event(
+                        &format!("Upstream Claude stream error: {}", err),
+                        "upstream_stream_error",
+                    ));
+                    yield Ok(create_close_frame());
+                    timed_out = true;
                     break;
+                }
+            }
+        }
+
+        if !timed_out {
+            if let Some(remaining) = parser.flush() {
+                let openai_events = translate_claude_event_to_openai(&remaining, &mut state);
+                for oe in openai_events {
+                    yield Ok(oe);
                 }
             }
         }
@@ -591,9 +855,361 @@ pub fn translate_openai_chunk_to_claude(
     out
 }
 
+/// Translates an incoming OpenAI SSE byte stream to a Claude format SSE stream.
+/// Automatically applies timeout protection loaded from environment variables
+/// (`STREAM_STALL_TIMEOUT_MS` and `STREAM_FIRST_CHUNK_TIMEOUT_MS`).
+pub fn openai_to_claude_sse_stream<S, E>(
+    byte_stream: S,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
+where
+    S: Stream<Item = Result<axum::body::Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    openai_to_claude_sse_stream_with_timeout(byte_stream, StreamTimeoutConfig::from_env())
+}
+
+/// Translates an incoming OpenAI SSE byte stream to a Claude format SSE stream
+/// with explicit timeout configuration.
+/// Uses `tokio::time::timeout` on the upstream chunk stream. If a timeout or stall occurs,
+/// cleanly terminates the stream with a Claude-format SSE error frame rather than hanging
+/// the client socket.
+pub fn openai_to_claude_sse_stream_with_timeout<S, E>(
+    byte_stream: S,
+    timeout_config: StreamTimeoutConfig,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
+where
+    S: Stream<Item = Result<axum::body::Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    let mapped = stream! {
+        let mut pinned = Box::pin(byte_stream);
+        let mut parser = SseParser::new();
+        let mut state = OpenAiToClaudeStreamState::default();
+        let mut is_first_chunk = true;
+        let mut timed_out = false;
+
+        loop {
+            let timeout_duration = if is_first_chunk {
+                timeout_config.first_chunk_timeout
+            } else {
+                timeout_config.stall_timeout
+            };
+
+            let next_chunk = if timeout_duration.is_zero() {
+                Ok(pinned.next().await)
+            } else {
+                tokio::time::timeout(timeout_duration, pinned.next()).await
+            };
+
+            let chunk_res = match next_chunk {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_elapsed) => {
+                    let msg = if is_first_chunk {
+                        tracing::warn!(
+                            "OpenAI to Claude SSE stream timed out waiting for first chunk after {}ms",
+                            timeout_config.first_chunk_timeout.as_millis()
+                        );
+                        format!(
+                            "Stream timed out waiting for first chunk after {}ms",
+                            timeout_config.first_chunk_timeout.as_millis()
+                        )
+                    } else {
+                        tracing::warn!(
+                            "OpenAI to Claude SSE stream stalled: no chunks received for {}ms",
+                            timeout_config.stall_timeout.as_millis()
+                        );
+                        format!(
+                            "Stream stalled: no chunks received for {}ms",
+                            timeout_config.stall_timeout.as_millis()
+                        )
+                    };
+
+                    yield Ok(create_claude_timeout_error_event(&msg));
+                    timed_out = true;
+                    break;
+                }
+            };
+
+            is_first_chunk = false;
+
+            match chunk_res {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    let events = parser.push(&text);
+                    for ev in events {
+                        let claude_events = translate_openai_chunk_to_claude(&ev.data, &mut state);
+                        for ce in claude_events {
+                            yield Ok(ce);
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::error!("Error reading OpenAI SSE stream: {}", err);
+                    yield Ok(create_claude_timeout_error_event(&format!(
+                        "Upstream stream error: {}",
+                        err
+                    )));
+                    timed_out = true;
+                    break;
+                }
+            }
+        }
+
+        if !timed_out {
+            if let Some(remaining) = parser.flush() {
+                let claude_events = translate_openai_chunk_to_claude(&remaining.data, &mut state);
+                for ce in claude_events {
+                    yield Ok(ce);
+                }
+            }
+        }
+    };
+
+    Sse::new(mapped).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_stream_timeout_config_defaults() {
+        assert_eq!(DEFAULT_STREAM_STALL_TIMEOUT_MS, 360_000);
+        assert_eq!(DEFAULT_STREAM_FIRST_CHUNK_TIMEOUT_MS, 200_000);
+
+        let cfg = StreamTimeoutConfig::default();
+        assert_eq!(cfg.stall_timeout, Duration::from_millis(360_000));
+        assert_eq!(cfg.first_chunk_timeout, Duration::from_millis(200_000));
+    }
+
+    #[test]
+    fn test_stream_timeout_config_from_streaming_config() {
+        let sc = StreamingConfig {
+            stream_stall_timeout_ms: 123_456,
+            stream_first_chunk_timeout_ms: 65_432,
+            ..Default::default()
+        };
+        let cfg = StreamTimeoutConfig::from_config(&sc);
+        assert_eq!(cfg.stall_timeout, Duration::from_millis(123_456));
+        assert_eq!(cfg.first_chunk_timeout, Duration::from_millis(65_432));
+
+        let cfg2: StreamTimeoutConfig = sc.into();
+        assert_eq!(cfg2.stall_timeout, Duration::from_millis(123_456));
+        assert_eq!(cfg2.first_chunk_timeout, Duration::from_millis(65_432));
+    }
+
+    #[test]
+    fn test_stream_timeout_config_load_from_env_mapping() {
+        let mut env_map = HashMap::new();
+        env_map.insert("STREAM_STALL_TIMEOUT_MS".to_string(), "180000".to_string());
+        env_map.insert("STREAM_FIRST_CHUNK_TIMEOUT_MS".to_string(), "90000".to_string());
+
+        let cfg = StreamTimeoutConfig::load_from(|k| env_map.get(k).cloned());
+        assert_eq!(cfg.stall_timeout, Duration::from_millis(180_000));
+        assert_eq!(cfg.first_chunk_timeout, Duration::from_millis(90_000));
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_first_chunk_timeout() {
+        use axum::response::IntoResponse;
+
+        // Byte stream that delays 80ms before sending the first chunk
+        let byte_stream = stream! {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: {\"id\":\"chunk-1\"}\n\n"));
+        };
+
+        let timeout_cfg = StreamTimeoutConfig::new(
+            Duration::from_millis(15),  // 15ms first chunk timeout
+            Duration::from_millis(300), // 300ms stall timeout
+        );
+
+        let sse_res = passthrough_sse_stream_with_timeout(byte_stream, timeout_cfg);
+        let resp = sse_res.into_response();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("Body read should succeed");
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        assert!(body_str.contains("event: error"), "Should contain error event: {}", body_str);
+        assert!(body_str.contains("stream_first_chunk_timeout"), "Should contain first chunk timeout code: {}", body_str);
+        assert!(body_str.contains("data: [DONE]"), "Should terminate with [DONE] close frame: {}", body_str);
+        assert!(!body_str.contains("chunk-1"), "Delayed chunk should not have been emitted");
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_stall_timeout() {
+        use axum::response::IntoResponse;
+
+        // Byte stream that yields chunk 1 immediately, then stalls 80ms before chunk 2
+        let byte_stream = stream! {
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: {\"id\":\"chunk-1\"}\n\n"));
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: {\"id\":\"chunk-2\"}\n\n"));
+        };
+
+        let timeout_cfg = StreamTimeoutConfig::new(
+            Duration::from_millis(300), // generous first chunk timeout
+            Duration::from_millis(15),  // 15ms stall timeout
+        );
+
+        let sse_res = passthrough_sse_stream_with_timeout(byte_stream, timeout_cfg);
+        let resp = sse_res.into_response();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("Body read should succeed");
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        assert!(body_str.contains("{\"id\":\"chunk-1\"}"), "First chunk should be delivered: {}", body_str);
+        assert!(body_str.contains("event: error"), "Should contain error event: {}", body_str);
+        assert!(body_str.contains("stream_stall_timeout"), "Should contain stall timeout code: {}", body_str);
+        assert!(body_str.contains("data: [DONE]"), "Should terminate with [DONE] close frame: {}", body_str);
+        assert!(!body_str.contains("chunk-2"), "Second stalled chunk should not have been emitted");
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_normal_completion() {
+        use axum::response::IntoResponse;
+
+        let byte_stream = stream! {
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: {\"id\":\"chunk-1\"}\n\n"));
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: {\"id\":\"chunk-2\"}\n\n"));
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: [DONE]\n\n"));
+        };
+
+        let timeout_cfg = StreamTimeoutConfig::new(
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        );
+
+        let sse_res = passthrough_sse_stream_with_timeout(byte_stream, timeout_cfg);
+        let resp = sse_res.into_response();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("Body read should succeed");
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        assert!(body_str.contains("chunk-1"));
+        assert!(body_str.contains("chunk-2"));
+        assert!(body_str.contains("[DONE]"));
+        assert!(!body_str.contains("event: error"), "No error event should occur on normal stream");
+    }
+
+    #[tokio::test]
+    async fn test_claude_to_openai_first_chunk_timeout() {
+        use axum::response::IntoResponse;
+
+        let byte_stream = stream! {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"event: message_start\ndata: {}\n\n"));
+        };
+
+        let timeout_cfg = StreamTimeoutConfig::new(
+            Duration::from_millis(15),
+            Duration::from_millis(200),
+        );
+
+        let sse_res = claude_to_openai_sse_stream_with_timeout(byte_stream, timeout_cfg);
+        let resp = sse_res.into_response();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("Body read should succeed");
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        assert!(body_str.contains("event: error"));
+        assert!(body_str.contains("stream_first_chunk_timeout"));
+        assert!(body_str.contains("data: [DONE]"));
+    }
+
+    #[tokio::test]
+    async fn test_claude_to_openai_stall_timeout() {
+        use axum::response::IntoResponse;
+
+        let claude_chunk = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_timeout\",\"model\":\"claude\"}}\n\n";
+        let byte_stream = stream! {
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(claude_chunk));
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"event: message_stop\ndata: {}\n\n"));
+        };
+
+        let timeout_cfg = StreamTimeoutConfig::new(
+            Duration::from_millis(200),
+            Duration::from_millis(15),
+        );
+
+        let sse_res = claude_to_openai_sse_stream_with_timeout(byte_stream, timeout_cfg);
+        let resp = sse_res.into_response();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("Body read should succeed");
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        assert!(body_str.contains("chatcmpl-msg_timeout"), "Initial translated chunk should be received: {}", body_str);
+        assert!(body_str.contains("event: error"), "Should contain error event: {}", body_str);
+        assert!(body_str.contains("stream_stall_timeout"), "Should contain stall timeout: {}", body_str);
+        assert!(body_str.contains("data: [DONE]"), "Should contain [DONE]: {}", body_str);
+    }
+
+    #[tokio::test]
+    async fn test_openai_to_claude_stall_timeout() {
+        use axum::response::IntoResponse;
+
+        let openai_chunk = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1000,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}\n\n";
+        let byte_stream = stream! {
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(openai_chunk));
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: [DONE]\n\n"));
+        };
+
+        let timeout_cfg = StreamTimeoutConfig::new(
+            Duration::from_millis(200),
+            Duration::from_millis(15),
+        );
+
+        let sse_res = openai_to_claude_sse_stream_with_timeout(byte_stream, timeout_cfg);
+        let resp = sse_res.into_response();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("Body read should succeed");
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        assert!(body_str.contains("content_block_delta"), "Should contain translated delta: {}", body_str);
+        assert!(body_str.contains("event: error"), "Should contain error event: {}", body_str);
+        assert!(body_str.contains("Stream stalled"), "Should report stall message: {}", body_str);
+    }
+
+    #[tokio::test]
+    async fn test_zero_timeout_disables_stall_detection() {
+        use axum::response::IntoResponse;
+
+        let byte_stream = stream! {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: {\"msg\":\"ok\"}\n\n"));
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: [DONE]\n\n"));
+        };
+
+        let timeout_cfg = StreamTimeoutConfig::new(
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+
+        let sse_res = passthrough_sse_stream_with_timeout(byte_stream, timeout_cfg);
+        let resp = sse_res.into_response();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("Body read should succeed");
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        assert!(body_str.contains("{\"msg\":\"ok\"}"));
+        assert!(!body_str.contains("event: error"));
+    }
 
     #[test]
     fn test_sse_parser_multiple_events() {
