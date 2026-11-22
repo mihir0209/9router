@@ -1,17 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_stream::stream;
 use axum::{
     extract::State,
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json, Router,
 };
+use futures_util::{Stream, StreamExt};
 use serde_json::json;
 
 use crate::auth;
 use crate::config::Config;
-use crate::db::{ApiKey, ConnectionData, Database, ProviderConnection, UsageRecord};
+use crate::db::{ApiKey, ConnectionData, Database, ProviderConnection, RequestDetail, UsageRecord};
 use crate::proxy::{self, ProxyService, UpstreamConnection};
 use crate::sse;
 use crate::translator::{self, ChatCompletionRequest, ClaudeMessageRequest};
@@ -379,6 +381,255 @@ fn resolve_target_for_candidate(
 }
 
 // ============================================================================
+// Write-Behind Usage & Request Logging Helpers
+// ============================================================================
+
+pub fn resolve_should_record_request_details(config: &Config) -> bool {
+    if let Ok(val) = std::env::var("ENABLE_REQUEST_LOGS") {
+        let v = val.trim().to_lowercase();
+        if v == "0" || v == "false" || v == "no" || v == "off" {
+            return false;
+        }
+        if v == "1" || v == "true" || v == "yes" || v == "on" {
+            return true;
+        }
+    }
+    if let Ok(val) = std::env::var("LOG_USAGE_VERBOSE") {
+        let v = val.trim().to_lowercase();
+        if v == "1" || v == "true" || v == "yes" || v == "on" {
+            return true;
+        }
+    }
+    if config.observability.log_usage_verbose {
+        return true;
+    }
+    config.observability.enable_request_logs
+}
+
+pub fn resolve_usage_buffer_tokens(config: &Config) -> u64 {
+    if let Ok(val) = std::env::var("USAGE_BUFFER_TOKENS") {
+        if let Ok(n) = val.trim().parse::<u64>() {
+            return n;
+        }
+    }
+    config.routing.usage_buffer_tokens
+}
+
+pub fn record_completion_usage_and_details(
+    state: &AppState,
+    api_key: &ApiKey,
+    endpoint: &str,
+    provider: Option<&str>,
+    model: &str,
+    connection_id: Option<&str>,
+    status: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cached_tokens: i64,
+    latency_ms: u64,
+    request_val: Option<&serde_json::Value>,
+    response_val: Option<&serde_json::Value>,
+) {
+    let buffer_tokens = resolve_usage_buffer_tokens(&state.config) as i64;
+    let reported_completion_tokens = completion_tokens + buffer_tokens;
+    let total_tokens = prompt_tokens + reported_completion_tokens;
+
+    let tokens_json = serde_json::json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": reported_completion_tokens,
+        "total_tokens": total_tokens,
+        "cached_tokens": cached_tokens,
+        "buffer_tokens": buffer_tokens,
+    });
+
+    if state.config.observability.log_usage_verbose
+        || std::env::var("LOG_USAGE_VERBOSE").map(|v| v == "1" || v == "true").unwrap_or(false)
+    {
+        tracing::info!(
+            "[USAGE_VERBOSE] {} | provider={:?} model={} in={} out={} (+buffer={}) latency={}ms",
+            endpoint,
+            provider,
+            model,
+            prompt_tokens,
+            reported_completion_tokens,
+            buffer_tokens,
+            latency_ms
+        );
+    }
+
+    state.db.queue_usage(UsageRecord {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        provider: provider.map(str::to_string),
+        model: Some(model.to_string()),
+        connection_id: connection_id.map(str::to_string),
+        api_key: Some(api_key.key.clone()),
+        api_key_id: Some(api_key.id.clone()),
+        endpoint: Some(endpoint.to_string()),
+        prompt_tokens,
+        completion_tokens: reported_completion_tokens,
+        cached_tokens,
+        cost: 0.0,
+        status: status.to_string(),
+        tokens: Some(tokens_json.to_string()),
+        meta: None,
+    });
+
+    if resolve_should_record_request_details(&state.config) {
+        state.db.record_request_detail(RequestDetail {
+            id: format!("req_{}_{}", chrono::Utc::now().timestamp_micros(), &api_key.id),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            provider: provider.map(str::to_string),
+            model: Some(model.to_string()),
+            connection_id: connection_id.map(str::to_string),
+            status: Some(status.to_string()),
+            endpoint: Some(endpoint.to_string()),
+            latency_ms: Some(latency_ms),
+            tokens: Some(tokens_json),
+            request: request_val.cloned(),
+            response: response_val.cloned(),
+            meta: None,
+            data: None,
+        });
+    }
+}
+
+struct StreamUsageDropGuard {
+    recorded: bool,
+    state: AppState,
+    api_key: ApiKey,
+    endpoint: String,
+    provider: Option<String>,
+    model: String,
+    connection_id: Option<String>,
+    request_val: Option<serde_json::Value>,
+    start_time: std::time::Instant,
+}
+
+impl StreamUsageDropGuard {
+    fn disarm(&mut self) {
+        self.recorded = true;
+    }
+}
+
+impl Drop for StreamUsageDropGuard {
+    fn drop(&mut self) {
+        if !self.recorded {
+            self.recorded = true;
+            let latency_ms = self.start_time.elapsed().as_millis() as u64;
+            record_completion_usage_and_details(
+                &self.state,
+                &self.api_key,
+                &self.endpoint,
+                self.provider.as_deref(),
+                &self.model,
+                self.connection_id.as_deref(),
+                "interrupted",
+                0,
+                0,
+                0,
+                latency_ms,
+                self.request_val.as_ref(),
+                Some(&serde_json::json!({ "streamed": true, "interrupted": true })),
+            );
+        }
+    }
+}
+
+pub fn wrap_byte_stream_with_usage<S, E>(
+    byte_stream: S,
+    state: AppState,
+    api_key: ApiKey,
+    endpoint: String,
+    provider: Option<String>,
+    model: String,
+    connection_id: Option<String>,
+    request_val: Option<serde_json::Value>,
+    start_time: std::time::Instant,
+) -> impl Stream<Item = Result<axum::body::Bytes, E>> + Send + 'static
+where
+    S: Stream<Item = Result<axum::body::Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    stream! {
+        let mut pinned = Box::pin(byte_stream);
+        let mut prompt_tokens: i64 = 0;
+        let mut completion_tokens: i64 = 0;
+        let mut cached_tokens: i64 = 0;
+        let mut chunk_count: u64 = 0;
+        let mut is_error = false;
+        let mut guard = StreamUsageDropGuard {
+            recorded: false,
+            state: state.clone(),
+            api_key: api_key.clone(),
+            endpoint: endpoint.clone(),
+            provider: provider.clone(),
+            model: model.clone(),
+            connection_id: connection_id.clone(),
+            request_val: request_val.clone(),
+            start_time,
+        };
+
+        while let Some(chunk_res) = pinned.next().await {
+            match chunk_res {
+                Ok(bytes) => {
+                    chunk_count += 1;
+                    if let Ok(text) = std::str::from_utf8(&bytes) {
+                        for line in text.lines() {
+                            let line = line.trim();
+                            if let Some(data) = line.strip_prefix("data:") {
+                                let data = data.trim();
+                                if !data.is_empty() && data != "[DONE]" {
+                                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                                        if let Some(usage) = val.get("usage") {
+                                            if let Some(pt) = usage.get("prompt_tokens").and_then(|v| v.as_i64()).or_else(|| usage.get("input_tokens").and_then(|v| v.as_i64())) {
+                                                prompt_tokens = pt;
+                                            }
+                                            if let Some(ct) = usage.get("completion_tokens").and_then(|v| v.as_i64()).or_else(|| usage.get("output_tokens").and_then(|v| v.as_i64())) {
+                                                completion_tokens = ct;
+                                            }
+                                            if let Some(c) = usage.get("cached_tokens").and_then(|v| v.as_i64()) {
+                                                cached_tokens = c;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    yield Ok(bytes);
+                }
+                Err(err) => {
+                    is_error = true;
+                    yield Err(err);
+                    break;
+                }
+            }
+        }
+
+        // Natural completion
+        guard.disarm();
+        let status = if is_error { "error" } else { "ok" };
+        let latency_ms = start_time.elapsed().as_millis() as u64;
+
+        record_completion_usage_and_details(
+            &state,
+            &api_key,
+            &endpoint,
+            provider.as_deref(),
+            &model,
+            connection_id.as_deref(),
+            status,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            latency_ms,
+            request_val.as_ref(),
+            Some(&serde_json::json!({ "streamed": true, "chunks": chunk_count })),
+        );
+    }
+}
+
+// ============================================================================
 // Chat Completions Handler
 // ============================================================================
 
@@ -391,6 +642,7 @@ async fn execute_candidate_chat(
     provider_nodes: &[crate::db::ProviderNode],
     all_connections: &[crate::db::ProviderConnection],
 ) -> Result<Response, (StatusCode, String)> {
+    let start_time = std::time::Instant::now();
     let (conn, target_model) = resolve_target_for_candidate(candidate, provider_nodes, all_connections);
     tracing::info!("Candidate '{}' -> provider='{}', model='{}', base_url={:?}", 
         candidate, conn.provider, target_model, conn.base_url);
@@ -403,15 +655,22 @@ async fn execute_candidate_chat(
     if let Some(cached) = state.token_cache.get(&cand_cache_key) {
         state.circuit_breaker.record_success(&conn.provider);
         state.circuit_breaker.record_success(candidate);
-        state.db.queue_usage(UsageRecord {
-            provider: Some(conn.provider.clone()),
-            model: Some(target_model.clone()),
-            api_key: Some(api_key.key.clone()),
-            api_key_id: Some(api_key.id.clone()),
-            endpoint: Some("/v1/chat/completions".to_string()),
-            status: "ok".to_string(),
-            ..Default::default()
-        });
+        let req_val = serde_json::to_value(&clean_req).unwrap_or_default();
+        record_completion_usage_and_details(
+            state,
+            api_key,
+            "/v1/chat/completions",
+            Some(&conn.provider),
+            &target_model,
+            None,
+            "ok",
+            0,
+            0,
+            0,
+            start_time.elapsed().as_millis() as u64,
+            Some(&req_val),
+            Some(&serde_json::json!({ "cached": true })),
+        );
         return Ok(cached.to_response(is_stream));
     }
 
@@ -426,20 +685,22 @@ async fn execute_candidate_chat(
                 Ok(upstream_res) if upstream_res.status().is_success() => {
                     state.circuit_breaker.record_success(&conn.provider);
                     state.circuit_breaker.record_success(candidate);
-                    let sse_res = crate::custom_adapter::custom_sse_to_openai_stream(
+                    let stream = wrap_byte_stream_with_usage(
                         upstream_res.bytes_stream(),
+                        state.clone(),
+                        api_key.clone(),
+                        "/v1/chat/completions".to_string(),
+                        Some(conn.provider.clone()),
+                        target_model.clone(),
+                        None,
+                        Some(req_val),
+                        start_time,
+                    );
+                    let sse_res = crate::custom_adapter::custom_sse_to_openai_stream(
+                        stream,
                         mapping.clone(),
                         target_model.clone(),
                     );
-                    state.db.queue_usage(UsageRecord {
-                        provider: Some(conn.provider),
-                        model: Some(target_model),
-                        api_key: Some(api_key.key.clone()),
-                        api_key_id: Some(api_key.id.clone()),
-                        endpoint: Some("/v1/chat/completions".to_string()),
-                        status: "ok".to_string(),
-                        ..Default::default()
-                    });
                     return Ok(sse_res.into_response());
                 }
                 Ok(upstream_res) => {
@@ -465,18 +726,38 @@ async fn execute_candidate_chat(
                         let body_bytes = upstream_res.bytes().await.unwrap_or_default();
                         if let Ok(raw_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                             match crate::custom_adapter::transform_custom_to_openai_response(&raw_json, mapping, &target_model) {
-                                Ok(openai_resp) => {
+                                Ok(mut openai_resp) => {
                                     state.circuit_breaker.record_success(&conn.provider);
                                     state.circuit_breaker.record_success(candidate);
-                                    state.db.queue_usage(UsageRecord {
-                                        provider: Some(conn.provider),
-                                        model: Some(target_model.clone()),
-                                        api_key: Some(api_key.key.clone()),
-                                        api_key_id: Some(api_key.id.clone()),
-                                        endpoint: Some("/v1/chat/completions".to_string()),
-                                        status: "ok".to_string(),
-                                        ..Default::default()
-                                    });
+                                    let mut prompt_tokens = 0i64;
+                                    let mut completion_tokens = 0i64;
+                                    let buffer = resolve_usage_buffer_tokens(&state.config);
+
+                                    if let Some(ref mut u) = openai_resp.usage {
+                                        prompt_tokens = u.prompt_tokens as i64;
+                                        completion_tokens = u.completion_tokens as i64;
+                                        if buffer > 0 {
+                                            u.completion_tokens += buffer as u32;
+                                            u.total_tokens = u.prompt_tokens + u.completion_tokens;
+                                        }
+                                    }
+
+                                    record_completion_usage_and_details(
+                                        state,
+                                        api_key,
+                                        "/v1/chat/completions",
+                                        Some(&conn.provider),
+                                        &target_model,
+                                        None,
+                                        "ok",
+                                        prompt_tokens,
+                                        completion_tokens,
+                                        0,
+                                        start_time.elapsed().as_millis() as u64,
+                                        Some(&serde_json::to_value(&clean_req).unwrap_or_default()),
+                                        Some(&serde_json::to_value(&openai_resp).unwrap_or_default()),
+                                    );
+
                                     if is_stream {
                                         return Ok(crate::custom_adapter::synthesize_openai_stream(openai_resp, target_model).into_response());
                                     }
@@ -514,38 +795,64 @@ async fn execute_candidate_chat(
                     state.circuit_breaker.record_success(&conn.provider);
                     state.circuit_breaker.record_success(candidate);
                     if is_stream {
-                        let sse_res = sse::claude_to_openai_sse_stream(upstream_res.bytes_stream());
-                        state.db.queue_usage(UsageRecord {
-                            provider: Some(conn.provider),
-                            model: Some(target_model),
-                            api_key: Some(api_key.key.clone()),
-                            api_key_id: Some(api_key.id.clone()),
-                            endpoint: Some("/v1/chat/completions".to_string()),
-                            status: "ok".to_string(),
-                            ..Default::default()
-                        });
+                        let stream = wrap_byte_stream_with_usage(
+                            upstream_res.bytes_stream(),
+                            state.clone(),
+                            api_key.clone(),
+                            "/v1/chat/completions".to_string(),
+                            Some(conn.provider.clone()),
+                            target_model.clone(),
+                            None,
+                            Some(serde_json::to_value(&clean_req).unwrap_or_default()),
+                            start_time,
+                        );
+                        let sse_res = sse::claude_to_openai_sse_stream(stream);
                         return Ok(sse_res.into_response());
                     }
 
                     let body_bytes = upstream_res.bytes().await.unwrap_or_default();
+                    let mut prompt_tokens = 0i64;
+                    let mut completion_tokens = 0i64;
+                    let mut cached_tokens = 0i64;
+                    let buffer = resolve_usage_buffer_tokens(&state.config);
+
                     let final_body = if let Ok(claude_resp) =
                         serde_json::from_slice::<translator::ClaudeMessageResponse>(&body_bytes)
                     {
-                        let openai_resp = translator::claude_to_openai_response(&claude_resp);
+                        prompt_tokens = claude_resp.usage.input_tokens as i64;
+                        completion_tokens = claude_resp.usage.output_tokens as i64;
+                        cached_tokens = claude_resp.usage.cache_read_input_tokens.unwrap_or(0) as i64;
+
+                        let mut openai_resp = translator::claude_to_openai_response(&claude_resp);
+                        if let Some(ref mut u) = openai_resp.usage {
+                            if buffer > 0 {
+                                u.completion_tokens += buffer as u32;
+                                u.total_tokens = u.prompt_tokens + u.completion_tokens;
+                            }
+                        }
                         serde_json::to_vec(&openai_resp).unwrap_or(body_bytes.to_vec())
                     } else {
                         body_bytes.to_vec()
                     };
 
-                    state.db.queue_usage(UsageRecord {
-                        provider: Some(conn.provider),
-                        model: Some(target_model),
-                        api_key: Some(api_key.key.clone()),
-                        api_key_id: Some(api_key.id.clone()),
-                        endpoint: Some("/v1/chat/completions".to_string()),
-                        status: "ok".to_string(),
-                        ..Default::default()
-                    });
+                    let resp_val: Option<serde_json::Value> = serde_json::from_slice(&final_body).ok();
+
+                    record_completion_usage_and_details(
+                        state,
+                        api_key,
+                        "/v1/chat/completions",
+                        Some(&conn.provider),
+                        &target_model,
+                        None,
+                        "ok",
+                        prompt_tokens,
+                        completion_tokens,
+                        cached_tokens,
+                        start_time.elapsed().as_millis() as u64,
+                        Some(&serde_json::to_value(&clean_req).unwrap_or_default()),
+                        resp_val.as_ref(),
+                    );
+
                     return Ok((
                         StatusCode::OK,
                         [(header::CONTENT_TYPE, "application/json")],
@@ -575,21 +882,28 @@ async fn execute_candidate_chat(
                     state.circuit_breaker.record_success(&conn.provider);
                     state.circuit_breaker.record_success(candidate);
                     if is_stream {
-                        let sse_res = sse::passthrough_sse_stream(upstream_res.bytes_stream());
-                        state.db.queue_usage(UsageRecord {
-                            provider: Some(conn.provider),
-                            model: Some(target_model),
-                            api_key: Some(api_key.key.clone()),
-                            api_key_id: Some(api_key.id.clone()),
-                            endpoint: Some("/v1/chat/completions".to_string()),
-                            status: "ok".to_string(),
-                            ..Default::default()
-                        });
+                        let stream = wrap_byte_stream_with_usage(
+                            upstream_res.bytes_stream(),
+                            state.clone(),
+                            api_key.clone(),
+                            "/v1/chat/completions".to_string(),
+                            Some(conn.provider.clone()),
+                            target_model.clone(),
+                            None,
+                            Some(serde_json::to_value(&clean_req).unwrap_or_default()),
+                            start_time,
+                        );
+                        let sse_res = sse::passthrough_sse_stream(stream);
                         return Ok(sse_res.into_response());
                     }
 
                     let body_bytes = upstream_res.bytes().await.unwrap_or_default();
-                    let final_body = if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                    let mut prompt_tokens = 0i64;
+                    let mut completion_tokens = 0i64;
+                    let mut cached_tokens = 0i64;
+                    let buffer = resolve_usage_buffer_tokens(&state.config);
+
+                    let mut final_body = if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                         if let Some(inner) = val.get("result") {
                             serde_json::to_vec(inner).unwrap_or(body_bytes.to_vec())
                         } else {
@@ -599,15 +913,44 @@ async fn execute_candidate_chat(
                         body_bytes.to_vec()
                     };
 
-                    state.db.queue_usage(UsageRecord {
-                        provider: Some(conn.provider),
-                        model: Some(target_model),
-                        api_key: Some(api_key.key.clone()),
-                        api_key_id: Some(api_key.id.clone()),
-                        endpoint: Some("/v1/chat/completions".to_string()),
-                        status: "ok".to_string(),
-                        ..Default::default()
-                    });
+                    let mut resp_val: Option<serde_json::Value> = serde_json::from_slice(&final_body).ok();
+                    if let Some(ref mut val) = resp_val {
+                        if let Some(usage) = val.get_mut("usage") {
+                            if let Some(pt) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                                prompt_tokens = pt;
+                            }
+                            if let Some(ct) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                                completion_tokens = ct;
+                            }
+                            if let Some(cr) = usage.get("cached_tokens").and_then(|v| v.as_i64()) {
+                                cached_tokens = cr;
+                            }
+                            if buffer > 0 {
+                                let reported_ct = completion_tokens + buffer as i64;
+                                usage["completion_tokens"] = json!(reported_ct);
+                                usage["total_tokens"] = json!(prompt_tokens + reported_ct);
+                                if let Ok(updated_bytes) = serde_json::to_vec(val) {
+                                    final_body = updated_bytes;
+                                }
+                            }
+                        }
+                    }
+
+                    record_completion_usage_and_details(
+                        state,
+                        api_key,
+                        "/v1/chat/completions",
+                        Some(&conn.provider),
+                        &target_model,
+                        None,
+                        "ok",
+                        prompt_tokens,
+                        completion_tokens,
+                        cached_tokens,
+                        start_time.elapsed().as_millis() as u64,
+                        Some(&serde_json::to_value(&clean_req).unwrap_or_default()),
+                        resp_val.as_ref(),
+                    );
 
                     return Ok((
                         StatusCode::OK,
@@ -638,6 +981,7 @@ pub async fn chat_completions_handler(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let start_time = std::time::Instant::now();
     let api_key = match authenticate(&headers, &state.db) {
         Ok(k) => k,
         Err(res) => return res,
@@ -687,15 +1031,22 @@ pub async fn chat_completions_handler(
     // Exact-Match Token Cache Check
     if let Some(cached) = state.token_cache.get(&cache_key) {
         tracing::info!("Cache HIT for key {}", cache_key);
-        state.db.queue_usage(UsageRecord {
-            provider: Some("cache".to_string()),
-            model: Some(req.model.clone()),
-            api_key: Some(api_key.key.clone()),
-            api_key_id: Some(api_key.id.clone()),
-            endpoint: Some("/v1/chat/completions".to_string()),
-            status: "ok".to_string(),
-            ..Default::default()
-        });
+        let req_val = serde_json::to_value(&req).unwrap_or_default();
+        record_completion_usage_and_details(
+            &state,
+            &api_key,
+            "/v1/chat/completions",
+            Some("cache"),
+            &req.model,
+            None,
+            "ok",
+            0,
+            0,
+            0,
+            start_time.elapsed().as_millis() as u64,
+            Some(&req_val),
+            Some(&serde_json::json!({ "cached": true })),
+        );
         return cached.to_response(is_stream);
     }
 
@@ -817,15 +1168,21 @@ pub async fn chat_completions_handler(
         last_error = "All candidates tripped or circuit breaker is open".to_string();
     }
 
-    state.db.queue_usage(UsageRecord {
-        provider: None,
-        model: Some(req.model.clone()),
-        api_key: Some(api_key.key),
-        api_key_id: Some(api_key.id),
-        endpoint: Some("/v1/chat/completions".to_string()),
-        status: "error".to_string(),
-        ..Default::default()
-    });
+    record_completion_usage_and_details(
+        &state,
+        &api_key,
+        "/v1/chat/completions",
+        None,
+        &req.model,
+        None,
+        "error",
+        0,
+        0,
+        0,
+        start_time.elapsed().as_millis() as u64,
+        Some(&serde_json::to_value(&req).unwrap_or_default()),
+        Some(&serde_json::json!({ "error": &last_error })),
+    );
 
     (
         last_status,
@@ -853,6 +1210,7 @@ async fn execute_candidate_claude(
     provider_nodes: &[crate::db::ProviderNode],
     all_connections: &[crate::db::ProviderConnection],
 ) -> Result<Response, (StatusCode, String)> {
+    let start_time = std::time::Instant::now();
     let (provider_override, clean_model) = proxy::strip_provider_prefix(candidate);
     let (mut conn, target_model) = resolve_target_for_candidate(candidate, provider_nodes, all_connections);
     let clean_model = if !target_model.is_empty() { target_model } else { clean_model };
@@ -886,15 +1244,22 @@ async fn execute_candidate_claude(
     if let Some(cached) = state.token_cache.get(&cand_cache_key) {
         state.circuit_breaker.record_success(&conn.provider);
         state.circuit_breaker.record_success(candidate);
-        state.db.queue_usage(UsageRecord {
-            provider: Some(conn.provider.clone()),
-            model: Some(clean_model.clone()),
-            api_key: Some(api_key.key.clone()),
-            api_key_id: Some(api_key.id.clone()),
-            endpoint: Some("/v1/messages".to_string()),
-            status: "ok".to_string(),
-            ..Default::default()
-        });
+        let req_val = serde_json::to_value(&clean_req).unwrap_or_default();
+        record_completion_usage_and_details(
+            state,
+            api_key,
+            "/v1/messages",
+            Some(&conn.provider),
+            &clean_model,
+            None,
+            "ok",
+            0,
+            0,
+            0,
+            start_time.elapsed().as_millis() as u64,
+            Some(&req_val),
+            Some(&serde_json::json!({ "cached": true })),
+        );
         return Ok(cached.to_response(is_stream));
     }
 
@@ -910,20 +1275,22 @@ async fn execute_candidate_claude(
                 Ok(upstream_res) if upstream_res.status().is_success() => {
                     state.circuit_breaker.record_success(&conn.provider);
                     state.circuit_breaker.record_success(candidate);
-                    let sse_res = crate::custom_adapter::custom_sse_to_claude_stream(
+                    let stream = wrap_byte_stream_with_usage(
                         upstream_res.bytes_stream(),
+                        state.clone(),
+                        api_key.clone(),
+                        "/v1/messages".to_string(),
+                        Some(conn.provider.clone()),
+                        clean_model.clone(),
+                        None,
+                        Some(req_val),
+                        start_time,
+                    );
+                    let sse_res = crate::custom_adapter::custom_sse_to_claude_stream(
+                        stream,
                         mapping.clone(),
                         clean_model.clone(),
                     );
-                    state.db.queue_usage(UsageRecord {
-                        provider: Some(conn.provider),
-                        model: Some(clean_model),
-                        api_key: Some(api_key.key.clone()),
-                        api_key_id: Some(api_key.id.clone()),
-                        endpoint: Some("/v1/messages".to_string()),
-                        status: "ok".to_string(),
-                        ..Default::default()
-                    });
                     return Ok(sse_res.into_response());
                 }
                 Ok(upstream_res) => {
@@ -949,18 +1316,32 @@ async fn execute_candidate_claude(
                         let body_bytes = upstream_res.bytes().await.unwrap_or_default();
                         if let Ok(raw_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                             match crate::custom_adapter::transform_custom_to_claude_response(&raw_json, mapping, &clean_model) {
-                                Ok(claude_resp) => {
+                                Ok(mut claude_resp) => {
                                     state.circuit_breaker.record_success(&conn.provider);
                                     state.circuit_breaker.record_success(candidate);
-                                    state.db.queue_usage(UsageRecord {
-                                        provider: Some(conn.provider),
-                                        model: Some(clean_model.clone()),
-                                        api_key: Some(api_key.key.clone()),
-                                        api_key_id: Some(api_key.id.clone()),
-                                        endpoint: Some("/v1/messages".to_string()),
-                                        status: "ok".to_string(),
-                                        ..Default::default()
-                                    });
+                                    let prompt_tokens = claude_resp.usage.input_tokens as i64;
+                                    let completion_tokens = claude_resp.usage.output_tokens as i64;
+                                    let buffer = resolve_usage_buffer_tokens(&state.config);
+                                    if buffer > 0 {
+                                        claude_resp.usage.output_tokens += buffer as u32;
+                                    }
+
+                                    record_completion_usage_and_details(
+                                        state,
+                                        api_key,
+                                        "/v1/messages",
+                                        Some(&conn.provider),
+                                        &clean_model,
+                                        None,
+                                        "ok",
+                                        prompt_tokens,
+                                        completion_tokens,
+                                        0,
+                                        start_time.elapsed().as_millis() as u64,
+                                        Some(&serde_json::to_value(&clean_req).unwrap_or_default()),
+                                        Some(&serde_json::to_value(&claude_resp).unwrap_or_default()),
+                                    );
+
                                     if is_stream {
                                         return Ok(crate::custom_adapter::synthesize_claude_stream(claude_resp, clean_model).into_response());
                                     }
@@ -989,23 +1370,90 @@ async fn execute_candidate_claude(
             }
         }
     } else if conn.provider == "anthropic" {
+        if is_stream {
+            match state.proxy.forward_claude_messages(&clean_req, &conn).await {
+                Ok(upstream_res) if upstream_res.status().is_success() => {
+                    state.circuit_breaker.record_success(&conn.provider);
+                    state.circuit_breaker.record_success(candidate);
+                    let stream = wrap_byte_stream_with_usage(
+                        upstream_res.bytes_stream(),
+                        state.clone(),
+                        api_key.clone(),
+                        "/v1/messages".to_string(),
+                        Some(conn.provider.clone()),
+                        clean_model.clone(),
+                        None,
+                        Some(serde_json::to_value(&clean_req).unwrap_or_default()),
+                        start_time,
+                    );
+                    let sse_res = sse::passthrough_sse_stream(stream);
+                    return Ok(sse_res.into_response());
+                }
+                Ok(upstream_res) => {
+                    let status = upstream_res.status();
+                    state.circuit_breaker.record_status(&conn.provider, status);
+                    state.circuit_breaker.record_status(candidate, status);
+                    return Err((status, format!("[{}] Anthropic error", status)));
+                }
+                Err(e) => {
+                    state.circuit_breaker.record_failure(&conn.provider);
+                    state.circuit_breaker.record_failure(candidate);
+                    return Err((StatusCode::BAD_GATEWAY, format!("Upstream connection failed: {}", e)));
+                }
+            }
+        }
         match state.proxy.forward_claude_messages(&clean_req, &conn).await {
             Ok(upstream_res) => {
                 let status = upstream_res.status();
                 let body_bytes = upstream_res.bytes().await.unwrap_or_default();
-                state.db.queue_usage(UsageRecord {
-                    provider: Some(conn.provider.clone()),
-                    model: Some(clean_model),
-                    api_key: Some(api_key.key.clone()),
-                    api_key_id: Some(api_key.id.clone()),
-                    endpoint: Some("/v1/messages".to_string()),
-                    status: if status.is_success() { "ok" } else { "error" }.to_string(),
-                    ..Default::default()
-                });
+                let mut prompt_tokens = 0i64;
+                let mut completion_tokens = 0i64;
+                let mut cached_tokens = 0i64;
+                let buffer = resolve_usage_buffer_tokens(&state.config);
+
+                let mut final_body = body_bytes.clone();
+                let mut resp_val: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
+                if let Some(ref mut val) = resp_val {
+                    if let Some(usage) = val.get_mut("usage") {
+                        if let Some(it) = usage.get("input_tokens").and_then(|v| v.as_i64()) {
+                            prompt_tokens = it;
+                        }
+                        if let Some(ot) = usage.get("output_tokens").and_then(|v| v.as_i64()) {
+                            completion_tokens = ot;
+                        }
+                        if let Some(cr) = usage.get("cache_read_input_tokens").and_then(|v| v.as_i64()) {
+                            cached_tokens = cr;
+                        }
+                        if buffer > 0 {
+                            let reported_ot = completion_tokens + buffer as i64;
+                            usage["output_tokens"] = json!(reported_ot);
+                            if let Ok(updated) = serde_json::to_vec(val) {
+                                final_body = axum::body::Bytes::from(updated);
+                            }
+                        }
+                    }
+                }
+
+                record_completion_usage_and_details(
+                    state,
+                    api_key,
+                    "/v1/messages",
+                    Some(&conn.provider),
+                    &clean_model,
+                    None,
+                    if status.is_success() { "ok" } else { "error" },
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    start_time.elapsed().as_millis() as u64,
+                    Some(&serde_json::to_value(&clean_req).unwrap_or_default()),
+                    resp_val.as_ref(),
+                );
+
                 if status.is_success() {
                     state.circuit_breaker.record_success(&conn.provider);
                     state.circuit_breaker.record_success(candidate);
-                    return Ok((status, [(header::CONTENT_TYPE, "application/json")], body_bytes).into_response());
+                    return Ok((status, [(header::CONTENT_TYPE, "application/json")], final_body).into_response());
                 } else {
                     state.circuit_breaker.record_status(&conn.provider, status);
                     state.circuit_breaker.record_status(candidate, status);
@@ -1020,6 +1468,38 @@ async fn execute_candidate_claude(
         }
     } else {
         let chat_req = translator::claude_to_openai_request(&clean_req);
+        if is_stream {
+            match state.proxy.forward_chat_completions(&chat_req, &conn).await {
+                Ok(upstream_res) if upstream_res.status().is_success() => {
+                    state.circuit_breaker.record_success(&conn.provider);
+                    state.circuit_breaker.record_success(candidate);
+                    let stream = wrap_byte_stream_with_usage(
+                        upstream_res.bytes_stream(),
+                        state.clone(),
+                        api_key.clone(),
+                        "/v1/messages".to_string(),
+                        Some(conn.provider.clone()),
+                        clean_model.clone(),
+                        None,
+                        Some(serde_json::to_value(&clean_req).unwrap_or_default()),
+                        start_time,
+                    );
+                    let sse_res = sse::openai_to_claude_sse_stream(stream);
+                    return Ok(sse_res.into_response());
+                }
+                Ok(upstream_res) => {
+                    let status = upstream_res.status();
+                    state.circuit_breaker.record_status(&conn.provider, status);
+                    state.circuit_breaker.record_status(candidate, status);
+                    return Err((status, format!("[{}] OpenAI streaming error", status)));
+                }
+                Err(e) => {
+                    state.circuit_breaker.record_failure(&conn.provider);
+                    state.circuit_breaker.record_failure(candidate);
+                    return Err((StatusCode::BAD_GATEWAY, format!("Upstream connection failed: {}", e)));
+                }
+            }
+        }
         match state.proxy.forward_chat_completions(&chat_req, &conn).await {
             Ok(upstream_res) => {
                 let status = upstream_res.status();
@@ -1030,18 +1510,29 @@ async fn execute_candidate_claude(
                     if let Ok(chat_resp) =
                         serde_json::from_slice::<translator::ChatCompletionResponse>(&body_bytes)
                     {
-                        let claude_resp = translator::openai_to_claude_response(&chat_resp);
-                        state.db.queue_usage(UsageRecord {
-                            provider: Some(conn.provider),
-                            model: Some(clean_model),
-                            api_key: Some(api_key.key.clone()),
-                            api_key_id: Some(api_key.id.clone()),
-                            endpoint: Some("/v1/messages".to_string()),
-                            prompt_tokens: claude_resp.usage.input_tokens as i64,
-                            completion_tokens: claude_resp.usage.output_tokens as i64,
-                            status: "ok".to_string(),
-                            ..Default::default()
-                        });
+                        let mut claude_resp = translator::openai_to_claude_response(&chat_resp);
+                        let prompt_tokens = claude_resp.usage.input_tokens as i64;
+                        let completion_tokens = claude_resp.usage.output_tokens as i64;
+                        let buffer = resolve_usage_buffer_tokens(&state.config);
+                        if buffer > 0 {
+                            claude_resp.usage.output_tokens += buffer as u32;
+                        }
+
+                        record_completion_usage_and_details(
+                            state,
+                            api_key,
+                            "/v1/messages",
+                            Some(&conn.provider),
+                            &clean_model,
+                            None,
+                            "ok",
+                            prompt_tokens,
+                            completion_tokens,
+                            0,
+                            start_time.elapsed().as_millis() as u64,
+                            Some(&serde_json::to_value(&clean_req).unwrap_or_default()),
+                            Some(&serde_json::to_value(&claude_resp).unwrap_or_default()),
+                        );
                         return Ok((
                             StatusCode::OK,
                             [(header::CONTENT_TYPE, "application/json")],
@@ -1068,6 +1559,7 @@ pub async fn messages_handler(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let start_time = std::time::Instant::now();
     let api_key = match authenticate(&headers, &state.db) {
         Ok(k) => k,
         Err(res) => return res,
@@ -1117,15 +1609,22 @@ pub async fn messages_handler(
     // Exact-Match Token Cache Check
     if let Some(cached) = state.token_cache.get(&cache_key) {
         tracing::info!("Claude Cache HIT for key {}", cache_key);
-        state.db.queue_usage(UsageRecord {
-            provider: Some("cache".to_string()),
-            model: Some(req.model.clone()),
-            api_key: Some(api_key.key.clone()),
-            api_key_id: Some(api_key.id.clone()),
-            endpoint: Some("/v1/messages".to_string()),
-            status: "ok".to_string(),
-            ..Default::default()
-        });
+        let req_val = serde_json::to_value(&req).unwrap_or_default();
+        record_completion_usage_and_details(
+            &state,
+            &api_key,
+            "/v1/messages",
+            Some("cache"),
+            &req.model,
+            None,
+            "ok",
+            0,
+            0,
+            0,
+            start_time.elapsed().as_millis() as u64,
+            Some(&req_val),
+            Some(&serde_json::json!({ "cached": true })),
+        );
         return cached.to_response(is_stream);
     }
 
@@ -1248,15 +1747,21 @@ pub async fn messages_handler(
         last_error = "All candidates tripped or circuit breaker is open".to_string();
     }
 
-    state.db.queue_usage(UsageRecord {
-        provider: None,
-        model: Some(req.model.clone()),
-        api_key: Some(api_key.key),
-        api_key_id: Some(api_key.id),
-        endpoint: Some("/v1/messages".to_string()),
-        status: "error".to_string(),
-        ..Default::default()
-    });
+    record_completion_usage_and_details(
+        &state,
+        &api_key,
+        "/v1/messages",
+        None,
+        &req.model,
+        None,
+        "error",
+        0,
+        0,
+        0,
+        start_time.elapsed().as_millis() as u64,
+        Some(&serde_json::to_value(&req).unwrap_or_default()),
+        Some(&serde_json::json!({ "error": &last_error })),
+    );
 
     (
         last_status,
@@ -5378,6 +5883,363 @@ mod tests {
             .unwrap();
         let err_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(err_json["error"]["code"], "request_too_large");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_observability_and_buffer_tokens() {
+        let mut cfg = Config::default();
+        assert!(resolve_should_record_request_details(&cfg));
+        assert_eq!(resolve_usage_buffer_tokens(&cfg), 2000);
+
+        cfg.observability.enable_request_logs = false;
+        assert!(!resolve_should_record_request_details(&cfg));
+
+        cfg.observability.enable_request_logs = true;
+        cfg.routing.usage_buffer_tokens = 500;
+        assert!(resolve_should_record_request_details(&cfg));
+        assert_eq!(resolve_usage_buffer_tokens(&cfg), 500);
+    }
+
+    #[tokio::test]
+    async fn test_write_behind_usage_and_request_details_chat_and_messages() {
+        use std::time::Duration;
+
+        let db = Database::open_in_memory().unwrap();
+        let test_key = ApiKey {
+            id: "key-wb-test".to_string(),
+            key: "sk-wb-test-key".to_string(),
+            name: Some("Write Behind Test".to_string()),
+            machine_id: None,
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            rate_limit_requests: 0,
+            rate_limit_window_seconds: 60,
+            token_limit_daily: 0,
+            token_limit_monthly: 0,
+            allowed_models: "*".to_string(),
+            blocked_models: String::new(),
+            allowed_ips: String::new(),
+            blocked_ips: String::new(),
+            expires_at: String::new(),
+            description: String::new(),
+            owner_ref: None,
+            max_concurrent_requests: 0,
+            allowed_providers: String::new(),
+            blocked_providers: String::new(),
+            force_provider: String::new(),
+            force_model: String::new(),
+            allowed_endpoints: String::new(),
+            blocked_endpoints: String::new(),
+        };
+        db.save_api_key(&test_key).unwrap();
+
+        let mut cfg = Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            ..Default::default()
+        };
+        cfg.routing.usage_buffer_tokens = 250;
+        let config = Arc::new(cfg);
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+
+        // 1. Pre-seed cache for chat completions
+        let chat_req = ChatCompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![crate::translator::ChatMessage::user("wb chat test")],
+            ..Default::default()
+        };
+        let chat_hash = token_cache.compute_chat_hash(&chat_req);
+        token_cache.set_json(
+            &chat_hash,
+            axum::body::Bytes::from_static(b"{\"id\":\"chatcmpl-wb\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"wb response\"}}]}"),
+        );
+
+        // 2. Pre-seed cache for Claude messages
+        let claude_req = ClaudeMessageRequest {
+            model: "claude-3-5-sonnet".to_string(),
+            messages: vec![crate::translator::ClaudeMessage {
+                role: "user".to_string(),
+                content: crate::translator::ClaudeContent::Single("wb claude test".to_string()),
+            }],
+            max_tokens: 100,
+            system: None,
+            metadata: None,
+            stop_sequences: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let claude_hash = token_cache.compute_claude_hash(&claude_req);
+        token_cache.set_json(
+            &claude_hash,
+            axum::body::Bytes::from_static(b"{\"id\":\"msg-wb\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"claude wb response\"}]}"),
+        );
+
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState {
+            config: Arc::clone(&config),
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+        };
+        let app = create_router(state);
+
+        // Send POST /v1/chat/completions
+        let http_req1 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-wb-test-key")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"wb chat test"}]}"#))
+            .unwrap();
+
+        let resp1 = app.clone().oneshot(http_req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        // Send POST /v1/messages
+        let http_req2 = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("Authorization", "Bearer sk-wb-test-key")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"claude-3-5-sonnet","max_tokens":100,"messages":[{"role":"user","content":"wb claude test"}]}"#))
+            .unwrap();
+
+        let resp2 = app.clone().oneshot(http_req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        // Allow write-behind background workers to flush to SQLite
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let usage_count = db.get_usage_count().unwrap();
+        assert!(usage_count >= 2, "Expected at least 2 usage records, got {}", usage_count);
+
+        let req_details_count = db.get_request_details_count().unwrap();
+        assert!(req_details_count >= 2, "Expected at least 2 request details, got {}", req_details_count);
+
+        let details = db.get_request_details(1, 10, None, None, None).unwrap();
+        let endpoints: Vec<String> = details["details"].as_array().unwrap()
+            .iter()
+            .filter_map(|d| d["endpoint"].as_str().map(|s| s.to_string()))
+            .collect();
+
+        assert!(endpoints.iter().any(|ep| ep == "/v1/chat/completions"));
+        assert!(endpoints.iter().any(|ep| ep == "/v1/messages"));
+    }
+
+    #[tokio::test]
+    async fn test_write_behind_disabled_request_details() {
+        use std::time::Duration;
+
+        let db = Database::open_in_memory().unwrap();
+        let test_key = ApiKey {
+            id: "key-no-details".to_string(),
+            key: "sk-no-details-key".to_string(),
+            name: Some("No Details Test".to_string()),
+            machine_id: None,
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            rate_limit_requests: 0,
+            rate_limit_window_seconds: 60,
+            token_limit_daily: 0,
+            token_limit_monthly: 0,
+            allowed_models: "*".to_string(),
+            blocked_models: String::new(),
+            allowed_ips: String::new(),
+            blocked_ips: String::new(),
+            expires_at: String::new(),
+            description: String::new(),
+            owner_ref: None,
+            max_concurrent_requests: 0,
+            allowed_providers: String::new(),
+            blocked_providers: String::new(),
+            force_provider: String::new(),
+            force_model: String::new(),
+            allowed_endpoints: String::new(),
+            blocked_endpoints: String::new(),
+        };
+        db.save_api_key(&test_key).unwrap();
+
+        let mut cfg = Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            ..Default::default()
+        };
+        cfg.observability.enable_request_logs = false; // explicitly disable request logs
+        let config = Arc::new(cfg);
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+
+        let chat_req = ChatCompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![crate::translator::ChatMessage::user("wb disabled log test")],
+            ..Default::default()
+        };
+        let chat_hash = token_cache.compute_chat_hash(&chat_req);
+        token_cache.set_json(
+            &chat_hash,
+            axum::body::Bytes::from_static(b"{\"id\":\"chatcmpl-nolog\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"no log\"}}]}"),
+        );
+
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState {
+            config: Arc::clone(&config),
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+        };
+        let app = create_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-no-details-key")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"wb disabled log test"}]}"#))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Usage must still be recorded
+        assert_eq!(db.get_usage_count().unwrap(), 1);
+        // Request details must NOT be recorded
+        assert_eq!(db.get_request_details_count().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_write_behind_usage_and_interrupted_drop_guard() {
+        use std::time::Duration;
+        use futures_util::StreamExt;
+
+        let db = Database::open_in_memory().unwrap();
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            ..Default::default()
+        });
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState {
+            config,
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+        };
+
+        let test_key = ApiKey {
+            id: "key-stream-test".to_string(),
+            key: "sk-stream-key".to_string(),
+            name: Some("Stream Test".to_string()),
+            machine_id: None,
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            rate_limit_requests: 0,
+            rate_limit_window_seconds: 60,
+            token_limit_daily: 0,
+            token_limit_monthly: 0,
+            allowed_models: "*".to_string(),
+            blocked_models: String::new(),
+            allowed_ips: String::new(),
+            blocked_ips: String::new(),
+            expires_at: String::new(),
+            description: String::new(),
+            owner_ref: None,
+            max_concurrent_requests: 0,
+            allowed_providers: String::new(),
+            blocked_providers: String::new(),
+            force_provider: String::new(),
+            force_model: String::new(),
+            allowed_endpoints: String::new(),
+            blocked_endpoints: String::new(),
+        };
+
+        // 1. Test normal stream completion through wrap_byte_stream_with_usage
+        let byte_stream = futures_util::stream::iter(vec![
+            Ok::<_, std::io::Error>(axum::body::Bytes::from("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")),
+            Ok(axum::body::Bytes::from("data: [DONE]\n\n")),
+        ]);
+
+        let wrapped = wrap_byte_stream_with_usage(
+            byte_stream,
+            state.clone(),
+            test_key.clone(),
+            "/v1/chat/completions".to_string(),
+            Some("openai".to_string()),
+            "gpt-4o".to_string(),
+            None,
+            Some(serde_json::json!({ "model": "gpt-4o" })),
+            std::time::Instant::now(),
+        );
+        let mut wrapped = Box::pin(wrapped);
+
+        while let Some(_) = wrapped.next().await {}
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(db.get_usage_count().unwrap(), 1);
+        assert_eq!(db.get_request_details_count().unwrap(), 1);
+
+        // 2. Test interrupted/dropped stream via StreamUsageDropGuard
+        let byte_stream_interrupted = futures_util::stream::iter(vec![
+            Ok::<_, std::io::Error>(axum::body::Bytes::from("data: chunk 1\n\n")),
+            Ok(axum::body::Bytes::from("data: chunk 2\n\n")),
+        ]);
+
+        let wrapped_interrupted = wrap_byte_stream_with_usage(
+            byte_stream_interrupted,
+            state.clone(),
+            test_key.clone(),
+            "/v1/chat/completions".to_string(),
+            Some("anthropic".to_string()),
+            "claude-3-5-sonnet".to_string(),
+            None,
+            Some(serde_json::json!({ "model": "claude-3-5-sonnet" })),
+            std::time::Instant::now(),
+        );
+        let mut wrapped_interrupted = Box::pin(wrapped_interrupted);
+
+        // Read only first chunk then drop stream
+        let _ = wrapped_interrupted.next().await;
+        drop(wrapped_interrupted);
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(db.get_usage_count().unwrap(), 2);
+        assert_eq!(db.get_request_details_count().unwrap(), 2);
+
+        let details = db.get_request_details(1, 10, None, None, None).unwrap();
+        let items = details["details"].as_array().unwrap();
+        assert!(items.iter().any(|item| item["status"].as_str() == Some("interrupted")));
     }
 }
 

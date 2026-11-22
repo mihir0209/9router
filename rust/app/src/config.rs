@@ -652,7 +652,7 @@ impl StreamingConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservabilityConfig {
-    /// Enable async request logging into SQLite request_details table (default: false).
+    /// Enable async request logging into SQLite request_details table (default: true).
     pub enable_request_logs: bool,
     /// System log level ("debug", "info", "warn", "error", default: "info").
     pub log_level: String,
@@ -677,7 +677,7 @@ pub struct ObservabilityConfig {
 impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
-            enable_request_logs: false,
+            enable_request_logs: true,
             log_level: "info".to_string(),
             observability_enabled: true,
             batch_size: 50,
@@ -697,7 +697,7 @@ impl ObservabilityConfig {
     }
 
     pub fn load_from<F: Fn(&str) -> Option<String>>(lookup: F) -> Self {
-        let enable_request_logs = parse_bool_from(&lookup, "ENABLE_REQUEST_LOGS", false);
+        let enable_request_logs = parse_bool_from(&lookup, "ENABLE_REQUEST_LOGS", true);
         let log_level = parse_string_from(&lookup, "LOG_LEVEL", "info");
         let observability_enabled = parse_bool_from(&lookup, "OBSERVABILITY_ENABLED", true);
         let batch_size = parse_usize_from(&lookup, "OBSERVABILITY_BATCH_SIZE", 50);
@@ -1384,7 +1384,7 @@ mod tests {
     #[test]
     fn test_observability_config_defaults() {
         let cfg = ObservabilityConfig::load_from(mock_env(HashMap::new()));
-        assert!(!cfg.enable_request_logs);
+        assert!(cfg.enable_request_logs);
         assert_eq!(cfg.log_level, "info");
         assert!(cfg.observability_enabled);
         assert_eq!(cfg.batch_size, 50);
@@ -1399,7 +1399,7 @@ mod tests {
     #[test]
     fn test_observability_config_custom() {
         let mut map = HashMap::new();
-        map.insert("ENABLE_REQUEST_LOGS", "true");
+        map.insert("ENABLE_REQUEST_LOGS", "false");
         map.insert("LOG_LEVEL", "debug");
         map.insert("OBSERVABILITY_ENABLED", "0");
         map.insert("OBSERVABILITY_BATCH_SIZE", "100");
@@ -1411,7 +1411,7 @@ mod tests {
         map.insert("NINEROUTER_CONSOLE_CAPTURE", "false");
 
         let cfg = ObservabilityConfig::load_from(mock_env(map));
-        assert!(cfg.enable_request_logs);
+        assert!(!cfg.enable_request_logs);
         assert_eq!(cfg.log_level, "debug");
         assert!(!cfg.observability_enabled);
         assert_eq!(cfg.batch_size, 100);

@@ -179,6 +179,57 @@ impl Default for UsageRecord {
     }
 }
 
+/// Request detail record queued via write-behind logging into requestDetails table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestDetail {
+    pub id: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default, rename = "connectionId")]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "latencyMs")]
+    pub latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+impl Default for RequestDetail {
+    fn default() -> Self {
+        static REQ_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seq = REQ_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self {
+            id: format!("req_{}_{:06x}", Utc::now().timestamp_micros(), seq),
+            timestamp: Utc::now().to_rfc3339(),
+            provider: None,
+            model: None,
+            connection_id: None,
+            status: Some("ok".to_string()),
+            endpoint: None,
+            latency_ms: None,
+            tokens: None,
+            request: None,
+            response: None,
+            meta: None,
+            data: None,
+        }
+    }
+}
+
 /// Auth errors returned during key validation and restriction enforcement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyValidationError {
@@ -222,6 +273,7 @@ impl std::error::Error for KeyValidationError {}
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
     usage_tx: mpsc::Sender<UsageRecord>,
+    request_details_tx: mpsc::Sender<RequestDetail>,
     rate_limiter: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
 }
 
@@ -378,6 +430,20 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_uh_conn ON usageHistory(connectionId);
             CREATE INDEX IF NOT EXISTS idx_uh_apikey ON usageHistory(apiKey);
             CREATE INDEX IF NOT EXISTS idx_uh_apikey_id ON usageHistory(apiKeyId);
+
+            CREATE TABLE IF NOT EXISTS requestDetails (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                provider TEXT,
+                model TEXT,
+                connectionId TEXT,
+                status TEXT,
+                data TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rd_ts ON requestDetails(timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_rd_provider ON requestDetails(provider);
+            CREATE INDEX IF NOT EXISTS idx_rd_model ON requestDetails(model);
+            CREATE INDEX IF NOT EXISTS idx_rd_conn ON requestDetails(connectionId);
             "#,
         )?;
 
@@ -388,17 +454,20 @@ impl Database {
         let _ = conn.execute("ALTER TABLE usageHistory ADD COLUMN cachedTokens INTEGER DEFAULT 0", []);
 
         let (usage_tx, usage_rx) = mpsc::channel(10_000);
+        let (request_details_tx, request_details_rx) = mpsc::channel(10_000);
         let conn_arc = Arc::new(Mutex::new(conn));
         let rate_limiter = Arc::new(Mutex::new(HashMap::new()));
 
         let db = Arc::new(Self {
             conn: Arc::clone(&conn_arc),
             usage_tx,
+            request_details_tx,
             rate_limiter,
         });
 
-        // Spawn background worker for batching usage history writes
+        // Spawn background workers for batching writes
         Self::spawn_usage_worker(Arc::clone(&conn_arc), usage_rx);
+        Self::spawn_request_details_worker(Arc::clone(&conn_arc), request_details_rx);
 
         Ok(db)
     }
@@ -410,7 +479,7 @@ impl Database {
     ) {
         tokio::spawn(async move {
             let mut batch = Vec::with_capacity(64);
-            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
 
             loop {
                 tokio::select! {
@@ -491,11 +560,126 @@ impl Database {
         }
     }
 
+    /// Spawns the write-behind background task for batch inserting request detail records.
+    fn spawn_request_details_worker(
+        conn: Arc<Mutex<Connection>>,
+        mut rx: mpsc::Receiver<RequestDetail>,
+    ) {
+        tokio::spawn(async move {
+            let mut batch = Vec::with_capacity(64);
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+
+            loop {
+                tokio::select! {
+                    maybe_item = rx.recv() => {
+                        match maybe_item {
+                            Some(item) => {
+                                batch.push(item);
+                                if batch.len() >= 50 {
+                                    Self::flush_request_details_batch(&conn, &mut batch);
+                                }
+                            }
+                            None => {
+                                if !batch.is_empty() {
+                                    Self::flush_request_details_batch(&conn, &mut batch);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ = interval.tick() => {
+                        if !batch.is_empty() {
+                            Self::flush_request_details_batch(&conn, &mut batch);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn flush_request_details_batch(
+        conn: &Arc<Mutex<Connection>>,
+        batch: &mut Vec<RequestDetail>,
+    ) {
+        if batch.is_empty() {
+            return;
+        }
+
+        let guard = match conn.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let result: rusqlite::Result<()> = (|| {
+            let tx = guard.unchecked_transaction()?;
+            {
+                let mut stmt = tx.prepare_cached(
+                    r#"
+                    INSERT INTO requestDetails(
+                        id, timestamp, provider, model, connectionId, status, data
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        timestamp = excluded.timestamp,
+                        provider = excluded.provider,
+                        model = excluded.model,
+                        connectionId = excluded.connectionId,
+                        status = excluded.status,
+                        data = excluded.data
+                    "#,
+                )?;
+
+                for item in batch.drain(..) {
+                    let data_str = serde_json::to_string(&item).unwrap_or_else(|_| "{}".to_string());
+                    stmt.execute(params![
+                        item.id,
+                        item.timestamp,
+                        item.provider,
+                        item.model,
+                        item.connection_id,
+                        item.status,
+                        data_str,
+                    ])?;
+                }
+            }
+
+            // Pruning retention limit (max 10,000 rows)
+            let count: i64 = tx.query_row("SELECT COUNT(*) FROM requestDetails", [], |r| r.get(0)).unwrap_or(0);
+            if count > 10000 {
+                let excess = count - 10000;
+                let _ = tx.execute(
+                    "DELETE FROM requestDetails WHERE id IN (SELECT id FROM requestDetails ORDER BY timestamp ASC LIMIT ?)",
+                    params![excess],
+                );
+            }
+
+            tx.commit()?;
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            error!("Failed to flush requestDetails batch: {}", e);
+        }
+    }
+
     /// Enqueue a usage record into the non-blocking write-behind channel.
     pub fn queue_usage(&self, record: UsageRecord) {
         if let Err(e) = self.usage_tx.try_send(record) {
             warn!("Write-behind queue is full or closed: {}", e);
         }
+    }
+
+    /// Enqueue a request detail record into the non-blocking write-behind channel.
+    pub fn record_request_detail(&self, detail: RequestDetail) {
+        if let Err(e) = self.request_details_tx.try_send(detail) {
+            warn!("Request detail write-behind queue is full or closed: {}", e);
+        }
+    }
+
+    /// Returns the total count of request details records in SQLite.
+    pub fn get_request_details_count(&self) -> anyhow::Result<i64> {
+        let guard = self.conn.lock().unwrap();
+        let count: i64 = guard.query_row("SELECT COUNT(*) FROM requestDetails", [], |r| r.get(0))?;
+        Ok(count)
     }
 
     // ==========================================
@@ -1537,6 +1721,79 @@ impl Database {
             format!("WHERE {}", conditions.join(" AND "))
         };
 
+        // First attempt to query dedicated requestDetails table
+        let rd_count_sql = format!("SELECT COUNT(*) FROM requestDetails {}", where_clause);
+        let rd_total: i64 = guard
+            .prepare(&rd_count_sql)
+            .and_then(|mut stmt| {
+                let count_params = rusqlite::params_from_iter(param_values.iter());
+                stmt.query_row(count_params, |r| r.get(0))
+            })
+            .unwrap_or(0);
+
+        if rd_total > 0 {
+            let select_sql = format!(
+                "SELECT id, timestamp, provider, model, connectionId, status, data FROM requestDetails {} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                where_clause
+            );
+            if let Ok(mut stmt) = guard.prepare(&select_sql) {
+                let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+                for val in &param_values {
+                    query_params.push(Box::new(val.clone()));
+                }
+                query_params.push(Box::new(ps));
+                query_params.push(Box::new(offset));
+
+                let rows = stmt.query_map(
+                    rusqlite::params_from_iter(query_params.iter().map(|b| &**b)),
+                    |r| {
+                        let id: String = r.get(0)?;
+                        let ts: String = r.get(1)?;
+                        let prov: Option<String> = r.get(2)?;
+                        let mdl: Option<String> = r.get(3)?;
+                        let conn_id: Option<String> = r.get(4)?;
+                        let stat: Option<String> = r.get(5)?;
+                        let data_str: String = r.get(6)?;
+
+                        if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&data_str) {
+                            if let Some(obj) = parsed.as_object_mut() {
+                                obj.entry("id").or_insert_with(|| serde_json::json!(id));
+                                obj.entry("timestamp").or_insert_with(|| serde_json::json!(ts));
+                                obj.entry("provider").or_insert_with(|| serde_json::json!(prov));
+                                obj.entry("model").or_insert_with(|| serde_json::json!(mdl));
+                                obj.entry("connectionId").or_insert_with(|| serde_json::json!(conn_id));
+                                obj.entry("status").or_insert_with(|| serde_json::json!(stat));
+                            }
+                            Ok(parsed)
+                        } else {
+                            Ok(serde_json::json!({
+                                "id": id,
+                                "timestamp": ts,
+                                "provider": prov,
+                                "model": mdl,
+                                "connectionId": conn_id,
+                                "status": stat,
+                            }))
+                        }
+                    },
+                );
+
+                if let Ok(mapped) = rows {
+                    let mut details = Vec::new();
+                    for r in mapped.flatten() {
+                        details.push(r);
+                    }
+                    return Ok(serde_json::json!({
+                        "details": details,
+                        "total": rd_total,
+                        "page": p,
+                        "pageSize": ps,
+                    }));
+                }
+            }
+        }
+
+        // Fallback to usageHistory
         let count_sql = format!("SELECT COUNT(*) FROM usageHistory {}", where_clause);
         let mut count_stmt = guard.prepare(&count_sql)?;
         let count_params = rusqlite::params_from_iter(param_values.iter());
@@ -2574,6 +2831,41 @@ mod tests {
 
         let count = db.get_usage_count().expect("get usage count");
         assert_eq!(count, 10);
+    }
+
+    #[tokio::test]
+    async fn test_write_behind_request_details_queue() {
+        let db = Database::open_in_memory().expect("open in memory db");
+
+        for i in 0..5 {
+            db.record_request_detail(RequestDetail {
+                id: format!("req_test_{}", i),
+                timestamp: Utc::now().to_rfc3339(),
+                provider: Some("openai".to_string()),
+                model: Some("gpt-4o".to_string()),
+                connection_id: Some("conn-1".to_string()),
+                status: Some("ok".to_string()),
+                endpoint: Some("/v1/chat/completions".to_string()),
+                latency_ms: Some(50 + i * 10),
+                tokens: Some(serde_json::json!({ "prompt_tokens": 10 + i, "completion_tokens": 20 + i })),
+                request: Some(serde_json::json!({ "model": "gpt-4o" })),
+                response: Some(serde_json::json!({ "text": "test response" })),
+                meta: None,
+                data: None,
+            });
+        }
+
+        // Wait for background worker interval to flush
+        tokio::time::sleep(Duration::from_millis(350)).await;
+
+        let count = db.get_request_details_count().expect("get request details count");
+        assert_eq!(count, 5);
+
+        let details_val = db.get_request_details(1, 20, None, None, None).expect("get request details");
+        assert_eq!(details_val["total"], 5);
+        let list = details_val["details"].as_array().expect("details array");
+        assert_eq!(list.len(), 5);
+        assert_eq!(list[0]["provider"], "openai");
     }
 
     #[tokio::test]
