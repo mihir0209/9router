@@ -1007,8 +1007,12 @@ export default function ProfilePage() {
                 <span className="material-symbols-outlined text-xl sm:text-2xl">computer</span>
               </div>
               <div>
-                <h2 className="text-lg sm:text-xl font-semibold">Local Mode</h2>
-                <p className="text-sm text-text-muted">Running on your machine</p>
+                <h2 className="text-lg sm:text-xl font-semibold">
+                  {settings?.dataDir === "/app/data" || isRemoteHost ? "Server / Container Mode" : "Local Mode"}
+                </h2>
+                <p className="text-sm text-text-muted">
+                  {settings?.dataDir === "/app/data" || isRemoteHost ? "Running in container / remote host" : "Running on your machine"}
+                </p>
               </div>
             </div>
             <div className="inline-flex p-1 rounded-lg bg-black/5 dark:bg-white/5 w-full sm:w-auto">
@@ -1036,7 +1040,9 @@ export default function ProfilePage() {
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between p-3 rounded-lg bg-bg border border-border gap-2">
               <div>
                 <p className="font-medium text-sm sm:text-base">Database Location</p>
-                <p className="text-xs sm:text-sm text-text-muted font-mono break-all">~/.9router/db/data.sqlite</p>
+                <p className="text-xs sm:text-sm text-text-muted font-mono break-all">
+                  {settings?.dataDir ? `${settings.dataDir}/db/data.sqlite` : "~/.9router/db/data.sqlite"}
+                </p>
               </div>
             </div>
             <div className="flex flex-col sm:flex-row gap-2">

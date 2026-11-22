@@ -346,6 +346,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test-cli.sqlite"),
             port: 0,
             jwt_secret: "secret".to_string(),
+            ..Default::default()
         });
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();

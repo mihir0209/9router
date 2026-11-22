@@ -183,11 +183,11 @@ pub async fn proxy(State(state): State<crate::routes::AppState>, req: Request) -
         || raw_path == "/favicon.svg"
         || raw_path == "/manifest.webmanifest"
     {
-        return crate::embed::static_handler(parts.uri).await;
+        return crate::embed::static_handler_with_headers(parts.uri, Some(&parts.headers)).await;
     }
 
     if original.base.is_empty() {
-        return crate::embed::static_handler(parts.uri).await;
+        return crate::embed::static_handler_with_headers(parts.uri, Some(&parts.headers)).await;
     }
 
     let target = parts

@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    http::{header, HeaderValue, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     Json,
 };
@@ -10,6 +10,55 @@ use serde_json::json;
 #[derive(RustEmbed)]
 #[folder = "ui/"]
 pub struct Assets;
+
+static EMBEDDED_BUILD_ID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+pub fn get_embedded_build_id() -> &'static str {
+    EMBEDDED_BUILD_ID
+        .get_or_init(|| {
+            for file in Assets::iter() {
+                if file.starts_with("_next/static/") && file.ends_with("/_buildManifest.js") {
+                    let parts: Vec<&str> = file.split('/').collect();
+                    if parts.len() >= 4 && !parts[2].is_empty() {
+                        return Some(parts[2].to_string());
+                    }
+                }
+            }
+            None
+        })
+        .as_deref()
+        .unwrap_or("9router-production-build")
+}
+
+fn make_rsc_response(data: std::borrow::Cow<'static, [u8]>, deployment_id: &HeaderValue) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
+        .header(
+            header::VARY,
+            HeaderValue::from_static("RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url"),
+        )
+        .header(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=3600, stale-while-revalidate=86400"),
+        )
+        .header(HeaderName::from_static("x-nextjs-deployment-id"), deployment_id.clone())
+        .body(Body::from(data))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn make_html_response(data: std::borrow::Cow<'static, [u8]>, deployment_id: &HeaderValue) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )
+        .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+        .header(HeaderName::from_static("x-nextjs-deployment-id"), deployment_id.clone())
+        .body(Body::from(data))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
 
 fn url_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(input.len());
@@ -35,6 +84,10 @@ fn url_decode(input: &str) -> String {
 /// Serves single-binary embedded assets from `rust/app/ui/` (authentic Next.js Dashboard).
 /// Supports direct asset lookups, HTML page mappings, and SPA client-side fallback.
 pub async fn static_handler(uri: Uri) -> Response {
+    static_handler_with_headers(uri, None).await
+}
+
+pub async fn static_handler_with_headers(uri: Uri, req_headers: Option<&HeaderMap>) -> Response {
     let raw_path = uri.path();
 
     // API 404s must return standard JSON error instead of SPA HTML fallback
@@ -47,6 +100,13 @@ pub async fn static_handler(uri: Uri) -> Response {
             .into_response();
     }
 
+    let deployment_header_val = req_headers
+        .and_then(|h| h.get("x-nextjs-deployment-id"))
+        .cloned()
+        .unwrap_or_else(|| {
+            HeaderValue::from_static(get_embedded_build_id())
+        });
+
     let decoded_path = url_decode(raw_path);
     let path = decoded_path.trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
@@ -55,13 +115,13 @@ pub async fn static_handler(uri: Uri) -> Response {
     // Check both decoded path and raw path
     let file_opt = Assets::get(path).or_else(|| Assets::get(raw_path.trim_start_matches('/')));
     if let Some(file) = file_opt {
-        let content_type = if path.ends_with(".html") {
-            HeaderValue::from_static("text/html; charset=utf-8")
-        } else {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            HeaderValue::from_str(mime.as_ref())
-                .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"))
-        };
+        if path.ends_with(".html") {
+            return make_html_response(file.data, &deployment_header_val);
+        }
+
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        let content_type = HeaderValue::from_str(mime.as_ref())
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
 
         let cache_header = if path.starts_with("_next/static/") || path.starts_with("assets/") {
             "public, max-age=31536000, immutable"
@@ -86,56 +146,20 @@ pub async fn static_handler(uri: Uri) -> Response {
         let rsc_path = format!("{}.rsc", clean_path);
         let dashboard_rsc_path = format!("dashboard/{}.rsc", clean_path);
         if let Some(file) = Assets::get(&rsc_path).or_else(|| Assets::get(&dashboard_rsc_path)) {
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
-                .header(
-                    header::VARY,
-                    HeaderValue::from_static("RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url"),
-                )
-                .header(
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("public, max-age=3600, stale-while-revalidate=86400"),
-                )
-                .body(Body::from(file.data))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return make_rsc_response(file.data, &deployment_header_val);
         }
 
         // Dynamic provider detail RSC fallback
         if clean_path.starts_with("dashboard/providers/") {
             if let Some(file) = Assets::get("dashboard/providers/openai.rsc") {
-                return Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
-                    .header(
-                        header::VARY,
-                        HeaderValue::from_static("RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url"),
-                    )
-                    .header(
-                        header::CACHE_CONTROL,
-                        HeaderValue::from_static("public, max-age=3600, stale-while-revalidate=86400"),
-                    )
-                    .body(Body::from(file.data))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                return make_rsc_response(file.data, &deployment_header_val);
             }
         }
 
         // Dynamic media provider RSC fallback
         if clean_path.starts_with("dashboard/media-providers/combo/") {
             if let Some(file) = Assets::get("dashboard/media-providers/combo/image-combo.rsc") {
-                return Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
-                    .header(
-                        header::VARY,
-                        HeaderValue::from_static("RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url"),
-                    )
-                    .header(
-                        header::CACHE_CONTROL,
-                        HeaderValue::from_static("public, max-age=3600, stale-while-revalidate=86400"),
-                    )
-                    .body(Body::from(file.data))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                return make_rsc_response(file.data, &deployment_header_val);
             }
         }
         if clean_path.starts_with("dashboard/media-providers/") {
@@ -145,19 +169,7 @@ pub async fn static_handler(uri: Uri) -> Response {
                 "dashboard/media-providers/image.rsc"
             };
             if let Some(file) = Assets::get(fallback_rsc) {
-                return Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
-                    .header(
-                        header::VARY,
-                        HeaderValue::from_static("RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url"),
-                    )
-                    .header(
-                        header::CACHE_CONTROL,
-                        HeaderValue::from_static("public, max-age=3600, stale-while-revalidate=86400"),
-                    )
-                    .body(Body::from(file.data))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                return make_rsc_response(file.data, &deployment_header_val);
             }
         }
 
@@ -165,6 +177,7 @@ pub async fn static_handler(uri: Uri) -> Response {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
+            .header(HeaderName::from_static("x-nextjs-deployment-id"), deployment_header_val.clone())
             .body(Body::empty())
             .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response());
     }
@@ -172,45 +185,21 @@ pub async fn static_handler(uri: Uri) -> Response {
     // 3. Direct page HTML match (e.g. /dashboard -> dashboard.html, /dashboard/providers -> dashboard/providers.html)
     let html_path = format!("{}.html", clean_path);
     if let Some(file) = Assets::get(&html_path) {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/html; charset=utf-8"),
-            )
-            .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
-            .body(Body::from(file.data))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        return make_html_response(file.data, &deployment_header_val);
     }
 
     // 4. Dynamic route template fallbacks
     // Providers: if /dashboard/providers/:id is not an exact pre-rendered file, serve the provider detail template
     if clean_path.starts_with("dashboard/providers/") {
         if let Some(file) = Assets::get("dashboard/providers/openai.html") {
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("text/html; charset=utf-8"),
-                )
-                .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
-                .body(Body::from(file.data))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return make_html_response(file.data, &deployment_header_val);
         }
     }
 
     // Media Providers: if /dashboard/media-providers/... is not an exact pre-rendered file, serve template
     if clean_path.starts_with("dashboard/media-providers/combo/") {
         if let Some(file) = Assets::get("dashboard/media-providers/combo/image-combo.html") {
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("text/html; charset=utf-8"),
-                )
-                .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
-                .body(Body::from(file.data))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return make_html_response(file.data, &deployment_header_val);
         }
     }
     if clean_path.starts_with("dashboard/media-providers/") {
@@ -220,45 +209,21 @@ pub async fn static_handler(uri: Uri) -> Response {
             "dashboard/media-providers/image.html"
         };
         if let Some(file) = Assets::get(fallback_html) {
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("text/html; charset=utf-8"),
-                )
-                .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
-                .body(Body::from(file.data))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return make_html_response(file.data, &deployment_header_val);
         }
     }
 
     // CLI Tools: if /dashboard/cli-tools/:toolId is not an exact pre-rendered file, serve cli-tools template
     if clean_path.starts_with("dashboard/cli-tools/") {
         if let Some(file) = Assets::get("dashboard/cli-tools/claude.html") {
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("text/html; charset=utf-8"),
-                )
-                .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
-                .body(Body::from(file.data))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return make_html_response(file.data, &deployment_header_val);
         }
     }
 
     // 5. Nested index.html match (e.g. /dashboard/ -> dashboard/index.html)
     let index_subpath = format!("{}/index.html", clean_path);
     if let Some(file) = Assets::get(&index_subpath) {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/html; charset=utf-8"),
-            )
-            .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
-            .body(Body::from(file.data))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        return make_html_response(file.data, &deployment_header_val);
     }
 
     // 6. If path has a file extension and was not found, return 404 (don't serve HTML for missing files)
@@ -273,25 +238,9 @@ pub async fn static_handler(uri: Uri) -> Response {
 
     // 7. SPA client-side routing fallback: try dashboard.html first, then index.html
     if let Some(dashboard_file) = Assets::get("dashboard.html") {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/html; charset=utf-8"),
-            )
-            .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
-            .body(Body::from(dashboard_file.data))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        make_html_response(dashboard_file.data, &deployment_header_val)
     } else if let Some(index_file) = Assets::get("index.html") {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/html; charset=utf-8"),
-            )
-            .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
-            .body(Body::from(index_file.data))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        make_html_response(index_file.data, &deployment_header_val)
     } else {
         (
             StatusCode::NOT_FOUND,
@@ -359,5 +308,31 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
+
+        // 10. Deployment ID header injection
+        let resp = static_handler("/dashboard".parse().unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("x-nextjs-deployment-id").is_some());
+        assert_eq!(
+            resp.headers().get("x-nextjs-deployment-id").unwrap(),
+            get_embedded_build_id()
+        );
+
+        // 11. Client-supplied deployment ID header matching
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert(
+            HeaderName::from_static("x-nextjs-deployment-id"),
+            HeaderValue::from_static("client-matching-id-999"),
+        );
+        let resp = static_handler_with_headers(
+            "/dashboard/basic-chat?_rsc=1".parse().unwrap(),
+            Some(&client_headers),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("x-nextjs-deployment-id").unwrap(),
+            "client-matching-id-999"
+        );
     }
 }

@@ -5,6 +5,10 @@ edition = "2024"
 publish = false
 description = "Native Rust core for 9Router: single-binary high-performance AI Gateway and dashboard"
 
+[lib]
+name = "ninerouter"
+path = "src/lib.rs"
+
 [[bin]]
 name = "9r"
 path = "src/main.rs"
