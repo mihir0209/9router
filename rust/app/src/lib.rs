@@ -11,5 +11,6 @@ pub mod original;
 pub mod proxy;
 pub mod routes;
 pub mod sse;
+pub mod token_refresh;
 pub mod token_saver;
 pub mod translator;

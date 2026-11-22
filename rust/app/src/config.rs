@@ -747,6 +747,7 @@ pub struct Config {
     pub routing: RoutingConfig,
     pub streaming: StreamingConfig,
     pub observability: ObservabilityConfig,
+    pub token_refresh: crate::token_refresh::TokenRefreshConfig,
 }
 
 impl Default for Config {
@@ -758,6 +759,7 @@ impl Default for Config {
         let routing = RoutingConfig::default();
         let streaming = StreamingConfig::default();
         let observability = ObservabilityConfig::default();
+        let token_refresh = crate::token_refresh::TokenRefreshConfig::default();
 
         Self {
             data_dir: storage.data_dir.clone(),
@@ -771,6 +773,7 @@ impl Default for Config {
             routing,
             streaming,
             observability,
+            token_refresh,
         }
     }
 }
@@ -790,6 +793,7 @@ impl Config {
         let routing = RoutingConfig::load_from(&lookup);
         let streaming = StreamingConfig::load_from(&lookup);
         let observability = ObservabilityConfig::load_from(&lookup);
+        let token_refresh = crate::token_refresh::TokenRefreshConfig::load_from(&lookup);
 
         Self {
             data_dir: storage.data_dir.clone(),
@@ -803,6 +807,7 @@ impl Config {
             routing,
             streaming,
             observability,
+            token_refresh,
         }
     }
 

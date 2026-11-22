@@ -11,6 +11,7 @@ pub mod original;
 pub mod proxy;
 pub mod routes;
 pub mod sse;
+pub mod token_refresh;
 pub mod token_saver;
 pub mod translator;
 
@@ -80,14 +81,21 @@ async fn main() -> anyhow::Result<()> {
     let db = db::Database::open(&config)?;
     tracing::info!("Database initialized at {}", config.db_path.display());
 
-    // 4. Initialize ProxyService
+    // 4. Start background token lifecycle & model catalog refresh worker
+    let token_refresh_handle = token_refresh::start_background_token_refresh(
+        config.token_refresh.clone(),
+        Arc::clone(&db),
+        &config.data_dir,
+    );
+
+    // 5. Initialize ProxyService
     let proxy = Arc::new(proxy::ProxyService::new());
 
-    // 5. Initialize Original Next.js dashboard backend
+    // 6. Initialize Original Next.js dashboard backend
     let original = original::Original::start().await;
     tracing::info!("Original Next.js dashboard backend initialized at {}", original.base);
 
-    // 6. Compose Axum router
+    // 7. Compose Axum router
     let circuit_breaker = Arc::new(circuit_breaker::CircuitBreakerRegistry::default());
     let combo_tracker = combo_router::ComboTracker::with_circuit_breakers(Arc::clone(&circuit_breaker));
     let token_cache = cache::TokenCache::default();
@@ -103,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let app = routes::create_router(state);
 
-    // 7. Bind to port and run with graceful shutdown
+    // 8. Bind to port and run with graceful shutdown
     let port = config.port;
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let addr = match host.parse::<std::net::IpAddr>() {
@@ -117,6 +125,9 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    if let Some(h) = token_refresh_handle {
+        h.stop();
+    }
     original.stop();
     tracing::info!("9Router shutdown gracefully");
     Ok(())

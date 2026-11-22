@@ -3,6 +3,7 @@ pub mod common;
 pub mod daemon;
 pub mod models;
 pub mod service;
+pub mod tokens;
 pub mod tools;
 pub mod update;
 
@@ -26,6 +27,7 @@ Core Commands:
 
 Secondary Commands & Tooling:
   models, ls [options]     Query local gateway catalog and display available models & routing
+  tokens [options]         Inspect OAuth provider connections and token refresh status
   test, bench [options]    Benchmark local gateway latency (RTT) & verify zero-overhead routing
   update, upgrade [opts]   Check for updates, verify checksums, and update 9Router binary
 
@@ -234,6 +236,10 @@ pub async fn dispatch(args: &[String]) -> anyhow::Result<bool> {
             models::run_models(&args[1..]).await?;
             Ok(true)
         }
+        "tokens" | "refresh-tokens" => {
+            tokens::run_tokens(&args[1..]).await?;
+            Ok(true)
+        }
         "test" | "bench" => {
             bench::run_bench(&args[1..]).await?;
             Ok(true)
@@ -285,6 +291,12 @@ mod tests {
     async fn test_dispatch_models_help() {
         assert!(dispatch(&["models".to_string(), "--help".to_string()]).await.unwrap());
         assert!(dispatch(&["ls".to_string(), "-h".to_string()]).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_tokens_help() {
+        assert!(dispatch(&["tokens".to_string(), "--help".to_string()]).await.unwrap());
+        assert!(dispatch(&["refresh-tokens".to_string(), "-h".to_string()]).await.unwrap());
     }
 
     #[tokio::test]
