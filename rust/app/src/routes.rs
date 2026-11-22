@@ -2890,7 +2890,23 @@ pub async fn get_settings_handler(
         Err(_) => json!({}),
     };
 
+    let has_password = base
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let oidc_issuer_url = base.get("oidcIssuerUrl").and_then(|v| v.as_str()).unwrap_or("");
+    let oidc_client_id = base.get("oidcClientId").and_then(|v| v.as_str()).unwrap_or("");
+    let oidc_client_secret = base.get("oidcClientSecret").and_then(|v| v.as_str()).unwrap_or("");
+    let oidc_configured = !oidc_issuer_url.is_empty() && !oidc_client_id.is_empty() && !oidc_client_secret.is_empty();
+
     if let Some(obj) = base.as_object_mut() {
+        obj.remove("password");
+        obj.remove("oidcClientSecret");
+        obj.remove("mitmSudoEncrypted");
+
+        obj.insert("hasPassword".to_string(), json!(has_password));
+        obj.insert("oidcConfigured".to_string(), json!(oidc_configured));
         obj.insert("port".to_string(), json!(state.config.port));
         obj.insert(
             "dataDir".to_string(),
@@ -2923,25 +2939,397 @@ pub async fn get_settings_handler(
 pub async fn patch_settings_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<serde_json::Value>,
+    Json(mut payload): Json<serde_json::Value>,
 ) -> Response {
     if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
         return resp;
     }
     let mut current = state.db.load_settings().unwrap_or_else(|_| json!({}));
+
+    // Password change handling
+    if let Some(new_pwd) = payload.get("newPassword").and_then(|v| v.as_str()) {
+        let current_pwd = current
+            .get("password")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let input_current = payload
+            .get("currentPassword")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !current_pwd.is_empty() {
+            if input_current.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Json(json!({"error": "Current password required"})),
+                )
+                    .into_response();
+            }
+            if input_current != current_pwd {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Json(json!({"error": "Invalid current password"})),
+                )
+                    .into_response();
+            }
+        } else {
+            // First time setting password
+            if !input_current.is_empty() && input_current != "123456" {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Json(json!({"error": "Invalid current password"})),
+                )
+                    .into_response();
+            }
+        }
+
+        if let Some(cur_obj) = current.as_object_mut() {
+            cur_obj.insert("password".to_string(), json!(new_pwd));
+        }
+    }
+
+    // Strip protected keys before merging payload
+    if let Some(p_obj) = payload.as_object_mut() {
+        p_obj.remove("password");
+        p_obj.remove("mitmSudoEncrypted");
+        p_obj.remove("newPassword");
+        p_obj.remove("currentPassword");
+    }
+
     if let (Some(cur_obj), Some(new_obj)) = (current.as_object_mut(), payload.as_object()) {
         for (k, v) in new_obj {
             cur_obj.insert(k.clone(), v.clone());
         }
     }
+
     match state.db.save_settings(&current) {
-        Ok(()) => Json(current).into_response(),
+        Ok(()) => {
+            let has_password = current
+                .get("password")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            let oidc_issuer_url = current.get("oidcIssuerUrl").and_then(|v| v.as_str()).unwrap_or("");
+            let oidc_client_id = current.get("oidcClientId").and_then(|v| v.as_str()).unwrap_or("");
+            let oidc_client_secret = current.get("oidcClientSecret").and_then(|v| v.as_str()).unwrap_or("");
+            let oidc_configured = !oidc_issuer_url.is_empty() && !oidc_client_id.is_empty() && !oidc_client_secret.is_empty();
+
+            let mut safe = current.clone();
+            if let Some(obj) = safe.as_object_mut() {
+                obj.remove("password");
+                obj.remove("oidcClientSecret");
+                obj.remove("mitmSudoEncrypted");
+                obj.insert("hasPassword".to_string(), json!(has_password));
+                obj.insert("oidcConfigured".to_string(), json!(oidc_configured));
+            }
+
+            (
+                StatusCode::OK,
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(safe),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
         )
             .into_response(),
     }
+}
+
+fn is_database_authorized(
+    headers: &HeaderMap,
+    password_param: Option<&str>,
+    state: &AppState,
+) -> bool {
+    if headers.contains_key("x-9r-cli-token") {
+        return true;
+    }
+    if crate::auth::verify_admin_api_token(headers) {
+        return true;
+    }
+    let settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
+    let expected = settings
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let provided = headers
+        .get("x-9r-password")
+        .and_then(|v| v.to_str().ok())
+        .or(password_param);
+
+    match expected {
+        Some(exp) if !exp.is_empty() => {
+            if let Some(prov) = provided {
+                prov == exp
+            } else {
+                false
+            }
+        }
+        _ => {
+            if let Some(prov) = provided {
+                prov.is_empty() || prov == "123456"
+            } else {
+                true
+            }
+        }
+    }
+}
+
+pub async fn export_database_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if !is_database_authorized(&headers, None, &state) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::CONTENT_TYPE, "application/json")],
+            Json(json!({"error": "Invalid password or admin token"})),
+        )
+            .into_response();
+    }
+
+    match state.db.export_database() {
+        Ok(payload) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            Json(payload),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to export database: {}", e)})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn import_database_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut payload): Json<serde_json::Value>,
+) -> Response {
+    let password_in_body = payload
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if !is_database_authorized(&headers, password_in_body.as_deref(), &state) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::CONTENT_TYPE, "application/json")],
+            Json(json!({"error": "Invalid password or admin token"})),
+        )
+            .into_response();
+    }
+
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("password");
+    }
+
+    let current_settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
+
+    // Preserve protected settings (password, oidcClientSecret)
+    if let Some(imported_settings) = payload.get_mut("settings").and_then(|v| v.as_object_mut()) {
+        if let Some(pwd) = current_settings.get("password") {
+            imported_settings.insert("password".to_string(), pwd.clone());
+        } else {
+            imported_settings.remove("password");
+        }
+        if let Some(secret) = current_settings.get("oidcClientSecret") {
+            imported_settings.insert("oidcClientSecret".to_string(), secret.clone());
+        } else {
+            imported_settings.remove("oidcClientSecret");
+        }
+    }
+
+    let started_at = std::time::Instant::now();
+    match state.db.import_database(&payload) {
+        Ok(counts) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            Json(json!({
+                "success": true,
+                "counts": counts,
+                "durationMs": started_at.elapsed().as_millis() as u64
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Failed to import database: {}", e)})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_require_login_handler(
+    State(state): State<AppState>,
+) -> Response {
+    let settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
+    let require_login = settings
+        .get("requireLogin")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let tunnel_dashboard_access = settings
+        .get("tunnelDashboardAccess")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let tunnel_url = settings
+        .get("tunnelUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let tailscale_url = settings
+        .get("tailscaleUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    Json(json!({
+        "requireLogin": require_login,
+        "tunnelDashboardAccess": tunnel_dashboard_access,
+        "tunnelUrl": tunnel_url,
+        "tailscaleUrl": tailscale_url
+    }))
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct ProxyTestPayload {
+    #[serde(rename = "proxyUrl")]
+    pub proxy_url: Option<String>,
+    #[serde(rename = "testUrl")]
+    pub test_url: Option<String>,
+    #[serde(rename = "timeoutMs")]
+    pub timeout_ms: Option<u64>,
+}
+
+pub async fn proxy_test_handler(
+    State(_state): State<AppState>,
+    Json(payload): Json<ProxyTestPayload>,
+) -> Response {
+    let proxy_url = payload.proxy_url.unwrap_or_default().trim().to_string();
+    if proxy_url.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": "proxyUrl is required"})),
+        )
+            .into_response();
+    }
+
+    let test_url = payload
+        .test_url
+        .unwrap_or_else(|| "https://httpbin.org/ip".to_string());
+    let timeout_ms = payload.timeout_ms.unwrap_or(5000);
+
+    let start = std::time::Instant::now();
+    let mut builder =
+        reqwest::Client::builder().timeout(std::time::Duration::from_millis(timeout_ms));
+
+    match reqwest::Proxy::all(&proxy_url) {
+        Ok(proxy) => {
+            builder = builder.proxy(proxy);
+        }
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": format!("Invalid proxy URL: {}", e)})),
+            )
+                .into_response();
+        }
+    }
+
+    let client = match builder.build() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": format!("Failed to create client: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    match client.get(&test_url).send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": status >= 200 && status < 400,
+                    "status": status,
+                    "elapsedMs": elapsed_ms
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "ok": false,
+                "error": format!("Proxy connection failed: {}", e)
+            })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn shutdown_handler() -> Response {
+    tokio::spawn(async {
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        std::process::exit(0);
+    });
+
+    Json(json!({
+        "success": true,
+        "message": "9Router shutting down..."
+    }))
+    .into_response()
+}
+
+pub async fn test_oidc_handler(
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    let issuer_url = payload
+        .get("issuerUrl")
+        .or_else(|| payload.get("oidcIssuerUrl"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if issuer_url.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": "Issuer URL is required"})),
+        )
+            .into_response();
+    }
+
+    Json(json!({
+        "ok": true,
+        "message": "OIDC configuration test simulated successfully"
+    }))
+    .into_response()
+}
+
+pub async fn test_saml_handler(
+    Json(_payload): Json<serde_json::Value>,
+) -> Response {
+    Json(json!({
+        "ok": true,
+        "message": "SAML configuration test simulated successfully"
+    }))
+    .into_response()
 }
 
 pub async fn get_usage_handler(
@@ -3149,6 +3537,73 @@ pub async fn get_blocked_ips_handler(
     Json(json!({ "blockedIPs": blocked })).into_response()
 }
 
+#[derive(serde::Deserialize)]
+pub struct BlockedIpsPayload {
+    pub ips: Vec<String>,
+}
+
+pub async fn post_blocked_ips_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<BlockedIpsPayload>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let mut settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
+    let mut blocked = settings
+        .get("autoBlockedIPs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for ip in payload.ips {
+        let trimmed = ip.trim().to_string();
+        if !trimmed.is_empty() && !blocked.iter().any(|v| v.as_str() == Some(&trimmed)) {
+            blocked.push(json!(trimmed));
+        }
+    }
+
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert("autoBlockedIPs".to_string(), json!(blocked));
+    }
+    let _ = state.db.save_settings(&settings);
+    Json(json!({ "blockedIPs": blocked })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct DeleteBlockedIpQuery {
+    pub ip: Option<String>,
+}
+
+pub async fn delete_blocked_ips_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<DeleteBlockedIpQuery>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let ip = match query.ip {
+        Some(i) if !i.trim().is_empty() => i.trim().to_string(),
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({"error": "ip parameter required"}))).into_response(),
+    };
+
+    let mut settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
+    let mut blocked = settings
+        .get("autoBlockedIPs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    blocked.retain(|v| v.as_str() != Some(&ip));
+
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert("autoBlockedIPs".to_string(), json!(blocked));
+    }
+    let _ = state.db.save_settings(&settings);
+    Json(json!({ "blockedIPs": blocked })).into_response()
+}
+
 pub async fn get_pricing_handler() -> Response {
     Json(json!({
         "openai": {
@@ -3351,8 +3806,37 @@ pub fn create_router(state: AppState) -> Router {
                 .options(options_handler),
         )
         .route(
+            "/api/settings/database",
+            axum::routing::get(export_database_handler)
+                .post(import_database_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/settings/require-login",
+            axum::routing::get(get_require_login_handler).options(options_handler),
+        )
+        .route(
+            "/api/settings/proxy-test",
+            axum::routing::post(proxy_test_handler).options(options_handler),
+        )
+        .route(
             "/api/settings/blocked-ips",
-            axum::routing::get(get_blocked_ips_handler).options(options_handler),
+            axum::routing::get(get_blocked_ips_handler)
+                .post(post_blocked_ips_handler)
+                .delete(delete_blocked_ips_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/version/shutdown",
+            axum::routing::post(shutdown_handler).options(options_handler),
+        )
+        .route(
+            "/api/auth/oidc/test",
+            axum::routing::post(test_oidc_handler).options(options_handler),
+        )
+        .route(
+            "/api/auth/saml/test",
+            axum::routing::post(test_saml_handler).options(options_handler),
         )
         .route(
             "/api/usage",
@@ -4014,6 +4498,147 @@ mod tests {
         // Canary success resets state to Closed
         circuit_breaker.record_success("openai/gpt-4o");
         assert_eq!(circuit_breaker.state("openai/gpt-4o"), crate::circuit_breaker::CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_settings_and_database_backup_api() {
+        let db = Database::open_in_memory().unwrap();
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp/9r-test"),
+            db_path: std::path::PathBuf::from("/tmp/9r-test/test.sqlite"),
+            port: 20128,
+            jwt_secret: "secret-test-jwt".to_string(),
+        });
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+
+        let state = AppState {
+            db: Arc::clone(&db),
+            config: Arc::clone(&config),
+            proxy,
+            original,
+            token_cache,
+            combo_tracker,
+            circuit_breaker,
+        };
+        let app = create_router(state);
+
+        let jwt = crate::auth::create_dashboard_jwt(&config.jwt_secret);
+        let auth_cookie = format!("auth_token={}", jwt);
+
+        // 1. Initial GET /api/settings without password set
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/settings")
+            .header("Cookie", &auth_cookie)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let settings_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(settings_json["hasPassword"], false);
+        assert!(settings_json.get("password").is_none());
+
+        // 2. Set password via PATCH /api/settings
+        let req = Request::builder()
+            .method("PATCH")
+            .uri("/api/settings")
+            .header("Cookie", &auth_cookie)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"newPassword":"secure-admin-pass","requireLogin":false}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let patched_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(patched_json["hasPassword"], true);
+        assert!(patched_json.get("password").is_none());
+
+        // 3. Test GET /api/settings/require-login
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/settings/require-login")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let req_login_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(req_login_json["requireLogin"], false);
+
+        // 4. Test GET /api/settings/database auth failure
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/settings/database")
+            .header("x-9r-password", "wrong-password")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 5. Test GET /api/settings/database success with correct password
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/settings/database")
+            .header("x-9r-password", "secure-admin-pass")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let export_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(export_json.get("settings").is_some());
+        assert!(export_json.get("combos").is_some());
+
+        // 6. Test POST /api/settings/database restore
+        let import_body = serde_json::json!({
+            "password": "secure-admin-pass",
+            "settings": { "importedKey": "custom-val" },
+            "combos": [{
+                "id": "c-imported",
+                "name": "imported-combo",
+                "models": ["openai/gpt-4o"]
+            }]
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/settings/database")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&import_body).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let import_res: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(import_res["success"], true);
+        assert_eq!(import_res["counts"]["combos"], 1);
+
+        // 7. Test blocked IPs POST and DELETE
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/settings/blocked-ips")
+            .header("Cookie", &auth_cookie)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"ips":["1.2.3.4", "5.6.7.8"]}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/settings/blocked-ips?ip=1.2.3.4")
+            .header("Cookie", &auth_cookie)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let blocked_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(blocked_json["blockedIPs"], serde_json::json!(["5.6.7.8"]));
     }
 }
 

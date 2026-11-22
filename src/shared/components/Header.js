@@ -259,6 +259,7 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
                 {crumb.href ? (
                   <Link
                     href={crumb.href}
+                    prefetch={false}
                     className="text-text-muted hover:text-primary transition-colors truncate"
                   >
                     {crumb.label}
@@ -320,6 +321,7 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
         <HeaderSearch />
         <Link
           href="/dashboard/basic-chat"
+          prefetch={false}
           className="flex items-center gap-1.5 px-3 h-8 rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors text-sm font-medium"
           aria-label="Chat Assistant"
         >

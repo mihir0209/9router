@@ -80,6 +80,7 @@ function SidebarLink({ href, label, icon, collapsed, active, onClick, compact = 
       <Link
         ref={ref}
         href={href}
+        prefetch={false}
         onClick={onClick}
         {...tooltipHandlers}
         className={cn(
@@ -119,6 +120,7 @@ function LogoLink({ collapsed }) {
       <Link
         ref={ref}
         href="/dashboard"
+        prefetch={false}
         className="flex min-w-0 flex-1 items-center gap-3"
         aria-label={APP_CONFIG.name}
         {...tooltipHandlers}

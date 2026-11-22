@@ -327,6 +327,32 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_combo_name ON combos(name);
 
+            CREATE TABLE IF NOT EXISTS providerNodes (
+                id TEXT PRIMARY KEY,
+                type TEXT,
+                name TEXT,
+                data TEXT NOT NULL,
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS proxyPools (
+                id TEXT PRIMARY KEY,
+                isActive INTEGER DEFAULT 1,
+                testStatus TEXT,
+                data TEXT NOT NULL,
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS kv (
+                scope TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (scope, key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_kv_scope ON kv(scope);
+
             CREATE TABLE IF NOT EXISTS usageHistory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -1485,6 +1511,559 @@ impl Database {
             results.push(model.to_string());
         }
     }
+
+    // ==========================================
+    // Database Backup & Restore Operations
+    // ==========================================
+
+    /// Exports full database backup payload matching Next.js exportDb schema.
+    pub fn export_database(&self) -> anyhow::Result<serde_json::Value> {
+        let guard = self.conn.lock().unwrap();
+
+        let settings = match guard.prepare_cached("SELECT data FROM settings WHERE id = 1") {
+            Ok(mut stmt) => stmt
+                .query_row([], |row| {
+                    let data_str: String = row.get(0)?;
+                    Ok(serde_json::from_str::<serde_json::Value>(&data_str)
+                        .unwrap_or(serde_json::json!({})))
+                })
+                .optional()?
+                .unwrap_or_else(|| serde_json::json!({})),
+            Err(_) => serde_json::json!({}),
+        };
+
+        let mut provider_connections = Vec::new();
+        if let Ok(mut stmt) = guard.prepare(
+            "SELECT id, provider, authType, name, email, priority, isActive, data, createdAt, updatedAt FROM providerConnections",
+        ) {
+            let rows = stmt.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let provider: String = row.get(1)?;
+                let auth_type: String = row.get(2)?;
+                let name: Option<String> = row.get(3)?;
+                let email: Option<String> = row.get(4)?;
+                let priority: Option<i64> = row.get(5)?;
+                let is_active: i64 = row.get(6)?;
+                let data_str: String = row.get(7)?;
+                let created_at: String = row.get(8)?;
+                let updated_at: String = row.get(9)?;
+
+                let mut obj: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_str(&data_str).unwrap_or_default();
+                obj.insert("id".to_string(), serde_json::json!(id));
+                obj.insert("provider".to_string(), serde_json::json!(provider));
+                obj.insert("authType".to_string(), serde_json::json!(auth_type));
+                obj.insert("name".to_string(), serde_json::json!(name));
+                obj.insert("email".to_string(), serde_json::json!(email));
+                obj.insert("priority".to_string(), serde_json::json!(priority));
+                obj.insert("isActive".to_string(), serde_json::json!(is_active == 1));
+                obj.insert("createdAt".to_string(), serde_json::json!(created_at));
+                obj.insert("updatedAt".to_string(), serde_json::json!(updated_at));
+                Ok(serde_json::Value::Object(obj))
+            })?;
+            for r in rows {
+                if let Ok(val) = r {
+                    provider_connections.push(val);
+                }
+            }
+        }
+
+        let mut provider_nodes = Vec::new();
+        if let Ok(mut stmt) = guard.prepare(
+            "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes",
+        ) {
+            let rows = stmt.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let node_type: Option<String> = row.get(1)?;
+                let name: Option<String> = row.get(2)?;
+                let data_str: String = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let updated_at: String = row.get(5)?;
+
+                let mut obj: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_str(&data_str).unwrap_or_default();
+                obj.insert("id".to_string(), serde_json::json!(id));
+                obj.insert("type".to_string(), serde_json::json!(node_type));
+                obj.insert("name".to_string(), serde_json::json!(name));
+                obj.insert("createdAt".to_string(), serde_json::json!(created_at));
+                obj.insert("updatedAt".to_string(), serde_json::json!(updated_at));
+                Ok(serde_json::Value::Object(obj))
+            })?;
+            for r in rows {
+                if let Ok(val) = r {
+                    provider_nodes.push(val);
+                }
+            }
+        }
+
+        let mut proxy_pools = Vec::new();
+        if let Ok(mut stmt) = guard.prepare(
+            "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools",
+        ) {
+            let rows = stmt.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let is_active: i64 = row.get(1)?;
+                let test_status: Option<String> = row.get(2)?;
+                let data_str: String = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let updated_at: String = row.get(5)?;
+
+                let mut obj: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_str(&data_str).unwrap_or_default();
+                obj.insert("id".to_string(), serde_json::json!(id));
+                obj.insert("isActive".to_string(), serde_json::json!(is_active == 1));
+                obj.insert("testStatus".to_string(), serde_json::json!(test_status));
+                obj.insert("createdAt".to_string(), serde_json::json!(created_at));
+                obj.insert("updatedAt".to_string(), serde_json::json!(updated_at));
+                Ok(serde_json::Value::Object(obj))
+            })?;
+            for r in rows {
+                if let Ok(val) = r {
+                    proxy_pools.push(val);
+                }
+            }
+        }
+
+        let mut api_keys = Vec::new();
+        if let Ok(mut stmt) = guard.prepare(
+            "SELECT id, key, name, machineId, isActive, createdAt, rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly, allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description, ownerRef, maxConcurrentRequests, allowedProviders, blockedProviders, forceProvider, forceModel, allowedEndpoints, blockedEndpoints, metadata, updatedAt FROM apiKeys",
+        ) {
+            let rows = stmt.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let key: String = row.get(1)?;
+                let name: Option<String> = row.get(2)?;
+                let machine_id: Option<String> = row.get(3)?;
+                let is_active: i64 = row.get(4)?;
+                let created_at: String = row.get(5)?;
+                let rate_limit_requests: i64 = row.get(6)?;
+                let rate_limit_window_seconds: i64 = row.get(7)?;
+                let token_limit_daily: i64 = row.get(8)?;
+                let token_limit_monthly: i64 = row.get(9)?;
+                let allowed_models: String = row.get(10)?;
+                let blocked_models: String = row.get(11)?;
+                let allowed_ips: String = row.get(12)?;
+                let blocked_ips: String = row.get(13)?;
+                let expires_at: String = row.get(14)?;
+                let description: String = row.get(15)?;
+                let owner_ref: Option<String> = row.get(16)?;
+                let max_concurrent_requests: i64 = row.get(17)?;
+                let allowed_providers: String = row.get(18)?;
+                let blocked_providers: String = row.get(19)?;
+                let force_provider: String = row.get(20)?;
+                let force_model: String = row.get(21)?;
+                let allowed_endpoints: String = row.get(22)?;
+                let blocked_endpoints: String = row.get(23)?;
+                let metadata: String = row.get(24)?;
+                let updated_at: Option<String> = row.get(25)?;
+
+                Ok(serde_json::json!({
+                    "id": id,
+                    "key": key,
+                    "name": name,
+                    "machineId": machine_id,
+                    "isActive": is_active == 1,
+                    "createdAt": created_at,
+                    "rateLimitRequests": rate_limit_requests,
+                    "rateLimitWindowSeconds": rate_limit_window_seconds,
+                    "tokenLimitDaily": token_limit_daily,
+                    "tokenLimitMonthly": token_limit_monthly,
+                    "allowedModels": allowed_models,
+                    "blockedModels": blocked_models,
+                    "allowedIPs": allowed_ips,
+                    "blockedIPs": blocked_ips,
+                    "expiresAt": expires_at,
+                    "description": description,
+                    "ownerRef": owner_ref,
+                    "maxConcurrentRequests": max_concurrent_requests,
+                    "allowedProviders": allowed_providers,
+                    "blockedProviders": blocked_providers,
+                    "forceProvider": force_provider,
+                    "forceModel": force_model,
+                    "allowedEndpoints": allowed_endpoints,
+                    "blockedEndpoints": blocked_endpoints,
+                    "metadata": metadata,
+                    "updatedAt": updated_at.unwrap_or(created_at),
+                }))
+            })?;
+            for r in rows {
+                if let Ok(val) = r {
+                    api_keys.push(val);
+                }
+            }
+        }
+
+        let mut combos = Vec::new();
+        if let Ok(mut stmt) = guard.prepare(
+            "SELECT id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt FROM combos",
+        ) {
+            let rows = stmt.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let name: String = row.get(1)?;
+                let kind: Option<String> = row.get(2)?;
+                let models_str: String = row.get(3)?;
+                let strategy: Option<String> = row.get(4)?;
+                let match_rules: Option<String> = row.get(5)?;
+                let custom_prompt: Option<String> = row.get(6)?;
+                let created_at: String = row.get(7)?;
+                let updated_at: String = row.get(8)?;
+
+                let models: serde_json::Value =
+                    serde_json::from_str(&models_str).unwrap_or(serde_json::json!([]));
+                let match_rules_val: serde_json::Value = match_rules
+                    .as_deref()
+                    .map(|s| serde_json::from_str(s).unwrap_or(serde_json::json!([])))
+                    .unwrap_or(serde_json::json!([]));
+
+                Ok(serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "kind": kind,
+                    "models": models,
+                    "strategy": strategy,
+                    "matchRules": match_rules_val,
+                    "customPrompt": custom_prompt,
+                    "createdAt": created_at,
+                    "updatedAt": updated_at,
+                }))
+            })?;
+            for r in rows {
+                if let Ok(val) = r {
+                    combos.push(val);
+                }
+            }
+        }
+
+        let mut model_aliases = serde_json::Map::new();
+        let mut custom_models = Vec::new();
+        let mut mitm_alias = serde_json::Map::new();
+        let mut pricing = serde_json::Map::new();
+
+        if let Ok(mut stmt) = guard.prepare("SELECT scope, key, value FROM kv") {
+            let rows = stmt.query_map([], |row| {
+                let scope: String = row.get(0)?;
+                let key: String = row.get(1)?;
+                let value_str: String = row.get(2)?;
+                let val: serde_json::Value =
+                    serde_json::from_str(&value_str).unwrap_or(serde_json::Value::Null);
+                Ok((scope, key, val))
+            })?;
+            for r in rows {
+                if let Ok((scope, key, val)) = r {
+                    match scope.as_str() {
+                        "modelAliases" => {
+                            model_aliases.insert(key, val);
+                        }
+                        "customModels" => {
+                            custom_models.push(val);
+                        }
+                        "mitmAlias" => {
+                            mitm_alias.insert(key, val);
+                        }
+                        "pricing" => {
+                            pricing.insert(key, val);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "settings": settings,
+            "providerConnections": provider_connections,
+            "providerNodes": provider_nodes,
+            "proxyPools": proxy_pools,
+            "apiKeys": api_keys,
+            "combos": combos,
+            "modelAliases": model_aliases,
+            "customModels": custom_models,
+            "mitmAlias": mitm_alias,
+            "pricing": pricing,
+        }))
+    }
+
+    /// Replaces database contents with payload in a single atomic transaction.
+    /// Returns per-table written row counts.
+    pub fn import_database(&self, payload: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        if !payload.is_object() {
+            anyhow::bail!("Invalid database payload: root must be an object");
+        }
+
+        let has_known_table = payload.get("settings").is_some()
+            || payload.get("providerConnections").is_some()
+            || payload.get("providerNodes").is_some()
+            || payload.get("proxyPools").is_some()
+            || payload.get("apiKeys").is_some()
+            || payload.get("combos").is_some()
+            || payload.get("modelAliases").is_some()
+            || payload.get("customModels").is_some()
+            || payload.get("mitmAlias").is_some()
+            || payload.get("pricing").is_some();
+
+        if !has_known_table {
+            anyhow::bail!("Invalid database payload: it contains none of the backup tables");
+        }
+
+        let mut guard = self.conn.lock().unwrap();
+        let tx = guard.transaction()?;
+
+        // Wipe tables (preserve _meta and usageHistory)
+        tx.execute_batch(
+            r#"
+            DELETE FROM settings;
+            DELETE FROM providerConnections;
+            DELETE FROM providerNodes;
+            DELETE FROM proxyPools;
+            DELETE FROM apiKeys;
+            DELETE FROM combos;
+            DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing');
+            "#,
+        )?;
+
+        let mut counts = serde_json::Map::new();
+
+        // 1. Settings
+        if let Some(settings_val) = payload.get("settings") {
+            if settings_val.is_object() {
+                let data_str = serde_json::to_string(settings_val)?;
+                tx.execute(
+                    "INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+                    params![data_str],
+                )?;
+                counts.insert("settings".to_string(), serde_json::json!(1));
+            } else {
+                counts.insert("settings".to_string(), serde_json::json!(0));
+            }
+        } else {
+            counts.insert("settings".to_string(), serde_json::json!(0));
+        }
+
+        // 2. providerConnections
+        let mut pc_count = 0;
+        if let Some(pcs) = payload.get("providerConnections").and_then(|v| v.as_array()) {
+            for c in pcs {
+                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                if id.is_empty() {
+                    continue;
+                }
+                let provider = c.get("provider").and_then(|v| v.as_str()).unwrap_or_default();
+                let auth_type = c.get("authType").and_then(|v| v.as_str()).unwrap_or("oauth");
+                let name = c.get("name").and_then(|v| v.as_str());
+                let email = c.get("email").and_then(|v| v.as_str());
+                let priority = c.get("priority").and_then(|v| v.as_i64());
+                let is_active = if c.get("isActive").and_then(|v| v.as_bool()) == Some(false) { 0 } else { 1 };
+                let now = Utc::now().to_rfc3339();
+                let created_at = c.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                let updated_at = c.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                let data_str = serde_json::to_string(c)?;
+
+                tx.execute(
+                    r#"
+                    INSERT OR REPLACE INTO providerConnections(id, provider, authType, name, email, priority, isActive, data, createdAt, updatedAt)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                    params![id, provider, auth_type, name, email, priority, is_active, data_str, created_at, updated_at],
+                )?;
+                pc_count += 1;
+            }
+        }
+        counts.insert("providerConnections".to_string(), serde_json::json!(pc_count));
+
+        // 3. providerNodes
+        let mut pn_count = 0;
+        if let Some(pns) = payload.get("providerNodes").and_then(|v| v.as_array()) {
+            for n in pns {
+                let id = n.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                if id.is_empty() {
+                    continue;
+                }
+                let node_type = n.get("type").and_then(|v| v.as_str());
+                let name = n.get("name").and_then(|v| v.as_str());
+                let now = Utc::now().to_rfc3339();
+                let created_at = n.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                let updated_at = n.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                let data_str = serde_json::to_string(n)?;
+
+                tx.execute(
+                    r#"
+                    INSERT OR REPLACE INTO providerNodes(id, type, name, data, createdAt, updatedAt)
+                    VALUES(?, ?, ?, ?, ?, ?)
+                    "#,
+                    params![id, node_type, name, data_str, created_at, updated_at],
+                )?;
+                pn_count += 1;
+            }
+        }
+        counts.insert("providerNodes".to_string(), serde_json::json!(pn_count));
+
+        // 4. proxyPools
+        let mut pp_count = 0;
+        if let Some(pps) = payload.get("proxyPools").and_then(|v| v.as_array()) {
+            for p in pps {
+                let id = p.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                if id.is_empty() {
+                    continue;
+                }
+                let is_active = if p.get("isActive").and_then(|v| v.as_bool()) == Some(false) { 0 } else { 1 };
+                let test_status = p.get("testStatus").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let now = Utc::now().to_rfc3339();
+                let created_at = p.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                let updated_at = p.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                let data_str = serde_json::to_string(p)?;
+
+                tx.execute(
+                    r#"
+                    INSERT OR REPLACE INTO proxyPools(id, isActive, testStatus, data, createdAt, updatedAt)
+                    VALUES(?, ?, ?, ?, ?, ?)
+                    "#,
+                    params![id, is_active, test_status, data_str, created_at, updated_at],
+                )?;
+                pp_count += 1;
+            }
+        }
+        counts.insert("proxyPools".to_string(), serde_json::json!(pp_count));
+
+        // 5. apiKeys
+        let mut ak_count = 0;
+        if let Some(aks) = payload.get("apiKeys").and_then(|v| v.as_array()) {
+            for k in aks {
+                let id = k.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let key = k.get("key").and_then(|v| v.as_str()).unwrap_or_default();
+                if id.is_empty() || key.is_empty() {
+                    continue;
+                }
+                let name = k.get("name").and_then(|v| v.as_str());
+                let machine_id = k.get("machineId").and_then(|v| v.as_str());
+                let is_active = if k.get("isActive").and_then(|v| v.as_bool()) == Some(false) { 0 } else { 1 };
+                let now = Utc::now().to_rfc3339();
+                let created_at = k.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                let rate_limit_requests = k.get("rateLimitRequests").and_then(|v| v.as_i64()).unwrap_or(0);
+                let rate_limit_window_seconds = k.get("rateLimitWindowSeconds").and_then(|v| v.as_i64()).unwrap_or(60);
+                let token_limit_daily = k.get("tokenLimitDaily").and_then(|v| v.as_i64()).unwrap_or(0);
+                let token_limit_monthly = k.get("tokenLimitMonthly").and_then(|v| v.as_i64()).unwrap_or(0);
+                let allowed_models = k.get("allowedModels").and_then(|v| v.as_str()).unwrap_or("");
+                let blocked_models = k.get("blockedModels").and_then(|v| v.as_str()).unwrap_or("");
+                let allowed_ips = k.get("allowedIPs").and_then(|v| v.as_str()).unwrap_or("");
+                let blocked_ips = k.get("blockedIPs").and_then(|v| v.as_str()).unwrap_or("");
+                let expires_at = k.get("expiresAt").and_then(|v| v.as_str()).unwrap_or("");
+                let description = k.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let owner_ref = k.get("ownerRef").and_then(|v| v.as_str());
+                let max_concurrent_requests = k.get("maxConcurrentRequests").and_then(|v| v.as_i64()).unwrap_or(0);
+                let allowed_providers = k.get("allowedProviders").and_then(|v| v.as_str()).unwrap_or("");
+                let blocked_providers = k.get("blockedProviders").and_then(|v| v.as_str()).unwrap_or("");
+                let force_provider = k.get("forceProvider").and_then(|v| v.as_str()).unwrap_or("");
+                let force_model = k.get("forceModel").and_then(|v| v.as_str()).unwrap_or("");
+                let allowed_endpoints = k.get("allowedEndpoints").and_then(|v| v.as_str()).unwrap_or("");
+                let blocked_endpoints = k.get("blockedEndpoints").and_then(|v| v.as_str()).unwrap_or("");
+                let metadata = k.get("metadata").map(|v| if v.is_string() { v.as_str().unwrap().to_string() } else { serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()) }).unwrap_or_else(|| "{}".to_string());
+                let updated_at = k.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(created_at);
+
+                tx.execute(
+                    r#"
+                    INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly, allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description, ownerRef, maxConcurrentRequests, allowedProviders, blockedProviders, forceProvider, forceModel, allowedEndpoints, blockedEndpoints, metadata, updatedAt)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                    params![id, key, name, machine_id, is_active, created_at, rate_limit_requests, rate_limit_window_seconds, token_limit_daily, token_limit_monthly, allowed_models, blocked_models, allowed_ips, blocked_ips, expires_at, description, owner_ref, max_concurrent_requests, allowed_providers, blocked_providers, force_provider, force_model, allowed_endpoints, blocked_endpoints, metadata, updated_at],
+                )?;
+                ak_count += 1;
+            }
+        }
+        counts.insert("apiKeys".to_string(), serde_json::json!(ak_count));
+
+        // 6. combos
+        let mut combo_count = 0;
+        if let Some(cbs) = payload.get("combos").and_then(|v| v.as_array()) {
+            for c in cbs {
+                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let name = c.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+                if id.is_empty() || name.is_empty() {
+                    continue;
+                }
+                let kind = c.get("kind").and_then(|v| v.as_str());
+                let models_str = serde_json::to_string(c.get("models").unwrap_or(&serde_json::json!([])))?;
+                let strategy = c.get("strategy").and_then(|v| v.as_str()).unwrap_or("fallback");
+                let match_rules = serde_json::to_string(c.get("matchRules").unwrap_or(&serde_json::json!([])))?;
+                let custom_prompt = c.get("customPrompt").and_then(|v| v.as_str()).unwrap_or("");
+                let now = Utc::now().to_rfc3339();
+                let created_at = c.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                let updated_at = c.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(&now);
+
+                tx.execute(
+                    r#"
+                    INSERT OR REPLACE INTO combos(id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                    params![id, name, kind, models_str, strategy, match_rules, custom_prompt, created_at, updated_at],
+                )?;
+                combo_count += 1;
+            }
+        }
+        counts.insert("combos".to_string(), serde_json::json!(combo_count));
+
+        // 7. modelAliases
+        let mut alias_count = 0;
+        if let Some(map) = payload.get("modelAliases").and_then(|v| v.as_object()) {
+            for (k, v) in map {
+                let val_str = serde_json::to_string(v)?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO kv(scope, key, value) VALUES('modelAliases', ?, ?)",
+                    params![k, val_str],
+                )?;
+                alias_count += 1;
+            }
+        }
+        counts.insert("modelAliases".to_string(), serde_json::json!(alias_count));
+
+        // 8. customModels
+        let mut cm_count = 0;
+        if let Some(cms) = payload.get("customModels").and_then(|v| v.as_array()) {
+            for m in cms {
+                let provider_alias = m.get("providerAlias").and_then(|v| v.as_str()).unwrap_or("custom");
+                let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("default");
+                let model_type = m.get("type").and_then(|v| v.as_str()).unwrap_or("llm");
+                let key = format!("{}|{}|{}", provider_alias, id, model_type);
+                let val_str = serde_json::to_string(m)?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO kv(scope, key, value) VALUES('customModels', ?, ?)",
+                    params![key, val_str],
+                )?;
+                cm_count += 1;
+            }
+        }
+        counts.insert("customModels".to_string(), serde_json::json!(cm_count));
+
+        // 9. mitmAlias
+        let mut mitm_count = 0;
+        if let Some(map) = payload.get("mitmAlias").and_then(|v| v.as_object()) {
+            for (k, v) in map {
+                let val_str = serde_json::to_string(v)?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO kv(scope, key, value) VALUES('mitmAlias', ?, ?)",
+                    params![k, val_str],
+                )?;
+                mitm_count += 1;
+            }
+        }
+        counts.insert("mitmAlias".to_string(), serde_json::json!(mitm_count));
+
+        // 10. pricing
+        let mut pricing_count = 0;
+        if let Some(map) = payload.get("pricing").and_then(|v| v.as_object()) {
+            for (k, v) in map {
+                let val_str = serde_json::to_string(v)?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO kv(scope, key, value) VALUES('pricing', ?, ?)",
+                    params![k, val_str],
+                )?;
+                pricing_count += 1;
+            }
+        }
+        counts.insert("pricing".to_string(), serde_json::json!(pricing_count));
+
+        tx.commit()?;
+
+        Ok(serde_json::Value::Object(counts))
+    }
 }
 
 /// Helper to match model patterns like `*`, `openai/*`, or `gpt-4o`.
@@ -1732,5 +2311,50 @@ mod tests {
 
         let plain_chain = db.resolve_combo_chain("non-existent-model");
         assert_eq!(plain_chain, vec!["non-existent-model".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_export_and_import_database() {
+        let db = Database::open_in_memory().expect("open db");
+
+        // 1. Seed some data
+        let settings = serde_json::json!({
+            "requireLogin": true,
+            "outboundProxyEnabled": false,
+            "customTag": "test-v1"
+        });
+        db.save_settings(&settings).expect("save settings");
+
+        let combo = Combo {
+            id: "combo-1".to_string(),
+            name: "smart-fallback".to_string(),
+            kind: Some("text".to_string()),
+            models: vec!["openai/gpt-4o".to_string(), "anthropic/claude-3-5-sonnet".to_string()],
+            strategy: Some("fallback".to_string()),
+            match_rules: Some("[]".to_string()),
+            custom_prompt: Some("be helpful".to_string()),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        db.save_combo(&combo).expect("save combo");
+
+        // 2. Export database
+        let exported = db.export_database().expect("export database");
+        assert_eq!(exported["settings"]["customTag"], "test-v1");
+        assert_eq!(exported["combos"].as_array().unwrap().len(), 1);
+        assert_eq!(exported["combos"][0]["name"], "smart-fallback");
+
+        // 3. Create fresh db and import exported data
+        let db2 = Database::open_in_memory().expect("open db2");
+        let counts = db2.import_database(&exported).expect("import database");
+        assert_eq!(counts["settings"], 1);
+        assert_eq!(counts["combos"], 1);
+
+        let reloaded_settings = db2.load_settings().expect("load settings db2");
+        assert_eq!(reloaded_settings["customTag"], "test-v1");
+
+        let reloaded_combos = db2.load_combos().expect("load combos db2");
+        assert_eq!(reloaded_combos.len(), 1);
+        assert_eq!(reloaded_combos[0].name, "smart-fallback");
     }
 }

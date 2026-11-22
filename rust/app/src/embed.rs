@@ -84,11 +84,19 @@ pub async fn static_handler(uri: Uri) -> Response {
 
     if is_rsc_request {
         let rsc_path = format!("{}.rsc", clean_path);
-        if let Some(file) = Assets::get(&rsc_path) {
+        let dashboard_rsc_path = format!("dashboard/{}.rsc", clean_path);
+        if let Some(file) = Assets::get(&rsc_path).or_else(|| Assets::get(&dashboard_rsc_path)) {
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
-                .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+                .header(
+                    header::VARY,
+                    HeaderValue::from_static("RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url"),
+                )
+                .header(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=3600, stale-while-revalidate=86400"),
+                )
                 .body(Body::from(file.data))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
@@ -99,11 +107,25 @@ pub async fn static_handler(uri: Uri) -> Response {
                 return Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
-                    .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+                    .header(
+                        header::VARY,
+                        HeaderValue::from_static("RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url"),
+                    )
+                    .header(
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("public, max-age=3600, stale-while-revalidate=86400"),
+                    )
                     .body(Body::from(file.data))
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
             }
         }
+
+        // Prevent RSC requests from falling through to HTML pages
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response());
     }
 
     // 3. Direct page HTML match (e.g. /dashboard -> dashboard.html, /dashboard/providers -> dashboard/providers.html)
