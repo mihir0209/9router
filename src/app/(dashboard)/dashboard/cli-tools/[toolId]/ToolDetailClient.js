@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useParams, usePathname } from "next/navigation";
 import Link from "next/link";
 import { CardSkeleton } from "@/shared/components";
 import { CLI_TOOLS } from "@/shared/constants/cliTools";
@@ -14,7 +15,13 @@ import {
 
 const CLOUD_URL = process.env.NEXT_PUBLIC_CLOUD_URL;
 
-export default function ToolDetailClient({ toolId, machineId }) {
+export default function ToolDetailClient({ toolId: propToolId, machineId }) {
+  const params = useParams();
+  const pathname = usePathname();
+  const pathId = typeof window !== "undefined" && pathname?.startsWith("/dashboard/cli-tools/")
+    ? decodeURIComponent(pathname.replace(/^\/dashboard\/cli-tools\//, "").split("?")[0].split("/")[0])
+    : null;
+  const toolId = pathId || params?.toolId || propToolId;
   const tool = CLI_TOOLS[toolId];
   const [connections, setConnections] = useState([]);
   const [loading, setLoading] = useState(true);

@@ -458,66 +458,85 @@ fn resolve_target_for_candidate(
 ) -> (UpstreamConnection, String) {
     // 1. Check if candidate starts with a node prefix (e.g. "h/glm-5.2", "9r/...", "neon/...", "srvm/...")
     for node in provider_nodes {
+        let mut matched_prefix: Option<String> = None;
         if !node.prefix.is_empty() {
             let prefix_slash = format!("{}/", node.prefix);
             if candidate.starts_with(&prefix_slash) || candidate == node.prefix {
-                let upstream_model = if candidate.starts_with(&prefix_slash) {
-                    candidate[prefix_slash.len()..].to_string()
-                } else {
-                    candidate.to_string()
-                };
-
-                let mut conn = UpstreamConnection::default();
-                conn.provider = node.name.clone().unwrap_or_else(|| node.prefix.clone());
-                conn.base_url = Some(node.base_url.clone());
-
-                if let Some(mapping_val) = node.data.get("schemaMapping").or_else(|| node.data.get("schema_mapping")) {
-                    if let Ok(mapping) = serde_json::from_value::<crate::custom_adapter::CustomSchemaMapping>(mapping_val.clone()) {
-                        conn.schema_mapping = Some(mapping);
-                    }
-                } else if node.node_type.as_deref() == Some("custom") {
-                    if let Ok(mapping) = serde_json::from_value::<crate::custom_adapter::CustomSchemaMapping>(node.data.clone()) {
-                        conn.schema_mapping = Some(mapping);
-                    }
-                }
-
-                if let Some(pc) = all_connections.iter().find(|c| c.is_active && c.provider == node.id) {
-                    conn.api_key = pc.data.api_key.clone();
-                    if let Some(hdrs) = &pc.data.headers {
-                        let mut hmap = HeaderMap::new();
-                        for (k, v) in hdrs {
-                            if let (Ok(kn), Ok(kv)) = (
-                                header::HeaderName::from_bytes(k.as_bytes()),
-                                HeaderValue::from_str(v),
-                            ) {
-                                hmap.insert(kn, kv);
-                            }
-                        }
-                        conn.custom_headers = Some(hmap);
-                    }
-                }
-                if conn.api_key.is_none() {
-                    if let Some(k) = node.data.get("apiKey").and_then(|v| v.as_str()) {
-                        conn.api_key = Some(k.to_string());
-                    }
-                }
-                if conn.custom_headers.is_none() {
-                    if let Some(hdrs) = node.data.get("customHeaders").and_then(|v| v.as_object()) {
-                        let mut hmap = HeaderMap::new();
-                        for (k, v) in hdrs {
-                            if let (Ok(kn), Ok(kv)) = (
-                                header::HeaderName::from_bytes(k.as_bytes()),
-                                HeaderValue::from_str(v.as_str().unwrap_or("")),
-                            ) {
-                                hmap.insert(kn, kv);
-                            }
-                        }
-                        conn.custom_headers = Some(hmap);
-                    }
-                }
-
-                return (conn, upstream_model);
+                matched_prefix = Some(prefix_slash);
             }
+        }
+        if matched_prefix.is_none() {
+            if let Some(ref name) = node.name {
+                let name_slash = format!("{}/", name);
+                if candidate.to_lowercase().starts_with(&name_slash.to_lowercase()) {
+                    matched_prefix = Some(candidate[..name_slash.len()].to_string());
+                }
+            }
+        }
+        if matched_prefix.is_none() {
+            let id_slash = format!("{}/", node.id);
+            if candidate.starts_with(&id_slash) {
+                matched_prefix = Some(id_slash);
+            }
+        }
+
+        if let Some(prefix_slash) = matched_prefix {
+            let upstream_model = if candidate.len() > prefix_slash.len() {
+                candidate[prefix_slash.len()..].to_string()
+            } else {
+                candidate.to_string()
+            };
+
+            let mut conn = UpstreamConnection::default();
+            conn.provider = node.name.clone().unwrap_or_else(|| node.prefix.clone());
+            conn.base_url = Some(node.base_url.clone());
+
+            if let Some(mapping_val) = node.data.get("schemaMapping").or_else(|| node.data.get("schema_mapping")) {
+                if let Ok(mapping) = serde_json::from_value::<crate::custom_adapter::CustomSchemaMapping>(mapping_val.clone()) {
+                    conn.schema_mapping = Some(mapping);
+                }
+            } else if node.node_type.as_deref() == Some("custom") {
+                if let Ok(mapping) = serde_json::from_value::<crate::custom_adapter::CustomSchemaMapping>(node.data.clone()) {
+                    conn.schema_mapping = Some(mapping);
+                }
+            }
+
+            if let Some(pc) = all_connections.iter().find(|c| c.is_active && (c.provider == node.id || c.provider == node.prefix || node.name.as_ref() == Some(&c.provider))) {
+                conn.api_key = pc.data.api_key.clone();
+                if let Some(hdrs) = &pc.data.headers {
+                    let mut hmap = HeaderMap::new();
+                    for (k, v) in hdrs {
+                        if let (Ok(kn), Ok(kv)) = (
+                            header::HeaderName::from_bytes(k.as_bytes()),
+                            HeaderValue::from_str(v),
+                        ) {
+                            hmap.insert(kn, kv);
+                        }
+                    }
+                    conn.custom_headers = Some(hmap);
+                }
+            }
+            if conn.api_key.is_none() {
+                if let Some(k) = node.data.get("apiKey").and_then(|v| v.as_str()) {
+                    conn.api_key = Some(k.to_string());
+                }
+            }
+            if conn.custom_headers.is_none() {
+                if let Some(hdrs) = node.data.get("customHeaders").and_then(|v| v.as_object()) {
+                    let mut hmap = HeaderMap::new();
+                    for (k, v) in hdrs {
+                        if let (Ok(kn), Ok(kv)) = (
+                            header::HeaderName::from_bytes(k.as_bytes()),
+                            HeaderValue::from_str(v.as_str().unwrap_or("")),
+                        ) {
+                            hmap.insert(kn, kv);
+                        }
+                    }
+                    conn.custom_headers = Some(hmap);
+                }
+            }
+
+            return (conn, upstream_model);
         }
     }
 
@@ -564,6 +583,11 @@ fn resolve_target_for_candidate(
             populate_connection_parameters(&mut conn, pc);
             return (conn, m_part.to_string());
         }
+
+        // Explicit prefix requested (e.g. "agentrouter/deepseek-v3.2") but no connection exists
+        let mut conn = UpstreamConnection::default();
+        conn.provider = p_prefix.to_string();
+        return (conn, m_part.to_string());
     }
 
     // 4. Match by defaultModel
@@ -892,6 +916,17 @@ async fn execute_candidate_chat(
         return Ok(cached.to_response(is_stream));
     }
 
+    if conn.api_key.is_none() && conn.base_url.is_none() {
+        state.circuit_breaker.record_failure(candidate);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "No active connection or API key configured for provider '{}'. Please add or activate a connection in Providers.",
+                conn.provider
+            ),
+        ));
+    }
+
     if let Some(mapping) = &conn.schema_mapping {
         let endpoint_url = mapping.endpoint_url.clone().or_else(|| conn.base_url.clone()).unwrap_or_else(|| {
             "http://127.0.0.1:20139/api/worst/flat/execute".to_string()
@@ -1199,11 +1234,45 @@ pub async fn chat_completions_handler(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let start_time = std::time::Instant::now();
     let api_key = match authenticate(&headers, &state.db) {
         Ok(k) => k,
-        Err(res) => return res,
+        Err(auth_err) => return auth_err,
     };
+    handle_chat_completions_inner(state, headers, body, api_key).await
+}
+
+pub async fn dashboard_chat_completions_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let api_key = match authenticate(&headers, &state.db) {
+        Ok(k) => k,
+        Err(auth_err) => {
+            // Allow dashboard internal sessions when valid or when requireLogin is disabled
+            if crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db).is_ok() {
+                ApiKey {
+                    id: "dashboard-session".to_string(),
+                    key: "dashboard-session".to_string(),
+                    name: Some("Dashboard Internal Session".to_string()),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    ..Default::default()
+                }
+            } else {
+                return auth_err;
+            }
+        }
+    };
+    handle_chat_completions_inner(state, headers, body, api_key).await
+}
+
+async fn handle_chat_completions_inner(
+    state: AppState,
+    _headers: HeaderMap,
+    body: axum::body::Bytes,
+    api_key: ApiKey,
+) -> Response {
+    let start_time = std::time::Instant::now();
 
     let mut req: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -1780,7 +1849,7 @@ pub async fn messages_handler(
     let start_time = std::time::Instant::now();
     let api_key = match authenticate(&headers, &state.db) {
         Ok(k) => k,
-        Err(res) => return res,
+        Err(auth_err) => return auth_err,
     };
 
     let mut req: ClaudeMessageRequest = match serde_json::from_slice(&body) {
@@ -4463,6 +4532,105 @@ pub async fn console_logs_stream_handler(
         .into_response()
 }
 
+pub async fn provider_connection_models_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(connection_id): axum::extract::Path<String>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+
+    let all_conns = state.db.load_provider_connections().unwrap_or_default();
+    let conn = all_conns.into_iter().find(|c| c.id == connection_id || c.provider == connection_id);
+
+    let (provider_id, api_key) = match conn {
+        Some(c) => (c.provider, c.data.api_key.unwrap_or_default()),
+        None => {
+            return Json(json!({
+                "provider": connection_id,
+                "connectionId": connection_id,
+                "models": []
+            })).into_response();
+        }
+    };
+
+    let all_nodes = state.db.load_provider_nodes().unwrap_or_default();
+    let matching_node = all_nodes.into_iter().find(|n| n.id == provider_id || n.name.as_deref() == Some(&provider_id) || n.prefix == provider_id);
+
+    if let Some(node) = matching_node {
+        let base_url = node.base_url.trim_end_matches('/');
+        let models_url = format!("{}/models", base_url);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+            .unwrap_or_default();
+
+        let mut req_builder = client.get(&models_url);
+        if !api_key.is_empty() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        if let Ok(resp) = req_builder.send().await {
+            if resp.status().is_success() {
+                if let Ok(json_data) = resp.json::<serde_json::Value>().await {
+                    let list = json_data.get("data")
+                        .or_else(|| json_data.get("models"))
+                        .or_else(|| json_data.as_array().map(|_| &json_data))
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+
+                    let prefix = if !node.prefix.is_empty() { format!("{}/", node.prefix) } else { String::new() };
+                    let mapped_models: Vec<serde_json::Value> = list.into_iter().filter_map(|m| {
+                        let id = m.get("id").or_else(|| m.get("model")).or_else(|| m.get("name"))?.as_str()?;
+                        let name = m.get("name").or_else(|| m.get("displayName"))?.as_str().unwrap_or(id);
+                        Some(json!({
+                            "id": format!("{}{}", prefix, id),
+                            "name": format!("{}{}", prefix, name),
+                            "rawId": id
+                        }))
+                    }).collect();
+
+                    if !mapped_models.is_empty() {
+                        return Json(json!({
+                            "provider": provider_id,
+                            "connectionId": connection_id,
+                            "models": mapped_models
+                        })).into_response();
+                    }
+                }
+            }
+        }
+
+        let prefix = if !node.prefix.is_empty() { format!("{}/", node.prefix) } else { String::new() };
+        let default_candidates = if node.name.as_deref() == Some("HCNSEC") || node.prefix == "h" {
+            vec!["Qwen3.8-Flash-Next", "hy4", "DeepSeek-V4.1-Flash", "MiMo-V2.6-Flash", "kimi-k3.1-pro", "MiniMax-M3.1-Flash", "sensenova-6.8-flash"]
+        } else {
+            vec!["default", "chat", "main"]
+        };
+        let fallback_models: Vec<serde_json::Value> = default_candidates.into_iter().map(|m| {
+            json!({
+                "id": format!("{}{}", prefix, m),
+                "name": format!("{}{}", prefix, m),
+                "rawId": m
+            })
+        }).collect();
+
+        return Json(json!({
+            "provider": provider_id,
+            "connectionId": connection_id,
+            "models": fallback_models
+        })).into_response();
+    }
+
+    Json(json!({
+        "provider": provider_id,
+        "connectionId": connection_id,
+        "models": []
+    })).into_response()
+}
+
 pub async fn cli_tools_all_statuses_handler() -> Response {
     let tools = [
         "claude", "codex", "opencode", "droid", "openclaw", "hermes",
@@ -4593,6 +4761,39 @@ pub async fn dashboard_models_handler(State(state): State<AppState>) -> Response
                     "maxOutput": 8192
                 }
             }));
+        }
+    }
+
+    if let Ok(nodes) = state.db.load_provider_nodes() {
+        let all_conns = state.db.load_provider_connections().unwrap_or_default();
+        for node in nodes {
+            let p = if !node.prefix.is_empty() { node.prefix.clone() } else { node.name.clone().unwrap_or_else(|| "custom".to_string()) };
+            let has_active_conn = all_conns.iter().any(|c| c.is_active && (c.provider == node.id || c.provider == node.prefix || node.name.as_ref() == Some(&c.provider)));
+            if has_active_conn {
+                // Common models for this node
+                let candidates = if node.name.as_deref() == Some("HCNSEC") || node.prefix == "h" {
+                    vec!["Qwen3.8-Flash-Next", "hy4", "DeepSeek-V4.1-Flash", "MiMo-V2.6-Flash", "kimi-k3.1-pro", "MiniMax-M3.1-Flash", "sensenova-6.8-flash"]
+                } else {
+                    vec!["default", "chat", "main"]
+                };
+                for m in candidates {
+                    models.push(json!({
+                        "provider": p,
+                        "model": format!("{}/{}", p, m),
+                        "name": format!("{} ({})", m, node.name.as_deref().unwrap_or(&p)),
+                        "fullModel": format!("{}/{}", p, m),
+                        "routedModel": format!("{}/{}", p, m),
+                        "alias": m,
+                        "caps": {
+                            "vision": true,
+                            "search": false,
+                            "reasoning": true,
+                            "contextWindow": 128000,
+                            "maxOutput": 8192
+                        }
+                    }));
+                }
+            }
         }
     }
 
@@ -5111,6 +5312,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/cli-tools/all-statuses",
             axum::routing::get(cli_tools_all_statuses_handler).options(options_handler),
+        )
+        .route(
+            "/api/providers/{id}/models",
+            axum::routing::get(provider_connection_models_handler).options(options_handler),
+        )
+        .route(
+            "/api/dashboard/chat/completions",
+            axum::routing::post(dashboard_chat_completions_handler).options(options_handler),
         )
         // Reverse proxy fallback to original Next.js for UI, static assets, and full dashboard APIs
         .fallback(crate::original::proxy)

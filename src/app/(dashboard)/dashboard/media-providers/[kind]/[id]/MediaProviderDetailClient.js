@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams, notFound, useRouter } from "next/navigation";
+import { useParams, notFound, useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { useState, useEffect } from "react";
 import { Card, Badge, Button, CustomMediaProviderModal, NoAuthProxyCard, ProviderInfoCard } from "@/shared/components";
@@ -18,8 +18,12 @@ import { SttExampleCard } from "./components/SttExampleCard";
 // MediaProviderDetailClient
 export default function MediaProviderDetailClient({ kind: initialKind, providerId: initialId }) {
   const params = useParams();
-  const kind = initialKind || params?.kind;
-  const id = initialId || params?.id;
+  const pathname = usePathname();
+  const pathParts = typeof window !== "undefined" && pathname?.startsWith("/dashboard/media-providers/")
+    ? pathname.replace(/^\/dashboard\/media-providers\//, "").split("?")[0].split("/")
+    : [];
+  const kind = pathParts[0] || initialKind || params?.kind;
+  const id = pathParts[1] ? decodeURIComponent(pathParts[1]) : (initialId || params?.id);
   const router = useRouter();
   const kindConfig = MEDIA_PROVIDER_KINDS.find((k) => k.id === kind);
   const isCustom = (isCustomEmbeddingProvider(id) && kind === "embedding") || isCustomMediaProvider(id);

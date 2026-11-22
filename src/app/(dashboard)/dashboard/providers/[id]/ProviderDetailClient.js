@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
@@ -52,7 +52,11 @@ function sleep(ms) {
 export default function ProviderDetailPage({ providerId: propProviderId } = {}) {
   const params = useParams();
   const router = useRouter();
-  const providerId = propProviderId || params?.id;
+  const pathname = usePathname();
+  const pathId = typeof window !== "undefined" && pathname?.startsWith("/dashboard/providers/")
+    ? decodeURIComponent(pathname.replace(/^\/dashboard\/providers\//, "").split("?")[0].split("/")[0])
+    : null;
+  const providerId = pathId || params?.id || propProviderId;
   const { getCaps } = useModelCaps();
   const [connections, setConnections] = useState([]);
   const [loading, setLoading] = useState(true);

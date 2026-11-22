@@ -151,7 +151,7 @@ pub async fn static_handler_with_headers(uri: Uri, req_headers: Option<&HeaderMa
 
         // Dynamic provider detail RSC fallback
         if clean_path.starts_with("dashboard/providers/") {
-            if let Some(file) = Assets::get("dashboard/providers/openai.rsc") {
+            if let Some(file) = Assets::get("dashboard/providers/custom.rsc").or_else(|| Assets::get("dashboard/providers/openai.rsc")) {
                 return make_rsc_response(file.data, &deployment_header_val);
             }
         }
@@ -191,7 +191,7 @@ pub async fn static_handler_with_headers(uri: Uri, req_headers: Option<&HeaderMa
     // 4. Dynamic route template fallbacks
     // Providers: if /dashboard/providers/:id is not an exact pre-rendered file, serve the provider detail template
     if clean_path.starts_with("dashboard/providers/") {
-        if let Some(file) = Assets::get("dashboard/providers/openai.html") {
+        if let Some(file) = Assets::get("dashboard/providers/custom.html").or_else(|| Assets::get("dashboard/providers/openai.html")) {
             return make_html_response(file.data, &deployment_header_val);
         }
     }
@@ -302,7 +302,7 @@ mod tests {
 
         // 9. Percent-encoded chunk lookup for bracketed routes
         let resp = static_handler(
-            "/_next/static/chunks/app/(dashboard)/dashboard/providers/%5Bid%5D/page-dbb8cea5c3bf1206.js"
+            "/_next/static/chunks/app/(dashboard)/dashboard/providers/%5Bid%5D/page-99f7f03729939283.js"
                 .parse()
                 .unwrap(),
         )

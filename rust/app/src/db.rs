@@ -71,6 +71,37 @@ pub struct ApiKey {
     pub blocked_endpoints: String,
 }
 
+impl Default for ApiKey {
+    fn default() -> Self {
+        Self {
+            id: "default-key".to_string(),
+            key: "default-key".to_string(),
+            name: Some("Default".to_string()),
+            machine_id: None,
+            is_active: true,
+            created_at: String::new(),
+            rate_limit_requests: 0,
+            rate_limit_window_seconds: 0,
+            token_limit_daily: 0,
+            token_limit_monthly: 0,
+            allowed_models: "*".to_string(),
+            blocked_models: String::new(),
+            allowed_ips: String::new(),
+            blocked_ips: String::new(),
+            expires_at: String::new(),
+            description: String::new(),
+            owner_ref: None,
+            max_concurrent_requests: 0,
+            allowed_providers: String::new(),
+            blocked_providers: String::new(),
+            force_provider: String::new(),
+            force_model: String::new(),
+            allowed_endpoints: String::new(),
+            blocked_endpoints: String::new(),
+        }
+    }
+}
+
 /// Combo model group with fallback list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Combo {
