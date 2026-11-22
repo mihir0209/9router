@@ -965,10 +965,11 @@ export default function ProfilePage() {
   // Confirm password modal, then run export, import, or merge.
   const handleDbAuthConfirm = async () => {
     const { mode, password } = dbAuth;
+    const effectivePassword = password || (settings.hasPassword ? "" : "123456");
     setDbAuth({ open: false, mode: "", password: "" });
-    if (mode === "export") await handleExportDatabase(password);
-    else if (mode === "import") await runImportDatabase(password);
-    else if (mode === "merge") await runMergeDatabase(password);
+    if (mode === "export") await handleExportDatabase(effectivePassword);
+    else if (mode === "import") await runImportDatabase(effectivePassword);
+    else if (mode === "merge") await runMergeDatabase(effectivePassword);
   };
 
   const observabilityEnabled = settings.enableObservability === true;
@@ -2021,7 +2022,7 @@ export default function ProfilePage() {
             <Button variant="ghost" onClick={() => setDbAuth({ open: false, mode: "", password: "" })} disabled={dbLoading}>
               Cancel
             </Button>
-            <Button variant="primary" onClick={handleDbAuthConfirm} loading={dbLoading} disabled={!dbAuth.password}>
+            <Button variant="primary" onClick={handleDbAuthConfirm} loading={dbLoading} disabled={settings.hasPassword && !dbAuth.password}>
               Confirm
             </Button>
           </>

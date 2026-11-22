@@ -120,6 +120,47 @@ pub async fn static_handler(uri: Uri) -> Response {
             }
         }
 
+        // Dynamic media provider RSC fallback
+        if clean_path.starts_with("dashboard/media-providers/combo/") {
+            if let Some(file) = Assets::get("dashboard/media-providers/combo/image-combo.rsc") {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
+                    .header(
+                        header::VARY,
+                        HeaderValue::from_static("RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url"),
+                    )
+                    .header(
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("public, max-age=3600, stale-while-revalidate=86400"),
+                    )
+                    .body(Body::from(file.data))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+        }
+        if clean_path.starts_with("dashboard/media-providers/") {
+            let fallback_rsc = if clean_path.matches('/').count() >= 3 {
+                "dashboard/media-providers/image/openai.rsc"
+            } else {
+                "dashboard/media-providers/image.rsc"
+            };
+            if let Some(file) = Assets::get(fallback_rsc) {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-component"))
+                    .header(
+                        header::VARY,
+                        HeaderValue::from_static("RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url"),
+                    )
+                    .header(
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("public, max-age=3600, stale-while-revalidate=86400"),
+                    )
+                    .body(Body::from(file.data))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+        }
+
         // Prevent RSC requests from falling through to HTML pages
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
@@ -146,6 +187,39 @@ pub async fn static_handler(uri: Uri) -> Response {
     // Providers: if /dashboard/providers/:id is not an exact pre-rendered file, serve the provider detail template
     if clean_path.starts_with("dashboard/providers/") {
         if let Some(file) = Assets::get("dashboard/providers/openai.html") {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/html; charset=utf-8"),
+                )
+                .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+                .body(Body::from(file.data))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    }
+
+    // Media Providers: if /dashboard/media-providers/... is not an exact pre-rendered file, serve template
+    if clean_path.starts_with("dashboard/media-providers/combo/") {
+        if let Some(file) = Assets::get("dashboard/media-providers/combo/image-combo.html") {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/html; charset=utf-8"),
+                )
+                .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+                .body(Body::from(file.data))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    }
+    if clean_path.starts_with("dashboard/media-providers/") {
+        let fallback_html = if clean_path.matches('/').count() >= 3 {
+            "dashboard/media-providers/image/openai.html"
+        } else {
+            "dashboard/media-providers/image.html"
+        };
+        if let Some(file) = Assets::get(fallback_html) {
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(

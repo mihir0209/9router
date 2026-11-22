@@ -151,6 +151,7 @@ pub struct UsageRecord {
     pub endpoint: Option<String>,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+    pub cached_tokens: i64,
     pub cost: f64,
     pub status: String,
     pub tokens: Option<String>,
@@ -169,6 +170,7 @@ impl Default for UsageRecord {
             endpoint: None,
             prompt_tokens: 0,
             completion_tokens: 0,
+            cached_tokens: 0,
             cost: 0.0,
             status: "ok".to_string(),
             tokens: None,
@@ -364,6 +366,7 @@ impl Database {
                 endpoint TEXT,
                 promptTokens INTEGER DEFAULT 0,
                 completionTokens INTEGER DEFAULT 0,
+                cachedTokens INTEGER DEFAULT 0,
                 cost REAL DEFAULT 0,
                 status TEXT,
                 tokens TEXT,
@@ -382,6 +385,7 @@ impl Database {
         let _ = conn.execute("ALTER TABLE combos ADD COLUMN strategy TEXT DEFAULT 'fallback'", []);
         let _ = conn.execute("ALTER TABLE combos ADD COLUMN matchRules TEXT DEFAULT '[]'", []);
         let _ = conn.execute("ALTER TABLE combos ADD COLUMN customPrompt TEXT DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE usageHistory ADD COLUMN cachedTokens INTEGER DEFAULT 0", []);
 
         let (usage_tx, usage_rx) = mpsc::channel(10_000);
         let conn_arc = Arc::new(Mutex::new(conn));
@@ -454,8 +458,8 @@ impl Database {
                     r#"
                     INSERT INTO usageHistory(
                         timestamp, provider, model, connectionId, apiKey, apiKeyId,
-                        endpoint, promptTokens, completionTokens, cost, status, tokens, meta
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        endpoint, promptTokens, completionTokens, cachedTokens, cost, status, tokens, meta
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     "#,
                 )?;
 
@@ -470,6 +474,7 @@ impl Database {
                         item.endpoint,
                         item.prompt_tokens,
                         item.completion_tokens,
+                        item.cached_tokens,
                         item.cost,
                         item.status,
                         item.tokens,
@@ -1284,6 +1289,333 @@ impl Database {
             "recentRequests": recent_requests,
             "errorProvider": ""
         }))
+    }
+
+    /// Computes aggregated chart buckets for the specified period.
+    pub fn get_chart_data(&self, period: &str) -> anyhow::Result<serde_json::Value> {
+        let guard = self.conn.lock().unwrap();
+
+        let now = chrono::Utc::now();
+        let (bucket_count, bucket_hours, cutoff) = match period {
+            "today" | "24h" => (24usize, 1i64, now - chrono::Duration::hours(24)),
+            "7d" => (7usize, 24i64, now - chrono::Duration::days(7)),
+            "30d" => (30usize, 24i64, now - chrono::Duration::days(30)),
+            "60d" => (60usize, 24i64, now - chrono::Duration::days(60)),
+            _ => (7usize, 24i64, now - chrono::Duration::days(7)),
+        };
+
+        let mut buckets = Vec::with_capacity(bucket_count);
+        let start_time = now - chrono::Duration::hours(bucket_count as i64 * bucket_hours);
+
+        for i in 0..bucket_count {
+            let t = start_time + chrono::Duration::hours(i as i64 * bucket_hours);
+            let label = if bucket_hours == 1 {
+                t.format("%H:00").to_string()
+            } else {
+                t.format("%m/%d").to_string()
+            };
+            buckets.push(serde_json::json!({
+                "label": label,
+                "tokens": 0i64,
+                "cost": 0.0f64,
+                "requests": 0i64,
+            }));
+        }
+
+        let cutoff_str = cutoff.to_rfc3339();
+        if let Ok(mut stmt) = guard.prepare(
+            "SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ?",
+        ) {
+            let rows = stmt.query_map(params![cutoff_str], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, f64>(3)?,
+                ))
+            })?;
+
+            for row in rows.flatten() {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&row.0) {
+                    let dt_utc = dt.with_timezone(&chrono::Utc);
+                    let diff_secs = (dt_utc - start_time).num_seconds();
+                    let bucket_secs = bucket_hours * 3600;
+                    if diff_secs >= 0 {
+                        let idx = (diff_secs / bucket_secs) as usize;
+                        if idx < bucket_count {
+                            if let Some(b) = buckets.get_mut(idx) {
+                                if let Some(obj) = b.as_object_mut() {
+                                    let prev_tokens = obj.get("tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    let prev_cost = obj.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let prev_reqs = obj.get("requests").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    obj.insert("tokens".to_string(), serde_json::json!(prev_tokens + row.1 + row.2));
+                                    obj.insert("cost".to_string(), serde_json::json!(prev_cost + row.3));
+                                    obj.insert("requests".to_string(), serde_json::json!(prev_reqs + 1));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(serde_json::Value::Array(buckets))
+    }
+
+    /// Aggregates per-API-key usage summary for the specified period.
+    pub fn get_api_keys_usage(&self, period: &str) -> anyhow::Result<serde_json::Value> {
+        let keys = self.list_api_keys()?;
+        let guard = self.conn.lock().unwrap();
+
+        let cutoff = match period {
+            "today" => {
+                let now = chrono::Utc::now();
+                now.date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .map(|dt| dt.and_utc().to_rfc3339())
+                    .unwrap_or_default()
+            }
+            "24h" => (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339(),
+            "7d" => (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339(),
+            "30d" => (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+            "60d" => (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339(),
+            _ => String::from("1970-01-01T00:00:00Z"),
+        };
+
+        let mut usage_by_key: HashMap<String, (i64, i64, i64, i64, f64)> = HashMap::new();
+        if let Ok(mut stmt) = guard.prepare(
+            r#"
+            SELECT
+                apiKey,
+                COUNT(*),
+                COALESCE(SUM(promptTokens), 0),
+                COALESCE(SUM(completionTokens), 0),
+                COALESCE(SUM(cachedTokens), 0),
+                COALESCE(SUM(cost), 0.0)
+            FROM usageHistory
+            WHERE timestamp >= ? AND apiKey IS NOT NULL AND apiKey != ''
+            GROUP BY apiKey
+            "#,
+        ) {
+            if let Ok(rows) = stmt.query_map(params![cutoff], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, f64>(5)?,
+                ))
+            }) {
+                for item in rows.flatten() {
+                    usage_by_key.insert(item.0, (item.1, item.2, item.3, item.4, item.5));
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        for k in keys {
+            let u = usage_by_key.get(&k.key).copied().unwrap_or((0, 0, 0, 0, 0.0));
+            let masked = if k.key.len() > 11 {
+                format!("{}...{}", &k.key[..7], &k.key[k.key.len() - 4..])
+            } else {
+                k.key.clone()
+            };
+
+            out.push(serde_json::json!({
+                "id": k.id,
+                "name": k.name,
+                "key": k.key,
+                "maskedKey": masked,
+                "isActive": k.is_active,
+                "createdAt": k.created_at,
+                "expiresAt": k.expires_at,
+                "rateLimitRequests": k.rate_limit_requests,
+                "rateLimitWindowSeconds": k.rate_limit_window_seconds,
+                "tokenLimitDaily": k.token_limit_daily,
+                "tokenLimitMonthly": k.token_limit_monthly,
+                "forceProvider": k.force_provider,
+                "forceModel": k.force_model,
+                "allowedModels": k.allowed_models,
+                "blockedModels": k.blocked_models,
+                "allowedIPs": k.allowed_ips,
+                "blockedIPs": k.blocked_ips,
+                "description": k.description,
+                "usage": {
+                    "requests": u.0,
+                    "promptTokens": u.1,
+                    "completionTokens": u.2,
+                    "cachedTokens": u.3,
+                    "cost": u.4,
+                    "models": serde_json::json!({}),
+                    "providers": serde_json::json!({})
+                }
+            }));
+        }
+
+        Ok(serde_json::Value::Array(out))
+    }
+
+    /// Returns list of unique providers found in usage history and provider nodes.
+    pub fn get_usage_providers(&self) -> anyhow::Result<serde_json::Value> {
+        let guard = self.conn.lock().unwrap();
+        let mut provider_set = std::collections::HashSet::new();
+
+        if let Ok(mut stmt) = guard.prepare(
+            "SELECT DISTINCT provider FROM usageHistory WHERE provider IS NOT NULL AND provider != ''",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                for p in rows.flatten() {
+                    provider_set.insert(p);
+                }
+            }
+        }
+
+        if let Ok(mut stmt) = guard.prepare("SELECT id, name FROM providerNodes") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))) {
+                for (id, _name) in rows.flatten() {
+                    provider_set.insert(id);
+                }
+            }
+        }
+
+        let mut providers = Vec::new();
+        for p in provider_set {
+            providers.push(serde_json::json!({
+                "id": p,
+                "name": p,
+            }));
+        }
+        providers.sort_by(|a, b| {
+            let sa = a["id"].as_str().unwrap_or("");
+            let sb = b["id"].as_str().unwrap_or("");
+            sa.cmp(sb)
+        });
+
+        Ok(serde_json::json!({ "providers": providers }))
+    }
+
+    /// Queries paginated request details from usage history.
+    pub fn get_request_details(
+        &self,
+        page: i64,
+        page_size: i64,
+        provider: Option<&str>,
+        model: Option<&str>,
+        status: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let guard = self.conn.lock().unwrap();
+        let p = page.max(1);
+        let ps = page_size.clamp(1, 100);
+        let offset = (p - 1) * ps;
+
+        let mut conditions = Vec::new();
+        let mut param_values: Vec<String> = Vec::new();
+
+        if let Some(prov) = provider {
+            if !prov.trim().is_empty() {
+                conditions.push("provider = ?");
+                param_values.push(prov.trim().to_string());
+            }
+        }
+        if let Some(m) = model {
+            if !m.trim().is_empty() {
+                conditions.push("model = ?");
+                param_values.push(m.trim().to_string());
+            }
+        }
+        if let Some(s) = status {
+            if !s.trim().is_empty() {
+                conditions.push("status = ?");
+                param_values.push(s.trim().to_string());
+            }
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        let count_sql = format!("SELECT COUNT(*) FROM usageHistory {}", where_clause);
+        let mut count_stmt = guard.prepare(&count_sql)?;
+        let count_params = rusqlite::params_from_iter(param_values.iter());
+        let total: i64 = count_stmt.query_row(count_params, |r| r.get(0)).unwrap_or(0);
+
+        let select_sql = format!(
+            "SELECT id, timestamp, provider, model, connectionId, apiKey, promptTokens, completionTokens, cachedTokens, cost, status, endpoint FROM usageHistory {} ORDER BY id DESC LIMIT ? OFFSET ?",
+            where_clause
+        );
+        let mut stmt = guard.prepare(&select_sql)?;
+
+        let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        for val in &param_values {
+            query_params.push(Box::new(val.clone()));
+        }
+        query_params.push(Box::new(ps));
+        query_params.push(Box::new(offset));
+
+        let rows = stmt.query_map(rusqlite::params_from_iter(query_params.iter().map(|b| &**b)), |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "timestamp": r.get::<_, String>(1)?,
+                "provider": r.get::<_, Option<String>>(2)?,
+                "model": r.get::<_, Option<String>>(3)?,
+                "connectionId": r.get::<_, Option<String>>(4)?,
+                "apiKey": r.get::<_, Option<String>>(5)?,
+                "promptTokens": r.get::<_, i64>(6)?,
+                "completionTokens": r.get::<_, i64>(7)?,
+                "cachedTokens": r.get::<_, i64>(8)?,
+                "cost": r.get::<_, f64>(9)?,
+                "status": r.get::<_, Option<String>>(10)?,
+                "endpoint": r.get::<_, Option<String>>(11)?,
+            }))
+        })?;
+
+        let mut details = Vec::new();
+        for r in rows.flatten() {
+            details.push(r);
+        }
+
+        Ok(serde_json::json!({
+            "details": details,
+            "total": total,
+            "page": p,
+            "pageSize": ps,
+        }))
+    }
+
+    /// Returns formatted log lines from recent usage history.
+    pub fn get_recent_logs(&self, limit: i64) -> Vec<String> {
+        let guard = self.conn.lock().unwrap();
+        let l = limit.clamp(1, 500);
+        let mut logs = Vec::new();
+
+        if let Ok(mut stmt) = guard.prepare(
+            "SELECT timestamp, provider, model, connectionId, promptTokens, completionTokens, status FROM usageHistory ORDER BY id DESC LIMIT ?"
+        ) {
+            if let Ok(rows) = stmt.query_map(rusqlite::params![l], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?.unwrap_or_else(|| "-".to_string()),
+                    r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "-".to_string()),
+                    r.get::<_, Option<String>>(3)?.unwrap_or_else(|| "-".to_string()),
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, Option<String>>(6)?.unwrap_or_else(|| "-".to_string()),
+                ))
+            }) {
+                for row in rows.flatten() {
+                    let (ts, prov, model, conn_id, prompt_tok, comp_tok, status) = row;
+                    logs.push(format!(
+                        "{} | {} | {} | {} | {} | {} | {}",
+                        ts, model, prov.to_uppercase(), conn_id, prompt_tok, comp_tok, status
+                    ));
+                }
+            }
+        }
+
+        logs
     }
 
     // ==========================================

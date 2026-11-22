@@ -99,14 +99,19 @@ async fn main() -> anyhow::Result<()> {
         combo_tracker,
         token_cache,
         circuit_breaker,
+        console_buffer: routes::ConsoleLogBuffer::new(),
     };
     let app = routes::create_router(state);
 
     // 7. Bind to port and run with graceful shutdown
     let port = config.port;
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => SocketAddr::new(ip, port),
+        Err(_) => SocketAddr::from(([0, 0, 0, 0], port)),
+    };
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("9Router listening on http://0.0.0.0:{}", port);
+    tracing::info!("9Router listening on http://{}:{}", host, port);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

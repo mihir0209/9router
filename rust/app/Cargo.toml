@@ -31,6 +31,7 @@ mime_guess = "2.0"
 dashmap = "6.1"
 ring = "0.17"
 base64 = "0.22"
+bcrypt = "0.19.3"
 
 [workspace]
 

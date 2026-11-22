@@ -17,6 +17,47 @@ use crate::sse;
 use crate::translator::{self, ChatCompletionRequest, ClaudeMessageRequest};
 
 #[derive(Clone)]
+pub struct ConsoleLogBuffer {
+    pub logs: Arc<tokio::sync::RwLock<std::collections::VecDeque<String>>>,
+    pub tx: tokio::sync::broadcast::Sender<String>,
+}
+
+impl ConsoleLogBuffer {
+    pub fn new() -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(256);
+        let mut initial = std::collections::VecDeque::new();
+        let now_str = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        initial.push_back(format!("[INFO] [{}] 9Router native gateway operational", now_str));
+        initial.push_back(format!("[INFO] [{}] System database initialized with WAL mode", now_str));
+        Self {
+            logs: Arc::new(tokio::sync::RwLock::new(initial)),
+            tx,
+        }
+    }
+
+    pub async fn push(&self, line: String) {
+        let mut guard = self.logs.write().await;
+        if guard.len() >= 1000 {
+            guard.pop_front();
+        }
+        guard.push_back(line.clone());
+        let _ = self.tx.send(line);
+    }
+
+    pub async fn clear(&self) {
+        let mut guard = self.logs.write().await;
+        guard.clear();
+        let _ = self.tx.send("__CLEAR__".to_string());
+    }
+}
+
+impl Default for ConsoleLogBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub db: Arc<Database>,
@@ -25,6 +66,7 @@ pub struct AppState {
     pub combo_tracker: Arc<crate::combo_router::ComboTracker>,
     pub token_cache: crate::cache::TokenCache,
     pub circuit_breaker: Arc<crate::circuit_breaker::CircuitBreakerRegistry>,
+    pub console_buffer: ConsoleLogBuffer,
 }
 
 impl axum::extract::FromRef<AppState> for Arc<Database> {
@@ -2371,9 +2413,25 @@ pub async fn login_handler(
     let expected_password = settings
         .get("password")
         .and_then(|p| p.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "123456".to_string());
+        .unwrap_or_else(|| {
+            std::env::var("INITIAL_PASSWORD")
+                .ok()
+                .filter(|p| !p.trim().is_empty() && p.trim() != "change-me" && p.trim() != "your-password")
+                .unwrap_or_else(|| "123456".to_string())
+        });
 
-    if password != expected_password {
+    let valid = if password == expected_password {
+        true
+    } else if expected_password.starts_with("$2a$")
+        || expected_password.starts_with("$2b$")
+        || expected_password.starts_with("$2y$")
+    {
+        bcrypt::verify(&password, &expected_password).unwrap_or(false)
+    } else {
+        false
+    };
+
+    if !valid {
         return (
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, "application/json")],
@@ -2383,9 +2441,14 @@ pub async fn login_handler(
     }
 
     let token = crate::auth::create_dashboard_jwt(&state.config.jwt_secret);
+    let secure_flag = if std::env::var("AUTH_COOKIE_SECURE").map(|v| v == "true").unwrap_or(false) {
+        "; Secure"
+    } else {
+        ""
+    };
     let cookie_val = format!(
-        "auth_token={}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax",
-        token
+        "auth_token={}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{}",
+        token, secure_flag
     );
 
     (
@@ -2890,15 +2953,23 @@ pub async fn get_settings_handler(
         Err(_) => json!({}),
     };
 
+    let initial_pwd = std::env::var("INITIAL_PASSWORD").ok().filter(|v| !v.trim().is_empty() && v.trim() != "change-me" && v.trim() != "your-password");
     let has_password = base
         .get("password")
         .and_then(|v| v.as_str())
         .map(|s| !s.is_empty())
-        .unwrap_or(false);
+        .unwrap_or(false) || initial_pwd.is_some();
     let oidc_issuer_url = base.get("oidcIssuerUrl").and_then(|v| v.as_str()).unwrap_or("");
     let oidc_client_id = base.get("oidcClientId").and_then(|v| v.as_str()).unwrap_or("");
     let oidc_client_secret = base.get("oidcClientSecret").and_then(|v| v.as_str()).unwrap_or("");
     let oidc_configured = !oidc_issuer_url.is_empty() && !oidc_client_id.is_empty() && !oidc_client_secret.is_empty();
+
+    let enable_request_logs = std::env::var("ENABLE_REQUEST_LOGS")
+        .map(|v| v == "true")
+        .unwrap_or_else(|_| base.get("enableRequestLogs").and_then(|v| v.as_bool()).unwrap_or(true));
+    let enable_translator = std::env::var("ENABLE_TRANSLATOR")
+        .map(|v| v == "true")
+        .unwrap_or_else(|_| base.get("enableTranslator").and_then(|v| v.as_bool()).unwrap_or(true));
 
     if let Some(obj) = base.as_object_mut() {
         obj.remove("password");
@@ -2922,8 +2993,8 @@ pub async fn get_settings_handler(
         );
         obj.insert("upstreamKeepAlive".to_string(), json!(true));
         obj.insert("requestTimeoutSeconds".to_string(), json!(180));
-        obj.insert("enableRequestLogs".to_string(), json!(true));
-        obj.insert("enableTranslator".to_string(), json!(true));
+        obj.insert("enableRequestLogs".to_string(), json!(enable_request_logs));
+        obj.insert("enableTranslator".to_string(), json!(enable_translator));
         obj.insert("vertexCarbonFallback".to_string(), json!(true));
         obj.insert("maxRetries".to_string(), json!(3));
     }
@@ -2957,37 +3028,36 @@ pub async fn patch_settings_handler(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        if !current_pwd.is_empty() {
-            if input_current.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    Json(json!({"error": "Current password required"})),
-                )
-                    .into_response();
+        let valid_current = if current_pwd.is_empty() {
+            let env_init = std::env::var("INITIAL_PASSWORD").ok().unwrap_or_default();
+            if !env_init.is_empty() && env_init != "change-me" && env_init != "your-password" {
+                input_current == env_init
+            } else {
+                input_current.is_empty() || input_current == "123456"
             }
-            if input_current != current_pwd {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    Json(json!({"error": "Invalid current password"})),
-                )
-                    .into_response();
-            }
+        } else if input_current == current_pwd {
+            true
+        } else if current_pwd.starts_with("$2a$")
+            || current_pwd.starts_with("$2b$")
+            || current_pwd.starts_with("$2y$")
+        {
+            bcrypt::verify(input_current, current_pwd).unwrap_or(false)
         } else {
-            // First time setting password
-            if !input_current.is_empty() && input_current != "123456" {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    Json(json!({"error": "Invalid current password"})),
-                )
-                    .into_response();
-            }
+            false
+        };
+
+        if !valid_current {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::CONTENT_TYPE, "application/json")],
+                Json(json!({"error": "Invalid current password"})),
+            )
+                .into_response();
         }
 
         if let Some(cur_obj) = current.as_object_mut() {
-            cur_obj.insert("password".to_string(), json!(new_pwd));
+            let hashed = bcrypt::hash(new_pwd, 10).unwrap_or_else(|_| new_pwd.to_string());
+            cur_obj.insert("password".to_string(), json!(hashed));
         }
     }
 
@@ -3066,12 +3136,28 @@ fn is_database_authorized(
     match expected {
         Some(exp) if !exp.is_empty() => {
             if let Some(prov) = provided {
-                prov == exp
+                if prov == exp {
+                    return true;
+                }
+                if exp.starts_with("$2a$")
+                    || exp.starts_with("$2b$")
+                    || exp.starts_with("$2y$")
+                {
+                    bcrypt::verify(prov, &exp).unwrap_or(false)
+                } else {
+                    false
+                }
             } else {
                 false
             }
         }
         _ => {
+            if let Ok(init_pwd) = std::env::var("INITIAL_PASSWORD") {
+                let init_pwd = init_pwd.trim();
+                if !init_pwd.is_empty() && init_pwd != "change-me" && init_pwd != "your-password" {
+                    return provided.map(|p| p == init_pwd).unwrap_or(false);
+                }
+            }
             if let Some(prov) = provided {
                 prov.is_empty() || prov == "123456"
             } else {
@@ -3402,6 +3488,256 @@ pub async fn usage_stream_handler() -> Response {
     );
     let s = stream::once(async move { initial_event });
     Sse::new(s).keep_alive(KeepAlive::default()).into_response()
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct UsageChartQuery {
+    pub period: Option<String>,
+}
+
+pub async fn usage_chart_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<UsageChartQuery>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let period = query.period.as_deref().unwrap_or("7d");
+    match state.db.get_chart_data(period) {
+        Ok(data) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            Json(data),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to get chart data: {}", e)})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct UsageApiKeysQuery {
+    pub period: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+pub async fn usage_api_keys_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<UsageApiKeysQuery>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let period = query.period.as_deref().unwrap_or("7d");
+    match state.db.get_api_keys_usage(period) {
+        Ok(data) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            Json(data),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to get api keys usage: {}", e)})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn usage_providers_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    match state.db.get_usage_providers() {
+        Ok(data) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            Json(data),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to get usage providers: {}", e)})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct UsageRequestDetailsQuery {
+    pub page: Option<i64>,
+    #[serde(rename = "pageSize")]
+    pub page_size: Option<i64>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub status: Option<String>,
+}
+
+pub async fn usage_request_details_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<UsageRequestDetailsQuery>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let page = query.page.unwrap_or(1);
+    let page_size = query.page_size.unwrap_or(20);
+    match state.db.get_request_details(
+        page,
+        page_size,
+        query.provider.as_deref(),
+        query.model.as_deref(),
+        query.status.as_deref(),
+    ) {
+        Ok(data) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            Json(data),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to get request details: {}", e)})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct UsageLogsQuery {
+    pub limit: Option<i64>,
+}
+
+pub async fn usage_logs_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<UsageLogsQuery>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let limit = query.limit.unwrap_or(200);
+    let logs = state.db.get_recent_logs(limit);
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Json(logs),
+    )
+        .into_response()
+}
+
+pub async fn get_console_logs_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let guard = state.console_buffer.logs.read().await;
+    let list: Vec<String> = guard.iter().cloned().collect();
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Json(json!({"success": true, "logs": list})),
+    )
+        .into_response()
+}
+
+pub async fn delete_console_logs_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    state.console_buffer.clear().await;
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Json(json!({"success": true})),
+    )
+        .into_response()
+}
+
+pub async fn console_logs_stream_handler(
+    State(state): State<AppState>,
+) -> Response {
+    let mut rx = state.console_buffer.tx.subscribe();
+    let initial_logs: Vec<String> = {
+        let guard = state.console_buffer.logs.read().await;
+        guard.iter().cloned().collect()
+    };
+
+    let stream = async_stream::stream! {
+        let init_msg = json!({"type": "init", "logs": initial_logs}).to_string();
+        yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", init_msg));
+
+        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        loop {
+            tokio::select! {
+                _ = ping_interval.tick() => {
+                    yield Ok(format!(": keepalive\n\n"));
+                }
+                msg = rx.recv() => {
+                    match msg {
+                        Ok(line) => {
+                            if line == "__CLEAR__" {
+                                let clear_msg = json!({"type": "clear"}).to_string();
+                                yield Ok(format!("data: {}\n\n", clear_msg));
+                            } else {
+                                let line_msg = json!({"type": "line", "line": line}).to_string();
+                                yield Ok(format!("data: {}\n\n", line_msg));
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONNECTION, "keep-alive"),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
 }
 
 pub async fn dashboard_models_handler(State(state): State<AppState>) -> Response {
@@ -3851,13 +4187,49 @@ pub fn create_router(state: AppState) -> Router {
             axum::routing::get(usage_stats_handler).options(options_handler),
         )
         .route(
+            "/api/usage/chart",
+            axum::routing::get(usage_chart_handler).options(options_handler),
+        )
+        .route(
+            "/api/usage/api-keys",
+            axum::routing::get(usage_api_keys_handler).options(options_handler),
+        )
+        .route(
+            "/api/usage/providers",
+            axum::routing::get(usage_providers_handler).options(options_handler),
+        )
+        .route(
+            "/api/usage/request-details",
+            axum::routing::get(usage_request_details_handler).options(options_handler),
+        )
+        .route(
+            "/api/usage/logs",
+            axum::routing::get(usage_logs_handler).options(options_handler),
+        )
+        .route(
+            "/api/usage/request-logs",
+            axum::routing::get(usage_logs_handler).options(options_handler),
+        )
+        .route(
             "/api/usage/stream",
             axum::routing::get(usage_stream_handler).options(options_handler),
+        )
+        .route(
+            "/api/translator/console-logs",
+            axum::routing::get(get_console_logs_handler)
+                .delete(delete_console_logs_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/translator/console-logs/stream",
+            axum::routing::get(console_logs_stream_handler).options(options_handler),
         )
         // Reverse proxy fallback to original Next.js for UI, static assets, and full dashboard APIs
         .fallback(crate::original::proxy)
         // Shared state
         .with_state(state)
+        // Layer DefaultBodyLimit of 128 MB for database backup restore and large multimodal requests
+        .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024))
         // Permissive CORS layer without injecting CORS headers into Vary
         .layer(
             tower_http::cors::CorsLayer::permissive()
@@ -3886,7 +4258,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker };
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         let req = Request::builder()
@@ -3918,7 +4290,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker };
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         // GET /v1/models without key
@@ -4045,7 +4417,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker };
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         let req = Request::builder()
@@ -4080,7 +4452,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker };
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         // 1. Create a combo
@@ -4163,7 +4535,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker };
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         // GET / should serve embedded index.html
@@ -4206,7 +4578,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker };
+        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         // Create combo with strategy: "hedged"
@@ -4287,7 +4659,7 @@ mod tests {
         );
 
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache: token_cache.clone(), circuit_breaker };
+        let state = AppState { config, db, proxy, original, combo_tracker, token_cache: token_cache.clone(), circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         // 2. Dispatch POST /v1/chat/completions with whitespace variation: "  what   is   2+2?  \n"
@@ -4437,6 +4809,7 @@ mod tests {
             combo_tracker,
             token_cache: token_cache.clone(),
             circuit_breaker: Arc::clone(&circuit_breaker),
+            console_buffer: ConsoleLogBuffer::new(),
         };
         let app = create_router(state);
 
@@ -4523,6 +4896,7 @@ mod tests {
             token_cache,
             combo_tracker,
             circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
         };
         let app = create_router(state);
 

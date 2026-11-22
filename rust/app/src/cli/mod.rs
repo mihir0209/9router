@@ -360,6 +360,7 @@ mod tests {
             combo_tracker,
             token_cache,
             circuit_breaker,
+            console_buffer: crate::routes::ConsoleLogBuffer::new(),
         };
         let app = crate::routes::create_router(state);
 

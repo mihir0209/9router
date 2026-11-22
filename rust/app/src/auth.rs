@@ -307,20 +307,38 @@ pub fn resolve_configured_admin_token() -> String {
 /// Validates Admin API token passed via x-admin-key or Authorization: Bearer.
 /// Allows automated internal systems, CI/CD, and scripts to manage keys and providers.
 pub fn verify_admin_api_token(headers: &HeaderMap) -> bool {
-    let configured_token = resolve_configured_admin_token();
+    let mut configured_tokens = Vec::new();
+    let admin_tok = resolve_configured_admin_token();
+    if !admin_tok.trim().is_empty() {
+        configured_tokens.push(admin_tok);
+    }
+    if let Ok(internal_tok) = std::env::var("INTERNAL_API_TOKEN") {
+        let trimmed = internal_tok.trim().to_string();
+        if !trimmed.is_empty() {
+            configured_tokens.push(trimmed);
+        }
+    }
+    if let Ok(router_key) = std::env::var("ROUTER_API_KEY") {
+        let trimmed = router_key.trim().to_string();
+        if !trimmed.is_empty() {
+            configured_tokens.push(trimmed);
+        }
+    }
 
-    if configured_token.trim().is_empty() {
+    if configured_tokens.is_empty() {
         return false;
     }
 
-    let conf_bytes = configured_token.trim().as_bytes();
-
-    // 1. Check x-admin-key header
-    if let Some(val) = headers.get("x-admin-key") {
-        if let Ok(s) = val.to_str() {
-            let s = s.trim();
-            if constant_time_eq(s.as_bytes(), conf_bytes) {
-                return true;
+    // 1. Check x-admin-key, x-internal-token, x-router-key headers
+    for header_name in &["x-admin-key", "x-internal-token", "x-router-key", "x-9r-cli-token"] {
+        if let Some(val) = headers.get(*header_name) {
+            if let Ok(s) = val.to_str() {
+                let s = s.trim();
+                for tok in &configured_tokens {
+                    if constant_time_eq(s.as_bytes(), tok.as_bytes()) {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -331,8 +349,10 @@ pub fn verify_admin_api_token(headers: &HeaderMap) -> bool {
             let trimmed = auth_str.trim();
             if let Some(token) = trimmed.strip_prefix("Bearer ").or_else(|| trimmed.strip_prefix("bearer ")) {
                 let token = token.trim();
-                if constant_time_eq(token.as_bytes(), conf_bytes) {
-                    return true;
+                for tok in &configured_tokens {
+                    if constant_time_eq(token.as_bytes(), tok.as_bytes()) {
+                        return true;
+                    }
                 }
             }
         }
