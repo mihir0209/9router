@@ -3963,11 +3963,152 @@ pub async fn get_pricing_handler() -> Response {
 }
 
 // ============================================================================
-// Router Assembly
+// Router Assembly & Dynamic Body Limit Configuration
 // ============================================================================
 
+pub const DEFAULT_MAX_BODY_LIMIT_MB: usize = 128;
+pub const DEFAULT_MAX_BODY_LIMIT_BYTES: usize = DEFAULT_MAX_BODY_LIMIT_MB * 1024 * 1024; // 128 MB
+
+/// Formats byte sizes into human-readable strings (e.g. "128 MB", "1.5 MB", "500 KB").
+pub fn format_body_limit(bytes: usize) -> String {
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    if mb >= 1.0 {
+        if (mb.fract()).abs() < 1e-4 {
+            format!("{} MB", mb as usize)
+        } else {
+            format!("{:.2} MB", mb)
+        }
+    } else {
+        let kb = bytes as f64 / 1024.0;
+        if kb >= 1.0 {
+            format!("{:.1} KB", kb)
+        } else {
+            format!("{} bytes", bytes)
+        }
+    }
+}
+
+/// Dynamically resolves the maximum body limit in bytes from config / environment.
+///
+/// Priority:
+/// 1. `NINEROUTER_MAX_BODY_MB` environment variable (if explicitly set).
+///    - If `0`, returns `None` (meaning body limit disabled / unlimited).
+///    - If `> 0`, returns `Some(mb * 1024 * 1024)`.
+/// 2. `config.server.max_body_mb` or `config.streaming.max_body_mb` if set to a non-default (> 0 and != 20).
+/// 3. Default fallback: 128 MB (`128 * 1024 * 1024` bytes).
+pub fn resolve_max_body_limit(config: &Config) -> Option<usize> {
+    // 1. Direct environment variable override if present
+    if let Ok(raw) = std::env::var("NINEROUTER_MAX_BODY_MB") {
+        let trimmed = raw.trim();
+        if let Ok(mb) = trimmed.parse::<usize>() {
+            if mb == 0 {
+                return None; // 0 disables the limit
+            }
+            return Some(mb.saturating_mul(1024 * 1024));
+        }
+    }
+
+    // 2. Explicitly configured value on ServerConfig or StreamingConfig
+    if config.server.max_body_mb != 20 {
+        if config.server.max_body_mb == 0 {
+            return None;
+        }
+        return Some(config.server.max_body_mb.saturating_mul(1024 * 1024));
+    }
+    if config.streaming.max_body_mb != 20 {
+        if config.streaming.max_body_mb == 0 {
+            return None;
+        }
+        return Some(config.streaming.max_body_mb.saturating_mul(1024 * 1024));
+    }
+
+    // 3. Fallback default: 128 MB (128 * 1024 * 1024 bytes)
+    Some(DEFAULT_MAX_BODY_LIMIT_BYTES)
+}
+
+/// Middleware that enforces the dynamic body limit:
+/// - Rejects early by Content-Length header before buffering large bodies
+/// - Catches any 413 Payload Too Large rejections from inner extractors
+/// - Formats clear OpenAI-compatible JSON 413 error responses
+pub async fn body_limit_middleware(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let limit_bytes = match resolve_max_body_limit(&state.config) {
+        Some(b) => b,
+        None => return next.run(req).await,
+    };
+
+    // 1. Fast path: check declared Content-Length header before buffering body
+    if let Some(content_length) = req.headers().get(header::CONTENT_LENGTH) {
+        if let Ok(len_str) = content_length.to_str() {
+            if let Ok(len) = len_str.trim().parse::<usize>() {
+                if len > limit_bytes {
+                    let err_msg = format!(
+                        "Request body exceeds the {} limit",
+                        format_body_limit(limit_bytes)
+                    );
+                    let body = json!({
+                        "error": {
+                            "message": err_msg,
+                            "type": "invalid_request_error",
+                            "code": "request_too_large"
+                        },
+                        "message": err_msg
+                    });
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        [(header::CONTENT_TYPE, "application/json")],
+                        Json(body),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    // 2. Run inner handler (guarded by DefaultBodyLimit)
+    let resp = next.run(req).await;
+
+    // 3. Clear 413 error handling: ensure 413 response is formatted with structured JSON
+    if resp.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        let is_json = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.contains("application/json"))
+            .unwrap_or(false);
+
+        if !is_json {
+            let err_msg = format!(
+                "Request body exceeds the {} limit",
+                format_body_limit(limit_bytes)
+            );
+            let body = json!({
+                "error": {
+                    "message": err_msg,
+                    "type": "invalid_request_error",
+                    "code": "request_too_large"
+                },
+                "message": err_msg
+            });
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                [(header::CONTENT_TYPE, "application/json")],
+                Json(body),
+            )
+                .into_response();
+        }
+    }
+
+    resp
+}
+
 pub fn create_router(state: AppState) -> Router {
-    Router::new()
+    let body_limit = resolve_max_body_limit(&state.config);
+
+    let mut router = Router::new()
         // Health
         .route(
             "/api/health",
@@ -4227,14 +4368,24 @@ pub fn create_router(state: AppState) -> Router {
         // Reverse proxy fallback to original Next.js for UI, static assets, and full dashboard APIs
         .fallback(crate::original::proxy)
         // Shared state
-        .with_state(state)
-        // Layer DefaultBodyLimit of 128 MB for database backup restore and large multimodal requests
-        .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024))
-        // Permissive CORS layer without injecting CORS headers into Vary
-        .layer(
-            tower_http::cors::CorsLayer::permissive()
-                .vary(tower_http::cors::Vary::list([])),
-        )
+        .with_state(state.clone());
+
+    if let Some(limit_bytes) = body_limit {
+        router = router
+            .layer(axum::middleware::from_fn_with_state(
+                state,
+                body_limit_middleware,
+            ))
+            .layer(axum::extract::DefaultBodyLimit::max(limit_bytes));
+    } else {
+        router = router.layer(axum::extract::DefaultBodyLimit::disable());
+    }
+
+    // Permissive CORS layer without injecting CORS headers into Vary
+    router.layer(
+        tower_http::cors::CorsLayer::permissive()
+            .vary(tower_http::cors::Vary::list([])),
+    )
 }
 
 #[cfg(test)]
@@ -5022,6 +5173,211 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let blocked_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(blocked_json["blockedIPs"], serde_json::json!(["5.6.7.8"]));
+    }
+
+    #[test]
+    fn test_format_body_limit() {
+        assert_eq!(format_body_limit(128 * 1024 * 1024), "128 MB");
+        assert_eq!(format_body_limit(20 * 1024 * 1024), "20 MB");
+        assert_eq!(format_body_limit(1024 * 1024), "1 MB");
+        assert_eq!(format_body_limit(512 * 1024), "512.0 KB");
+        assert_eq!(format_body_limit(500), "500 bytes");
+    }
+
+    #[test]
+    fn test_resolve_max_body_limit_scenarios() {
+        // Default config (no env var) defaults to 128 MB
+        let default_cfg = Config::default();
+        assert_eq!(
+            resolve_max_body_limit(&default_cfg),
+            Some(128 * 1024 * 1024)
+        );
+
+        // Custom server.max_body_mb
+        let mut server_cfg = Config::default();
+        server_cfg.server.max_body_mb = 50;
+        assert_eq!(
+            resolve_max_body_limit(&server_cfg),
+            Some(50 * 1024 * 1024)
+        );
+
+        // Custom streaming.max_body_mb
+        let mut stream_cfg = Config::default();
+        stream_cfg.streaming.max_body_mb = 10;
+        assert_eq!(
+            resolve_max_body_limit(&stream_cfg),
+            Some(10 * 1024 * 1024)
+        );
+
+        // Disabled limit (0)
+        let mut disabled_cfg = Config::default();
+        disabled_cfg.server.max_body_mb = 0;
+        assert_eq!(resolve_max_body_limit(&disabled_cfg), None);
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_body_limit_chat_and_messages_endpoints() {
+        let db = Database::open_in_memory().unwrap();
+        // Configure router with small 1 MB body limit
+        let mut cfg = Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            ..Default::default()
+        };
+        cfg.server.max_body_mb = 1; // 1 MB limit
+        let config = Arc::new(cfg);
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState {
+            config,
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+        };
+        let app = create_router(state);
+
+        // 1. POST /v1/chat/completions with Content-Length declaring 2 MB (> 1 MB limit)
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", "2097152") // 2 MB
+            .body(Body::from(vec![b' '; 100])) // Fast path check by header
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(err_json["error"]["code"], "request_too_large");
+        assert_eq!(err_json["error"]["type"], "invalid_request_error");
+        assert!(err_json["error"]["message"].as_str().unwrap().contains("1 MB"));
+
+        // 2. POST /v1/messages (Claude endpoint) with body > 1 MB limit
+        let large_body = vec![b'x'; 1024 * 1024 + 512]; // 1MB + 512B
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("Content-Type", "application/json")
+            .body(Body::from(large_body))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(err_json["error"]["code"], "request_too_large");
+
+        // 3. POST /v1/chat/completions within limit (< 1 MB) is NOT rejected by body limit
+        // (will return 401 Unauthorized because no auth key is supplied, confirming body limit passed)
+        let small_req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}"#))
+            .unwrap();
+
+        let resp = app.clone().oneshot(small_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_body_limit_database_import_and_multipart() {
+        let db = Database::open_in_memory().unwrap();
+        let mut cfg = Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            ..Default::default()
+        };
+        cfg.server.max_body_mb = 2; // 2 MB limit
+        let config = Arc::new(cfg);
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState {
+            config: Arc::clone(&config),
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+        };
+        let app = create_router(state);
+
+        let jwt = crate::auth::create_dashboard_jwt(&config.jwt_secret);
+        let auth_cookie = format!("auth_token={}", jwt);
+
+        // 1. POST /api/settings/database with Content-Length > 2 MB
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/settings/database")
+            .header("Cookie", &auth_cookie)
+            .header("Content-Type", "application/json")
+            .header("Content-Length", "4194304") // 4 MB declared
+            .body(Body::from(vec![b' '; 50]))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(err_json["error"]["code"], "request_too_large");
+        assert!(err_json["error"]["message"].as_str().unwrap().contains("2 MB"));
+
+        // 2. Multipart request exceeding limit
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/settings/database")
+            .header("Cookie", &auth_cookie)
+            .header("Content-Type", "multipart/form-data; boundary=X")
+            .header("Content-Length", "5000000") // ~5 MB declared
+            .body(Body::from("--X--"))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(err_json["error"]["code"], "request_too_large");
     }
 }
 
