@@ -3211,7 +3211,7 @@ pub async fn auth_status_handler(
     let require_login = settings
         .get("requireLogin")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
     let has_password = settings.get("password").is_some();
 
     let authenticated = if !require_login {
@@ -3990,7 +3990,7 @@ pub async fn get_require_login_handler(
     let require_login = settings
         .get("requireLogin")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
     let tunnel_dashboard_access = settings
         .get("tunnelDashboardAccess")
         .and_then(|v| v.as_bool())
@@ -4461,6 +4461,26 @@ pub async fn console_logs_stream_handler(
         axum::body::Body::from_stream(stream),
     )
         .into_response()
+}
+
+pub async fn cli_tools_all_statuses_handler() -> Response {
+    let tools = [
+        "claude", "codex", "opencode", "droid", "openclaw", "hermes",
+        "cowork", "cline", "kilo", "deepseek-tui", "jcode", "grok-build",
+        "devin", "pi", "omp", "crush", "forge", "smelt", "codewhale"
+    ];
+    let mut map = serde_json::Map::new();
+    for tool in tools {
+        map.insert(
+            tool.to_string(),
+            json!({
+                "installed": false,
+                "has9Router": false,
+                "settings": null
+            }),
+        );
+    }
+    Json(serde_json::Value::Object(map)).into_response()
 }
 
 pub async fn dashboard_models_handler(State(state): State<AppState>) -> Response {
@@ -5088,6 +5108,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/translator/console-logs/stream",
             axum::routing::get(console_logs_stream_handler).options(options_handler),
         )
+        .route(
+            "/api/cli-tools/all-statuses",
+            axum::routing::get(cli_tools_all_statuses_handler).options(options_handler),
+        )
         // Reverse proxy fallback to original Next.js for UI, static assets, and full dashboard APIs
         .fallback(crate::original::proxy)
         // Shared state
@@ -5133,7 +5157,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         let req = Request::builder()
@@ -5166,7 +5190,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         // GET /v1/models without key
@@ -5197,6 +5221,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], br#"{"error":"API key required"}"#);
+
+        // Enable requireLogin in settings for dashboard auth tests
+        db.save_settings(&json!({ "requireLogin": true })).unwrap();
 
         // GET /api/keys without session or admin token -> 401
         let req = Request::builder()
@@ -5294,7 +5321,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         let req = Request::builder()
@@ -5469,7 +5496,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         // 1. Create a combo
@@ -5553,7 +5580,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         // GET / should serve embedded index.html

@@ -1039,7 +1039,7 @@ impl Database {
 
         // Return default settings
         Ok(serde_json::json!({
-            "requireLogin": true,
+            "requireLogin": false,
             "requireApiKey": true,
             "lowWriteMode": false,
             "tunnelEnabled": false,

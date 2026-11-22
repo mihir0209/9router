@@ -419,11 +419,13 @@ pub fn verify_internal_auth(
     jwt_secret: &str,
     db: &Database,
 ) -> Result<(), Response> {
-    // Check if requireLogin is explicitly disabled
+    // Check if requireLogin is disabled (default is false when not configured or no password set)
     if let Ok(settings_map) = db.load_settings() {
-        if settings_map.get("requireLogin").and_then(|v| v.as_bool()) == Some(false) {
+        if !settings_map.get("requireLogin").and_then(|v| v.as_bool()).unwrap_or(false) {
             return Ok(());
         }
+    } else {
+        return Ok(());
     }
 
     // Check Admin API token for automation / programmatic scripts
