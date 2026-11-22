@@ -3,6 +3,7 @@ use std::time::Duration;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
+use crate::config::NetworkConfig;
 use crate::translator::{ChatCompletionRequest, ClaudeMessageRequest};
 
 // ============================================================================
@@ -10,16 +11,125 @@ use crate::translator::{ChatCompletionRequest, ClaudeMessageRequest};
 // ============================================================================
 
 /// Initializes a high-performance reqwest::Client configured with Keep-Alive
-/// connection pooling, sensible connection/request timeouts, and rustls-tls.
+/// connection pooling, sensible connection/request timeouts, rustls-tls,
+/// and optional proxy / SSL configuration resolved from environment variables.
 pub fn create_proxy_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .tcp_keepalive(Some(Duration::from_secs(60)))
-        .pool_idle_timeout(Some(Duration::from_secs(90)))
-        .pool_max_idle_per_host(32)
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(180))
+    create_proxy_client_with_config(None)
+}
+
+/// Initializes a reqwest::Client with optional explicit NetworkConfig
+/// or falling back to environment variables.
+pub fn create_proxy_client_with_config(config: Option<&NetworkConfig>) -> reqwest::Client {
+    create_proxy_client_builder(config)
         .build()
         .expect("Failed to initialize reqwest client with rustls-tls")
+}
+
+/// Builds and configures a reqwest::ClientBuilder with pooling, timeouts,
+/// proxy dispatcher (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY), and
+/// SSL validation (STRICT_SSL).
+pub fn create_proxy_client_builder(config: Option<&NetworkConfig>) -> reqwest::ClientBuilder {
+    let resolved_config: NetworkConfig;
+    let net = match config {
+        Some(c) => c,
+        None => {
+            resolved_config = NetworkConfig::load();
+            &resolved_config
+        }
+    };
+
+    let connect_timeout = std::env::var("FETCH_CONNECT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(10));
+
+    let keepalive_timeout = std::env::var("FETCH_KEEPALIVE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(60));
+
+    let mut builder = reqwest::Client::builder()
+        .tcp_keepalive(Some(keepalive_timeout))
+        .pool_idle_timeout(Some(Duration::from_secs(90)))
+        .pool_max_idle_per_host(32)
+        .connect_timeout(connect_timeout)
+        .timeout(Duration::from_secs(180));
+
+    // Custom SSL validation: when STRICT_SSL is false, accept invalid/self-signed certificates
+    if !net.strict_ssl {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+
+    let no_proxy_val = net.effective_no_proxy();
+
+    // 1. High-priority dedicated proxy: NINE_ROUTER_PROXY_URL
+    if let Some(dedicated_url) = &net.nine_router_proxy_url {
+        let trimmed = dedicated_url.trim();
+        if !trimmed.is_empty() {
+            if let Ok(mut p) = reqwest::Proxy::all(trimmed) {
+                if let Some(np) = no_proxy_val {
+                    let np_trimmed = np.trim();
+                    if !np_trimmed.is_empty() {
+                        p = p.no_proxy(reqwest::NoProxy::from_string(np_trimmed));
+                    }
+                }
+                builder = builder.proxy(p);
+                return builder;
+            }
+        }
+    }
+
+    // 2. HTTP proxy (HTTP_PROXY / http_proxy)
+    if let Some(http_url) = &net.http_proxy {
+        let trimmed = http_url.trim();
+        if !trimmed.is_empty() {
+            if let Ok(mut p) = reqwest::Proxy::http(trimmed) {
+                if let Some(np) = no_proxy_val {
+                    let np_trimmed = np.trim();
+                    if !np_trimmed.is_empty() {
+                        p = p.no_proxy(reqwest::NoProxy::from_string(np_trimmed));
+                    }
+                }
+                builder = builder.proxy(p);
+            }
+        }
+    }
+
+    // 3. HTTPS proxy (HTTPS_PROXY / https_proxy)
+    if let Some(https_url) = &net.https_proxy {
+        let trimmed = https_url.trim();
+        if !trimmed.is_empty() {
+            if let Ok(mut p) = reqwest::Proxy::https(trimmed) {
+                if let Some(np) = no_proxy_val {
+                    let np_trimmed = np.trim();
+                    if !np_trimmed.is_empty() {
+                        p = p.no_proxy(reqwest::NoProxy::from_string(np_trimmed));
+                    }
+                }
+                builder = builder.proxy(p);
+            }
+        }
+    }
+
+    // 4. General ALL proxy (ALL_PROXY / all_proxy)
+    if let Some(all_url) = &net.all_proxy {
+        let trimmed = all_url.trim();
+        if !trimmed.is_empty() {
+            if let Ok(mut p) = reqwest::Proxy::all(trimmed) {
+                if let Some(np) = no_proxy_val {
+                    let np_trimmed = np.trim();
+                    if !np_trimmed.is_empty() {
+                        p = p.no_proxy(reqwest::NoProxy::from_string(np_trimmed));
+                    }
+                }
+                builder = builder.proxy(p);
+            }
+        }
+    }
+
+    builder
 }
 
 // ============================================================================
@@ -291,6 +401,7 @@ pub fn build_chat_completions_url(base_url: &str, model: &str) -> String {
 #[derive(Clone)]
 pub struct ProxyService {
     client: reqwest::Client,
+    config: Option<NetworkConfig>,
 }
 
 impl Default for ProxyService {
@@ -300,14 +411,42 @@ impl Default for ProxyService {
 }
 
 impl ProxyService {
+    /// Initializes ProxyService resolving proxy configuration from NetworkConfig or environment variables
+    /// (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY, STRICT_SSL).
     pub fn new() -> Self {
+        Self::with_network_config(None)
+    }
+
+    /// Initializes ProxyService with an optional explicit NetworkConfig.
+    /// If config is None, falls back to environment variables.
+    pub fn with_network_config(config: Option<&NetworkConfig>) -> Self {
+        let net = match config {
+            Some(c) => c.clone(),
+            None => NetworkConfig::load(),
+        };
+        let client = create_proxy_client_with_config(Some(&net));
         Self {
-            client: create_proxy_client(),
+            client,
+            config: Some(net),
         }
+    }
+
+    /// Initializes ProxyService directly from a NetworkConfig reference.
+    pub fn from_config(config: &NetworkConfig) -> Self {
+        Self::with_network_config(Some(config))
+    }
+
+    /// Alias for with_network_config.
+    pub fn new_with_config(config: Option<&NetworkConfig>) -> Self {
+        Self::with_network_config(config)
     }
 
     pub fn client(&self) -> &reqwest::Client {
         &self.client
+    }
+
+    pub fn config(&self) -> Option<&NetworkConfig> {
+        self.config.as_ref()
     }
 
     /// Forwards an OpenAI chat completions request to upstream provider.
@@ -558,6 +697,119 @@ mod tests {
         match dec3 {
             RetryDecision::DoNotRetry { .. } => {}
             _ => panic!("Expected DoNotRetry"),
+        }
+    }
+
+    static PROXY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_proxy_builder_defaults() {
+        let _lock = PROXY_ENV_LOCK.lock().unwrap();
+        let builder = create_proxy_client_builder(None);
+        assert!(builder.build().is_ok());
+
+        let service = ProxyService::new();
+        assert!(service.client().get("https://example.com").build().is_ok());
+    }
+
+    #[test]
+    fn test_proxy_builder_with_network_config() {
+        let cfg = NetworkConfig {
+            http_proxy: Some("http://proxy.internal:8080".to_string()),
+            https_proxy: Some("http://proxy.internal:8443".to_string()),
+            all_proxy: None,
+            no_proxy: Some("localhost,127.0.0.1,internal.domain".to_string()),
+            nine_router_proxy_url: None,
+            nine_router_no_proxy: None,
+            nine_router_proxy_managed: false,
+            strict_ssl: true,
+        };
+
+        let builder = create_proxy_client_builder(Some(&cfg));
+        let client = builder.build().expect("Build client with HTTP/HTTPS proxies");
+        assert!(client.get("https://example.com").build().is_ok());
+
+        let service = ProxyService::from_config(&cfg);
+        assert_eq!(
+            service.config().and_then(|c| c.http_proxy.as_deref()),
+            Some("http://proxy.internal:8080")
+        );
+    }
+
+    #[test]
+    fn test_proxy_builder_all_proxy_and_socks() {
+        let cfg = NetworkConfig {
+            http_proxy: None,
+            https_proxy: None,
+            all_proxy: Some("socks5://127.0.0.1:1080".to_string()),
+            no_proxy: Some("localhost,127.0.0.1".to_string()),
+            nine_router_proxy_url: None,
+            nine_router_no_proxy: None,
+            nine_router_proxy_managed: false,
+            strict_ssl: true,
+        };
+
+        let builder = create_proxy_client_builder(Some(&cfg));
+        assert!(builder.build().is_ok());
+    }
+
+    #[test]
+    fn test_proxy_builder_nine_router_dedicated_proxy() {
+        let cfg = NetworkConfig {
+            http_proxy: Some("http://fallback.proxy:8080".to_string()),
+            https_proxy: None,
+            all_proxy: None,
+            no_proxy: Some("localhost".to_string()),
+            nine_router_proxy_url: Some("http://high-priority.proxy:3128".to_string()),
+            nine_router_no_proxy: Some("127.0.0.1".to_string()),
+            nine_router_proxy_managed: true,
+            strict_ssl: true,
+        };
+
+        let builder = create_proxy_client_builder(Some(&cfg));
+        let client = builder.build().expect("Build client with dedicated proxy");
+        assert!(client.get("https://example.com").build().is_ok());
+    }
+
+    #[test]
+    fn test_proxy_builder_strict_ssl_disabled() {
+        let cfg = NetworkConfig {
+            http_proxy: None,
+            https_proxy: None,
+            all_proxy: None,
+            no_proxy: None,
+            nine_router_proxy_url: None,
+            nine_router_no_proxy: None,
+            nine_router_proxy_managed: false,
+            strict_ssl: false,
+        };
+
+        let builder = create_proxy_client_builder(Some(&cfg));
+        let client = builder.build().expect("Build client with dangerous invalid certs");
+        assert!(client.get("https://self-signed.local").build().is_ok());
+    }
+
+    #[test]
+    fn test_proxy_service_env_resolution() {
+        let _lock = PROXY_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("HTTP_PROXY", "http://env-proxy.local:8080");
+            std::env::set_var("HTTPS_PROXY", "http://env-proxy.local:8443");
+            std::env::set_var("NO_PROXY", "localhost,127.0.0.1,cluster.local");
+            std::env::set_var("STRICT_SSL", "0");
+        }
+
+        let service = ProxyService::new();
+        let cfg = service.config().expect("Config should be populated");
+        assert_eq!(cfg.http_proxy.as_deref(), Some("http://env-proxy.local:8080"));
+        assert_eq!(cfg.https_proxy.as_deref(), Some("http://env-proxy.local:8443"));
+        assert!(!cfg.strict_ssl);
+
+        unsafe {
+            std::env::remove_var("HTTP_PROXY");
+            std::env::remove_var("HTTPS_PROXY");
+            std::env::remove_var("NO_PROXY");
+            std::env::remove_var("STRICT_SSL");
         }
     }
 }
