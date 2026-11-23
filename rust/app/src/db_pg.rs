@@ -231,6 +231,7 @@ pub static ALL_TABLE_DEFS: &[TableDef] = &[
             "CREATE INDEX IF NOT EXISTS idx_uh_conn ON usageHistory(connectionId)",
             "CREATE INDEX IF NOT EXISTS idx_uh_apikey ON usageHistory(apiKey)",
             "CREATE INDEX IF NOT EXISTS idx_uh_apikey_id ON usageHistory(apiKeyId)",
+            "CREATE INDEX IF NOT EXISTS idx_uh_key_ts ON usageHistory(apiKeyId, timestamp DESC)",
         ],
     },
     TableDef {
@@ -916,6 +917,8 @@ pub struct PgWriteItem {
 pub struct PgMemoryAdapter {
     config: PgConfig,
     tables: Arc<RwLock<HashMap<String, Vec<HashMap<String, Value>>>>>,
+    pk_index: Arc<RwLock<HashMap<String, HashMap<String, usize>>>>,
+    api_key_index: Arc<RwLock<HashMap<String, usize>>>,
     queue: Arc<Mutex<HashMap<String, PgWriteItem>>>,
     loaded_tables: Arc<RwLock<HashSet<String>>>,
     dirty_tables: Arc<RwLock<HashSet<String>>>,
@@ -932,6 +935,8 @@ impl PgMemoryAdapter {
         Self {
             config,
             tables: Arc::new(RwLock::new(HashMap::new())),
+            pk_index: Arc::new(RwLock::new(HashMap::new())),
+            api_key_index: Arc::new(RwLock::new(HashMap::new())),
             queue: Arc::new(Mutex::new(HashMap::new())),
             loaded_tables: Arc::new(RwLock::new(initial_loaded)),
             dirty_tables: Arc::new(RwLock::new(HashSet::new())),
@@ -983,22 +988,32 @@ impl PgMemoryAdapter {
         let pk_key = primary_key_for_row(table, &row);
         let queue_key = format!("{}|{}", table, pk_key);
 
-        // Update in-memory state
+        // Update in-memory state with O(1) PK index
         {
             let mut tables = self.tables.write().map_err(|e| e.to_string())?;
             let list = tables.entry(table.to_string()).or_default();
-            let mut found = false;
-            for existing in list.iter_mut() {
-                if primary_key_for_row(table, existing) == pk_key {
+            let mut pk_guard = self.pk_index.write().map_err(|e| e.to_string())?;
+            let table_pks = pk_guard.entry(table.to_string()).or_default();
+
+            if let Some(&idx) = table_pks.get(&pk_key) {
+                if idx < list.len() {
                     for (k, v) in &row {
-                        existing.insert(k.clone(), v.clone());
+                        list[idx].insert(k.clone(), v.clone());
                     }
-                    found = true;
-                    break;
                 }
-            }
-            if !found {
+            } else {
+                let idx = list.len();
                 list.push(row.clone());
+                table_pks.insert(pk_key.clone(), idx);
+            }
+
+            if table == "apiKeys" {
+                if let Some(key_val) = row.get("key").and_then(|v| v.as_str()) {
+                    let idx = *table_pks.get(&pk_key).unwrap_or(&0);
+                    if let Ok(mut ak_idx) = self.api_key_index.write() {
+                        ak_idx.insert(key_val.to_string(), idx);
+                    }
+                }
             }
         }
 
@@ -1037,6 +1052,11 @@ impl PgMemoryAdapter {
             if let Some(list) = tables.get_mut(table) {
                 list.retain(|r| primary_key_for_row(table, r) != pk_key);
             }
+            if let Ok(mut pk_guard) = self.pk_index.write() {
+                if let Some(table_pks) = pk_guard.get_mut(table) {
+                    table_pks.remove(&pk_key);
+                }
+            }
         }
 
         // Mark table dirty
@@ -1061,6 +1081,32 @@ impl PgMemoryAdapter {
         };
 
         Ok(should_flush)
+    }
+
+    /// O(1) Primary key lookup using in-memory hash index.
+    pub fn get_row_by_pk(&self, table: &str, pk: &str) -> Option<HashMap<String, Value>> {
+        let pk_guard = self.pk_index.read().ok()?;
+        let table_pks = pk_guard.get(table)?;
+        let idx = table_pks.get(pk)
+            .or_else(|| {
+                let cols = conflict_columns(table);
+                if cols.len() == 1 {
+                    let formatted = format!("{}:{}", cols[0], pk);
+                    table_pks.get(&formatted)
+                } else {
+                    None
+                }
+            })?;
+        let tables = self.tables.read().ok()?;
+        tables.get(table)?.get(*idx).cloned()
+    }
+
+    /// O(1) Fast API key auth lookup using in-memory key index.
+    pub fn get_api_key_by_key(&self, key: &str) -> Option<HashMap<String, Value>> {
+        let key_guard = self.api_key_index.read().ok()?;
+        let idx = *key_guard.get(key)?;
+        let tables = self.tables.read().ok()?;
+        tables.get("apiKeys")?.get(idx).cloned()
     }
 
     /// Get a single row by matching column key-value pairs from in-memory tier.
@@ -1503,5 +1549,32 @@ mod tests {
         assert_eq!(mgr.active_connections(), 1);
         mgr.release_connection();
         assert_eq!(mgr.active_connections(), 0);
+    }
+
+    #[test]
+    fn test_pg_memory_indexed_lookups() {
+        let config = PgConfig::new("postgres://localhost:5432/test", None, false, None).unwrap();
+        let adapter = PgMemoryAdapter::new(config);
+
+        for i in 0..100 {
+            let mut row = HashMap::new();
+            row.insert("id".to_string(), json!(format!("key-{}", i)));
+            row.insert("key".to_string(), json!(format!("sk-test-{}", i)));
+            row.insert("name".to_string(), json!(format!("Test Key {}", i)));
+            adapter.insert_row("apiKeys", row).unwrap();
+        }
+
+        // Test O(1) PK index lookup
+        let row_pk = adapter.get_row_by_pk("apiKeys", "key-42");
+        assert!(row_pk.is_some());
+        assert_eq!(row_pk.unwrap().get("key").unwrap(), "sk-test-42");
+
+        // Test O(1) secondary API key index lookup
+        let row_key = adapter.get_api_key_by_key("sk-test-88");
+        assert!(row_key.is_some());
+        assert_eq!(row_key.unwrap().get("id").unwrap(), "key-88");
+
+        // Verify non-existent key returns None
+        assert!(adapter.get_api_key_by_key("non-existent").is_none());
     }
 }

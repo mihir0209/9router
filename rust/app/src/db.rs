@@ -656,6 +656,7 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_pc_provider ON providerConnections(provider);
             CREATE INDEX IF NOT EXISTS idx_pc_provider_active ON providerConnections(provider, isActive);
+            CREATE INDEX IF NOT EXISTS idx_pc_provider_priority ON providerConnections(provider, isActive, priority DESC);
 
             CREATE TABLE IF NOT EXISTS apiKeys (
                 id TEXT PRIMARY KEY,
@@ -686,6 +687,7 @@ impl Database {
                 updatedAt TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_ak_key ON apiKeys(key);
+            CREATE INDEX IF NOT EXISTS idx_ak_owner_ref ON apiKeys(ownerRef);
 
             CREATE TABLE IF NOT EXISTS combos (
                 id TEXT PRIMARY KEY,
@@ -708,6 +710,7 @@ impl Database {
                 createdAt TEXT NOT NULL,
                 updatedAt TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_pn_type ON providerNodes(type);
 
             CREATE TABLE IF NOT EXISTS proxyPools (
                 id TEXT PRIMARY KEY,
@@ -717,6 +720,8 @@ impl Database {
                 createdAt TEXT NOT NULL,
                 updatedAt TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_pp_active ON proxyPools(isActive);
+            CREATE INDEX IF NOT EXISTS idx_pp_status ON proxyPools(testStatus);
 
             CREATE TABLE IF NOT EXISTS kv (
                 scope TEXT NOT NULL,
@@ -749,6 +754,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_uh_conn ON usageHistory(connectionId);
             CREATE INDEX IF NOT EXISTS idx_uh_apikey ON usageHistory(apiKey);
             CREATE INDEX IF NOT EXISTS idx_uh_apikey_id ON usageHistory(apiKeyId);
+            CREATE INDEX IF NOT EXISTS idx_uh_key_ts ON usageHistory(apiKeyId, timestamp DESC);
 
             CREATE TABLE IF NOT EXISTS requestDetails (
                 id TEXT PRIMARY KEY,
@@ -763,6 +769,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_rd_provider ON requestDetails(provider);
             CREATE INDEX IF NOT EXISTS idx_rd_model ON requestDetails(model);
             CREATE INDEX IF NOT EXISTS idx_rd_conn ON requestDetails(connectionId);
+            CREATE INDEX IF NOT EXISTS idx_rd_key_ts ON requestDetails(connectionId, timestamp DESC);
             "#,
         )?;
 
@@ -798,6 +805,8 @@ impl Database {
                 metadata TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_audit_owner_time ON auditLog(ownerRef, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_audit_ts ON auditLog(timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_audit_action ON auditLog(action, timestamp DESC);
             "#
         )?;
 
@@ -4519,5 +4528,64 @@ mod tests {
 
         let loaded = db.get_api_key_by_key("sk-inmem-test").expect("read key");
         assert_eq!(loaded.unwrap().id, "key-inmem-1");
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_indexes_and_query_plan() {
+        let db = Database::open_in_memory().expect("open in memory db");
+        let conn = db.writer();
+
+        // 1. Verify index presence in sqlite_master
+        let mut stmt = conn.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index';").expect("prepare");
+        let index_rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).expect("query").collect::<Result<Vec<_>, _>>().expect("collect");
+
+        let index_names: Vec<String> = index_rows.iter().map(|(name, _)| name.clone()).collect();
+        assert!(index_names.contains(&"idx_ak_key".to_string()));
+        assert!(index_names.contains(&"idx_ak_owner_ref".to_string()));
+        assert!(index_names.contains(&"idx_pc_provider".to_string()));
+        assert!(index_names.contains(&"idx_pc_provider_active".to_string()));
+        assert!(index_names.contains(&"idx_pc_provider_priority".to_string()));
+        assert!(index_names.contains(&"idx_pn_type".to_string()));
+        assert!(index_names.contains(&"idx_pp_active".to_string()));
+        assert!(index_names.contains(&"idx_pp_status".to_string()));
+        assert!(index_names.contains(&"idx_combo_name".to_string()));
+        assert!(index_names.contains(&"idx_kv_scope".to_string()));
+        assert!(index_names.contains(&"idx_uh_ts".to_string()));
+        assert!(index_names.contains(&"idx_uh_key_ts".to_string()));
+        assert!(index_names.contains(&"idx_rd_ts".to_string()));
+        assert!(index_names.contains(&"idx_rd_key_ts".to_string()));
+        assert!(index_names.contains(&"idx_audit_ts".to_string()));
+
+        // 2. EXPLAIN QUERY PLAN verifies query planner utilizes the indexes
+        let explain_ak: String = conn.query_row(
+            "EXPLAIN QUERY PLAN SELECT * FROM apiKeys WHERE key = 'test';",
+            [],
+            |r| r.get(3),
+        ).expect("explain ak");
+        println!("explain_ak: {}", explain_ak);
+        assert!(explain_ak.contains("USING INDEX") || explain_ak.contains("USING COVERING INDEX"));
+
+        let explain_pc: String = conn.query_row(
+            "EXPLAIN QUERY PLAN SELECT * FROM providerConnections WHERE provider = 'openai' AND isActive = 1 ORDER BY priority DESC;",
+            [],
+            |r| r.get(3),
+        ).expect("explain pc");
+        assert!(explain_pc.contains("USING INDEX idx_pc_provider_priority") || explain_pc.contains("USING INDEX idx_pc_provider_active"));
+
+        let explain_pp: String = conn.query_row(
+            "EXPLAIN QUERY PLAN SELECT * FROM proxyPools WHERE isActive = 1;",
+            [],
+            |r| r.get(3),
+        ).expect("explain pp");
+        assert!(explain_pp.contains("USING INDEX idx_pp_active"));
+
+        let explain_uh: String = conn.query_row(
+            "EXPLAIN QUERY PLAN SELECT * FROM usageHistory WHERE apiKeyId = 'key1' ORDER BY timestamp DESC;",
+            [],
+            |r| r.get(3),
+        ).expect("explain uh");
+        assert!(explain_uh.contains("USING INDEX idx_uh_key_ts") || explain_uh.contains("USING INDEX idx_uh_apikey_id"));
     }
 }

@@ -1195,6 +1195,10 @@ pub fn primary_key_for(table: &str, row: &Value) -> String {
 /// In-memory state engine with dirty row tracking and selective tiering.
 pub struct EdgeMemoryAdapter {
     tables: Arc<RwLock<HashMap<String, Vec<Value>>>>,
+    pk_index: Arc<RwLock<HashMap<String, HashMap<String, usize>>>>,
+    api_key_index: Arc<RwLock<HashMap<String, usize>>>,
+    kv_scope_index: Arc<RwLock<HashMap<String, Vec<usize>>>>,
+    provider_active_index: Arc<RwLock<HashMap<String, Vec<usize>>>>,
     sequences: Arc<RwLock<HashMap<String, u64>>>,
     loaded_tables: Arc<RwLock<HashSet<String>>>,
     loaded_kv_scopes: Arc<RwLock<HashSet<String>>>,
@@ -1217,6 +1221,10 @@ impl EdgeMemoryAdapter {
 
         Self {
             tables: Arc::new(RwLock::new(initial_tables)),
+            pk_index: Arc::new(RwLock::new(HashMap::new())),
+            api_key_index: Arc::new(RwLock::new(HashMap::new())),
+            kv_scope_index: Arc::new(RwLock::new(HashMap::new())),
+            provider_active_index: Arc::new(RwLock::new(HashMap::new())),
             sequences: Arc::new(RwLock::new(HashMap::new())),
             loaded_tables: Arc::new(RwLock::new(loaded)),
             loaded_kv_scopes: Arc::new(RwLock::new(HashSet::new())),
@@ -1337,27 +1345,131 @@ impl EdgeMemoryAdapter {
         }
     }
 
-    /// Merges fetched rows into resident table memory, preserving local writes.
+    /// Merges fetched rows into resident table memory, preserving local writes, and updates in-memory indexes.
     pub fn merge_fetched(&self, table: &str, rows: Vec<Value>) {
-        let mut tables = self.tables.write().unwrap();
-        let resident = tables.entry(table.to_string()).or_default();
+        {
+            let mut tables = self.tables.write().unwrap();
+            let resident = tables.entry(table.to_string()).or_default();
 
-        if resident.is_empty() {
-            *resident = rows;
-            return;
-        }
+            if resident.is_empty() {
+                *resident = rows;
+            } else {
+                let known: HashSet<String> = resident
+                    .iter()
+                    .map(|r| primary_key_for(table, r))
+                    .collect();
 
-        let known: HashSet<String> = resident
-            .iter()
-            .map(|r| primary_key_for(table, r))
-            .collect();
-
-        for row in rows {
-            let pk = primary_key_for(table, &row);
-            if !known.contains(&pk) {
-                resident.push(row);
+                for row in rows {
+                    let pk = primary_key_for(table, &row);
+                    if !known.contains(&pk) {
+                        resident.push(row);
+                    }
+                }
             }
         }
+        self.rebuild_indexes_for_table(table);
+    }
+
+    /// Rebuilds in-memory hash indexes for a table to guarantee O(1) lookups.
+    pub fn rebuild_indexes_for_table(&self, table: &str) {
+        let tables = self.tables.read().unwrap();
+        let rows = match tables.get(table) {
+            Some(r) => r,
+            None => return,
+        };
+
+        // 1. Primary key index
+        let mut pk_map = HashMap::new();
+        for (idx, row) in rows.iter().enumerate() {
+            let pk = primary_key_for(table, row);
+            pk_map.insert(pk, idx);
+        }
+        self.pk_index.write().unwrap().insert(table.to_string(), pk_map);
+
+        // 2. Secondary index: apiKeys.key
+        if table == "apiKeys" {
+            let mut key_map = HashMap::new();
+            for (idx, row) in rows.iter().enumerate() {
+                if let Some(key) = row.get("key").and_then(|v| v.as_str()) {
+                    key_map.insert(key.to_string(), idx);
+                }
+            }
+            *self.api_key_index.write().unwrap() = key_map;
+        }
+
+        // 3. Secondary index: kv.scope
+        if table == "kv" {
+            let mut scope_map: HashMap<String, Vec<usize>> = HashMap::new();
+            for (idx, row) in rows.iter().enumerate() {
+                if let Some(scope) = row.get("scope").and_then(|v| v.as_str()) {
+                    scope_map.entry(scope.to_string()).or_default().push(idx);
+                }
+            }
+            *self.kv_scope_index.write().unwrap() = scope_map;
+        }
+
+        // 4. Secondary index: providerConnections (provider, isActive)
+        if table == "providerConnections" {
+            let mut prov_map: HashMap<String, Vec<usize>> = HashMap::new();
+            for (idx, row) in rows.iter().enumerate() {
+                let is_active = row.get("isActive")
+                    .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n == 1)))
+                    .unwrap_or(true);
+                if is_active {
+                    if let Some(prov) = row.get("provider").and_then(|v| v.as_str()) {
+                        prov_map.entry(prov.to_string()).or_default().push(idx);
+                    }
+                }
+            }
+            *self.provider_active_index.write().unwrap() = prov_map;
+        }
+    }
+
+    /// O(1) Primary key lookup using in-memory hash index.
+    pub fn get_row_by_pk(&self, table: &str, pk: &str) -> Option<Value> {
+        let pk_guard = self.pk_index.read().unwrap();
+        let table_pk = pk_guard.get(table)?;
+        let idx = *table_pk.get(pk)?;
+        let tables = self.tables.read().unwrap();
+        tables.get(table)?.get(idx).cloned()
+    }
+
+    /// O(1) Fast API key auth lookup using in-memory key index.
+    pub fn get_api_key_by_key(&self, key: &str) -> Option<Value> {
+        let key_guard = self.api_key_index.read().unwrap();
+        let idx = *key_guard.get(key)?;
+        let tables = self.tables.read().unwrap();
+        tables.get("apiKeys")?.get(idx).cloned()
+    }
+
+    /// O(1) Fast KV scope retrieval using in-memory scope index.
+    pub fn get_kv_by_scope(&self, scope: &str) -> Vec<Value> {
+        let scope_guard = self.kv_scope_index.read().unwrap();
+        let indices = match scope_guard.get(scope) {
+            Some(idx) => idx.clone(),
+            None => return Vec::new(),
+        };
+        let tables = self.tables.read().unwrap();
+        let rows = match tables.get("kv") {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        indices.iter().filter_map(|&i| rows.get(i).cloned()).collect()
+    }
+
+    /// O(1) Fast active provider connection retrieval.
+    pub fn get_active_provider_connections(&self, provider: &str) -> Vec<Value> {
+        let prov_guard = self.provider_active_index.read().unwrap();
+        let indices = match prov_guard.get(provider) {
+            Some(idx) => idx.clone(),
+            None => return Vec::new(),
+        };
+        let tables = self.tables.read().unwrap();
+        let rows = match tables.get("providerConnections") {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        indices.iter().filter_map(|&i| rows.get(i).cloned()).collect()
     }
 
     /// Reads all rows resident in a table.
@@ -1961,5 +2073,95 @@ mod tests {
         let elapsed = tracker.elapsed_micros();
         println!("Edge critical path execution took {}µs (limit 10,000µs)", elapsed);
         assert!(elapsed < 10_000, "Must be under 10ms (10,000µs)");
+    }
+
+    #[test]
+    fn test_edge_in_memory_indexes_and_benchmark() {
+        let (queue, _) = D1PersistenceQueue::new(Duration::from_millis(8_000));
+        let adapter = EdgeMemoryAdapter::new(queue);
+
+        // Populate 1,000 API keys
+        let mut keys = Vec::with_capacity(1_000);
+        for i in 0..1_000 {
+            keys.push(serde_json::json!({
+                "id": format!("ak-{}", i),
+                "key": format!("sk-cf-edge-secret-{}", i),
+                "name": format!("Key {}", i),
+                "isActive": true
+            }));
+        }
+        adapter.merge_fetched("apiKeys", keys);
+
+        // Populate 1,000 KV entries across scopes
+        let mut kvs = Vec::with_capacity(1_000);
+        for i in 0..1_000 {
+            let scope = if i % 2 == 0 { "modelAliases" } else { "pricing" };
+            kvs.push(serde_json::json!({
+                "scope": scope,
+                "key": format!("model-{}", i),
+                "value": format!("dest-{}", i)
+            }));
+        }
+        adapter.merge_fetched("kv", kvs);
+
+        // Populate provider connections
+        let mut conns = Vec::with_capacity(100);
+        for i in 0..100 {
+            let provider = if i % 2 == 0 { "openai" } else { "anthropic" };
+            conns.push(serde_json::json!({
+                "id": format!("conn-{}", i),
+                "provider": provider,
+                "isActive": i % 3 != 0, // 2/3 active
+                "priority": i
+            }));
+        }
+        adapter.merge_fetched("providerConnections", conns);
+
+        // 1. Verify O(1) Index Correctness
+        let key_500 = adapter.get_api_key_by_key("sk-cf-edge-secret-500");
+        assert!(key_500.is_some());
+        assert_eq!(key_500.unwrap()["id"], "ak-500");
+
+        let pk_777 = adapter.get_row_by_pk("apiKeys", "ak-777");
+        assert!(pk_777.is_some());
+        assert_eq!(pk_777.unwrap()["key"], "sk-cf-edge-secret-777");
+
+        let model_aliases = adapter.get_kv_by_scope("modelAliases");
+        assert_eq!(model_aliases.len(), 500);
+
+        let active_openai = adapter.get_active_provider_connections("openai");
+        assert!(!active_openai.is_empty());
+
+        // 2. Benchmark Indexed Lookup vs Linear Scan
+        let iterations = 1_000;
+        let target_key = "sk-cf-edge-secret-999";
+
+        // Benchmark Linear Scan
+        let t0 = Instant::now();
+        for _ in 0..iterations {
+            let rows = adapter.get_table_rows("apiKeys");
+            let found = rows.iter().find(|r| r.get("key").and_then(|v| v.as_str()) == Some(target_key));
+            assert!(found.is_some());
+        }
+        let linear_duration = t0.elapsed();
+
+        // Benchmark O(1) In-Memory Indexed Hash Lookup
+        let t1 = Instant::now();
+        for _ in 0..iterations {
+            let found = adapter.get_api_key_by_key(target_key);
+            assert!(found.is_some());
+        }
+        let indexed_duration = t1.elapsed();
+
+        let linear_us = linear_duration.as_micros() as f64 / iterations as f64;
+        let indexed_us = indexed_duration.as_micros() as f64 / iterations as f64;
+        let speedup = linear_duration.as_nanos() as f64 / indexed_duration.as_nanos().max(1) as f64;
+
+        println!(
+            "Edge Index Benchmark: Linear scan = {:.2}µs/op, Indexed = {:.2}µs/op, Speedup = {:.1}x",
+            linear_us, indexed_us, speedup
+        );
+        assert!(indexed_us < 5.0, "Indexed lookup must take < 5µs");
+        assert!(speedup > 1.0, "Index must be faster than linear scan");
     }
 }

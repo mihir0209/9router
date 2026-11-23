@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use crate::db::{ApiKey, ProviderConnection, ProviderNode};
+use crate::db::{ProviderConnection, ProviderNode};
 use crate::routes::AppState;
 
 // ============================================================================
@@ -999,15 +999,7 @@ pub async fn image_generations_handler(
     // 1. Authenticate caller
     let api_key = match crate::routes::authenticate(&headers, &state.db) {
         Ok(k) => k,
-        Err(auth_err) => {
-            if crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db)
-                .is_ok()
-            {
-                ApiKey::default()
-            } else {
-                return auth_err;
-            }
-        }
+        Err(auth_err) => return auth_err,
     };
 
     // 2. Parse request JSON body
@@ -1626,6 +1618,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::config::Config;
+    use crate::db::ApiKey;
     use crate::proxy::ProxyService;
     use crate::routes::{create_router, ConsoleLogBuffer};
 
