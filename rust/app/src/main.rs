@@ -141,9 +141,21 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing::info!("9Router listening on http://{}:{}", host, port);
 
+    let daemon_mgr = cli::daemon::DaemonManager::new();
+    let _ = daemon_mgr.write_pid_record(&cli::daemon::PidRecord {
+        pid: std::process::id(),
+        port,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        exe: std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    });
+
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    daemon_mgr.remove_pid_file();
 
     if let Some(h) = token_refresh_handle {
         h.stop();

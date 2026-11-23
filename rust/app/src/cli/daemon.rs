@@ -72,14 +72,14 @@ impl DaemonManager {
         serde_json::from_str(&content).ok()
     }
 
-    fn write_pid_record(&self, record: &PidRecord) -> anyhow::Result<()> {
+    pub fn write_pid_record(&self, record: &PidRecord) -> anyhow::Result<()> {
         fs::create_dir_all(&self.run_dir)?;
         let json = serde_json::to_string_pretty(record)?;
         fs::write(&self.pid_file, json)?;
         Ok(())
     }
 
-    fn remove_pid_file(&self) {
+    pub fn remove_pid_file(&self) {
         let _ = fs::remove_file(&self.pid_file);
     }
 
@@ -192,6 +192,16 @@ impl DaemonManager {
         let rec = match self.read_pid_record() {
             Some(r) => r,
             None => {
+                for test_port in [20128, 20127] {
+                    let addr: std::net::SocketAddr = ([127, 0, 0, 1], test_port).into();
+                    if TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok() {
+                        println!("\x1b[32m\x1b[1m✓\x1b[0m 9Router is running (foreground or container)");
+                        println!("   Port:       {}", test_port);
+                        println!("   Endpoint:   http://127.0.0.1:{}", test_port);
+                        println!("   Socket:     \x1b[32mActive (Listening)\x1b[0m");
+                        return Ok(());
+                    }
+                }
                 println!("\x1b[33m•\x1b[0m 9Router is stopped (no PID record found at {}).", self.pid_file.display());
                 return Ok(());
             }
