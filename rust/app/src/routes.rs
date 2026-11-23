@@ -7182,6 +7182,7 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        unsafe { std::env::remove_var("ADMIN_API_TOKEN"); }
     }
 
     #[tokio::test]
@@ -8768,6 +8769,7 @@ mod tests {
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        unsafe { std::env::remove_var("ADMIN_API_TOKEN"); }
     }
 }
 

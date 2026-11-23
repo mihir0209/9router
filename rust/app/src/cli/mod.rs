@@ -1,6 +1,7 @@
 pub mod bench;
 pub mod common;
 pub mod daemon;
+pub mod media;
 pub mod models;
 pub mod service;
 pub mod tokens;
@@ -25,6 +26,13 @@ Core Commands:
   restart [-d]             Restart the gateway daemon
   logs [-n <lines>] [-f]   View gateway logs (with optional follow mode)
 
+AI & Media Commands:
+  chat [options] [prompt]  Send chat prompt to gateway, stream response in real-time
+  image [options] <prompt> Generate image via /v1/images/generations (-o output.png)
+  speech [options] <text>  Convert text to speech via /v1/audio/speech (-o speech.mp3)
+  transcribe [opts] <file> Transcribe audio to text via /v1/audio/transcriptions
+  video [options] <prompt> Generate video via /v1/videos/generations (-o video.mp4)
+
 Secondary Commands & Tooling:
   models, ls [options]     Query local gateway catalog and display available models & routing
   tokens [options]         Inspect OAuth provider connections and token refresh status
@@ -48,6 +56,11 @@ Examples:
   9r                       # Run server foreground on port 20127
   9r start -d              # Launch background daemon
   9r status                # Check process liveness & RSS memory
+  9r chat "Hello 9Router"  # Send a chat prompt to local gateway
+  9r image "Robot cat"     # Generate an image and save to image.png
+  9r speech "Welcome!"     # Synthesize speech to speech.mp3
+  9r transcribe audio.mp3  # Transcribe audio file to stdout
+  9r video "Ocean wave"    # Generate a video and save to video.mp4
   9r models                # List available models and provider routing table
   9r test                  # Benchmark gateway RTT and verify zero-overhead routing
   9r update --check        # Check if a new version is available on GitHub
@@ -236,6 +249,26 @@ pub async fn dispatch(args: &[String]) -> anyhow::Result<bool> {
             models::run_models(&args[1..]).await?;
             Ok(true)
         }
+        "chat" => {
+            media::run_chat(&args[1..]).await?;
+            Ok(true)
+        }
+        "image" => {
+            media::run_image(&args[1..]).await?;
+            Ok(true)
+        }
+        "speech" => {
+            media::run_speech(&args[1..]).await?;
+            Ok(true)
+        }
+        "transcribe" => {
+            media::run_transcribe(&args[1..]).await?;
+            Ok(true)
+        }
+        "video" => {
+            media::run_video(&args[1..]).await?;
+            Ok(true)
+        }
         "tokens" | "refresh-tokens" => {
             tokens::run_tokens(&args[1..]).await?;
             Ok(true)
@@ -309,6 +342,16 @@ mod tests {
     async fn test_dispatch_update_help() {
         assert!(dispatch(&["update".to_string(), "--help".to_string()]).await.unwrap());
         assert!(dispatch(&["upgrade".to_string(), "-h".to_string()]).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_media_help() {
+        assert!(dispatch(&["chat".to_string(), "--help".to_string()]).await.unwrap());
+        assert!(dispatch(&["chat".to_string(), "-h".to_string()]).await.unwrap());
+        assert!(dispatch(&["image".to_string(), "--help".to_string()]).await.unwrap());
+        assert!(dispatch(&["speech".to_string(), "--help".to_string()]).await.unwrap());
+        assert!(dispatch(&["transcribe".to_string(), "--help".to_string()]).await.unwrap());
+        assert!(dispatch(&["video".to_string(), "--help".to_string()]).await.unwrap());
     }
 
     #[tokio::test]
@@ -426,5 +469,179 @@ mod tests {
             "sk-cli-integration-key".to_string(),
             "--json".to_string(),
         ]).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_live_gateway_media_commands_integration() {
+        use axum::routing::post;
+        use axum::Router;
+        use axum::response::IntoResponse;
+        use axum::http::header;
+        use serde_json::json;
+
+        let mock_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(|body: axum::body::Bytes| async move {
+                    let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+                    if stream {
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"from stream!\"}}]}\n\ndata: [DONE]\n\n",
+                        ).into_response()
+                    } else {
+                        (
+                            [(header::CONTENT_TYPE, "application/json")],
+                            json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1234567890,
+                                "model": "gpt-4o-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "Hello! How can I assist you today?"
+                                    },
+                                    "finish_reason": "stop"
+                                }]
+                            }).to_string(),
+                        ).into_response()
+                    }
+                }),
+            )
+            .route(
+                "/v1/images/generations",
+                post(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "application/json")],
+                        json!({
+                            "created": 1234567890,
+                            "data": [{
+                                "b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+                            }]
+                        }).to_string(),
+                    ).into_response()
+                }),
+            )
+            .route(
+                "/v1/audio/speech",
+                post(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "audio/mpeg")],
+                        axum::body::Bytes::from_static(b"ID3\x04\x00\x00\x00\x00\x00#TSSE\x00\x00\x00\x0f\x00\x00\x03Lavf60.16.100\xff\xfb\x90d\x00\x00\x00\x00"),
+                    ).into_response()
+                }),
+            )
+            .route(
+                "/v1/audio/transcriptions",
+                post(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "application/json")],
+                        json!({
+                            "text": "This is a test audio transcription."
+                        }).to_string(),
+                    ).into_response()
+                }),
+            )
+            .route(
+                "/v1/videos/generations",
+                post(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "application/json")],
+                        json!({
+                            "created": 1234567890,
+                            "data": [{
+                                "b64_json": "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAAA8="
+                            }]
+                        }).to_string(),
+                    ).into_response()
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_app).await;
+        });
+
+        let temp_dir = std::env::temp_dir().join(format!("9r-cli-media-test-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let img_path = temp_dir.join("test_img.png").to_string_lossy().to_string();
+        let audio_path = temp_dir.join("test_speech.mp3").to_string_lossy().to_string();
+        let video_path = temp_dir.join("test_video.mp4").to_string_lossy().to_string();
+
+        // 1. Test chat non-streaming
+        assert!(dispatch(&[
+            "chat".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+            "What is the speed of light?".to_string(),
+        ]).await.unwrap());
+
+        // 2. Test chat streaming
+        assert!(dispatch(&[
+            "chat".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+            "--stream".to_string(),
+            "Write a short poem".to_string(),
+        ]).await.unwrap());
+
+        // 3. Test image generation
+        assert!(dispatch(&[
+            "image".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+            "-o".to_string(),
+            img_path.clone(),
+            "-s".to_string(),
+            "512x512".to_string(),
+            "A cute puppy".to_string(),
+        ]).await.unwrap());
+        assert!(std::path::Path::new(&img_path).exists());
+
+        // 4. Test speech synthesis
+        assert!(dispatch(&[
+            "speech".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+            "-o".to_string(),
+            audio_path.clone(),
+            "-v".to_string(),
+            "alloy".to_string(),
+            "Welcome to 9Router".to_string(),
+        ]).await.unwrap());
+        assert!(std::path::Path::new(&audio_path).exists());
+
+        // 5. Test transcription (using the audio file generated in step 4)
+        assert!(dispatch(&[
+            "transcribe".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+            "-m".to_string(),
+            "whisper-1".to_string(),
+            audio_path.clone(),
+        ]).await.unwrap());
+
+        // 6. Test video generation
+        assert!(dispatch(&[
+            "video".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+            "-o".to_string(),
+            video_path.clone(),
+            "-d".to_string(),
+            "5".to_string(),
+            "-a".to_string(),
+            "16:9".to_string(),
+            "Sunset timelapse over mountains".to_string(),
+        ]).await.unwrap());
+        assert!(std::path::Path::new(&video_path).exists());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
