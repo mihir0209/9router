@@ -12,6 +12,7 @@ pub mod media;
 pub mod mitm;
 pub mod original;
 pub mod proxy;
+pub mod proxy_pools;
 pub mod routes;
 pub mod sse;
 pub mod token_refresh;
@@ -94,6 +95,11 @@ async fn main() -> anyhow::Result<()> {
 
     // 5. Initialize ProxyService
     let proxy = Arc::new(proxy::ProxyService::new());
+    if let Ok(count) = proxy.sync_active_proxies_from_db(&db) {
+        if count > 0 {
+            tracing::info!("Loaded {} active proxy pools into outbound rotator", count);
+        }
+    }
 
     // 6. Initialize Original Next.js dashboard backend
     let original = original::Original::start().await;
