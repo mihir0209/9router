@@ -105,13 +105,14 @@ pub async fn dispatch(args: &[String]) -> anyhow::Result<bool> {
             Ok(false)
         }
         "start" => {
-            let mut daemon = false;
+            let mut daemon = true;
             let mut port = None;
             let mut host = None;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
                     "-d" | "--daemon" => daemon = true,
+                    "-f" | "--foreground" | "--no-daemon" => daemon = false,
                     "-p" | "--port" => {
                         i += 1;
                         if i < args.len() {
@@ -129,11 +130,19 @@ pub async fn dispatch(args: &[String]) -> anyhow::Result<bool> {
                 i += 1;
             }
 
+            let mgr = DaemonManager::new();
             if !daemon {
-                // If start is called without -d, it runs in foreground
+                // If foreground explicitly requested, check if port is already running
+                let target_port = port.unwrap_or_else(|| {
+                    std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(20127)
+                });
+                let check_addr: std::net::SocketAddr = ([127, 0, 0, 1], target_port).into();
+                if std::net::TcpStream::connect_timeout(&check_addr, std::time::Duration::from_millis(100)).is_ok() {
+                    eprintln!("\x1b[31mError:\x1b[0m Port {} is already in use by an active 9Router instance or service.", target_port);
+                    return Ok(true);
+                }
                 Ok(false)
             } else {
-                let mgr = DaemonManager::new();
                 mgr.start(true, host, port)?;
                 Ok(true)
             }
@@ -315,8 +324,8 @@ pub async fn dispatch(args: &[String]) -> anyhow::Result<bool> {
                 eprintln!("Unknown flag: {}. Run '9r --help' for usage.", first);
                 std::process::exit(1);
             }
-            // Otherwise, treat as server startup or invalid command
-            Ok(false)
+            eprintln!("Unknown command: '{}'. Run '9r --help' for a list of available commands.", first);
+            std::process::exit(1);
         }
     }
 }

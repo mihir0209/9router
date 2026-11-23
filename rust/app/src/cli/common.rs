@@ -32,6 +32,14 @@ pub fn resolve_gateway_url(port_opt: Option<u16>, url_opt: Option<String>) -> St
         }
     }
 
+    // Auto-detect whether 20128 or 20127 is active
+    for test_port in [20128, 20127] {
+        let addr: std::net::SocketAddr = ([127, 0, 0, 1], test_port).into();
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(50)).is_ok() {
+            return format!("http://127.0.0.1:{}", test_port);
+        }
+    }
+
     "http://127.0.0.1:20127".to_string()
 }
 

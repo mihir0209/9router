@@ -103,6 +103,14 @@ impl DaemonManager {
             }
         }
 
+        // Check if target port is already open and responding
+        let test_addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+        if std::net::TcpStream::connect_timeout(&test_addr, Duration::from_millis(150)).is_ok() {
+            println!("\x1b[33m!\x1b[0m 9Router (or another service) is already running on port {}.", port);
+            println!("  Run '9r status' to inspect or '9r models' to query the active gateway.");
+            return Ok(());
+        }
+
         if !daemon {
             // Run in foreground
             println!("\x1b[36m>\x1b[0m Starting 9Router in foreground on {}:{}...", host_str, port);

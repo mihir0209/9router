@@ -128,7 +128,17 @@ async fn main() -> anyhow::Result<()> {
         Ok(ip) => SocketAddr::new(ip, port),
         Err(_) => SocketAddr::from(([0, 0, 0, 0], port)),
     };
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!(
+                "\x1b[31mError:\x1b[0m Address {} is already in use.\nAnother 9Router instance or service is already listening on this port.\nUse '9r status' to inspect the running daemon, or specify a different port with 'PORT=<port> 9r'.",
+                addr
+            );
+            std::process::exit(1);
+        }
+        Err(e) => return Err(e.into()),
+    };
     tracing::info!("9Router listening on http://{}:{}", host, port);
 
     axum::serve(listener, app)

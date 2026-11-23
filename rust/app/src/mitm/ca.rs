@@ -8,7 +8,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -504,6 +504,7 @@ pub fn uninstall_ca_from_system(_cert_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn create_test_mitm_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("mitm-test-{}-{}", name, std::process::id()));
