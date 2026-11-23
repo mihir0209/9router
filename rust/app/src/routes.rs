@@ -3759,6 +3759,122 @@ pub async fn blocked_ips_handler() -> Response {
     Json(json!({ "blockedIPs": [] })).into_response()
 }
 
+pub fn serialize_admin_key(key: &crate::db::ApiKey, include_secret: bool) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".to_string(), json!(key.id));
+    if include_secret {
+        obj.insert("key".to_string(), json!(key.key));
+    }
+    obj.insert("name".to_string(), json!(key.name));
+    obj.insert("machineId".to_string(), json!(key.machine_id));
+    obj.insert("isActive".to_string(), json!(key.is_active));
+    obj.insert("createdAt".to_string(), json!(key.created_at));
+    obj.insert("rateLimitRequests".to_string(), json!(key.rate_limit_requests));
+    obj.insert("rateLimitWindowSeconds".to_string(), json!(key.rate_limit_window_seconds));
+    obj.insert("tokenLimitDaily".to_string(), json!(key.token_limit_daily));
+    obj.insert("tokenLimitMonthly".to_string(), json!(key.token_limit_monthly));
+    obj.insert("allowedModels".to_string(), json!(key.allowed_models));
+    obj.insert("blockedModels".to_string(), json!(key.blocked_models));
+    obj.insert("allowedIPs".to_string(), json!(key.allowed_ips));
+    obj.insert("blockedIPs".to_string(), json!(key.blocked_ips));
+    obj.insert("expiresAt".to_string(), json!(key.expires_at));
+    obj.insert("description".to_string(), json!(key.description));
+    obj.insert("ownerRef".to_string(), json!(key.owner_ref));
+    obj.insert("budgetUsd".to_string(), json!(key.budget_usd));
+    obj.insert("budgetResetHours".to_string(), json!(key.budget_reset_hours));
+    obj.insert("budgetWindowStartedAt".to_string(), json!(key.budget_window_started_at));
+    obj.insert("billingMode".to_string(), json!(key.billing_mode));
+    obj.insert("byokProvider".to_string(), json!(key.byok_provider));
+    obj.insert("maxConcurrentRequests".to_string(), json!(key.max_concurrent_requests));
+    obj.insert("allowedProviders".to_string(), json!(key.allowed_providers));
+    obj.insert("blockedProviders".to_string(), json!(key.blocked_providers));
+    obj.insert("forceProvider".to_string(), json!(key.force_provider));
+    obj.insert("forceModel".to_string(), json!(key.force_model));
+    obj.insert("allowedEndpoints".to_string(), json!(key.allowed_endpoints));
+    obj.insert("blockedEndpoints".to_string(), json!(key.blocked_endpoints));
+    let meta = serde_json::from_str::<serde_json::Value>(&key.metadata).unwrap_or_else(|_| json!({}));
+    obj.insert("metadata".to_string(), meta);
+    obj.insert("updatedAt".to_string(), json!(key.updated_at));
+    obj.insert("regenerateVersion".to_string(), json!(key.regenerate_version));
+
+    serde_json::Value::Object(obj)
+}
+
+pub fn serialize_api_key(key: &crate::db::ApiKey, include_secret: bool) -> serde_json::Value {
+    let show = include_secret || key.owner_ref.is_none();
+    serialize_admin_key(key, show)
+}
+
+fn normalize_list(val: Option<&serde_json::Value>) -> Result<Option<String>, &'static str> {
+    match val {
+        None => Ok(None),
+        Some(serde_json::Value::Null) => Ok(Some(String::new())),
+        Some(serde_json::Value::String(s)) => {
+            let parts: Vec<&str> = s.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+            let mut unique = Vec::new();
+            for p in parts {
+                if !unique.contains(&p) {
+                    unique.push(p);
+                }
+            }
+            Ok(Some(unique.join(",")))
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            let mut unique = Vec::new();
+            for item in arr {
+                let Some(s) = item.as_str() else {
+                    return Err("must contain only strings");
+                };
+                let s = s.trim();
+                if !s.is_empty() && !unique.contains(&s) {
+                    unique.push(s);
+                }
+            }
+            Ok(Some(unique.join(",")))
+        }
+        _ => Err("must be an array or CSV string"),
+    }
+}
+
+fn is_valid_ip_rule(rule: &str) -> bool {
+    let trimmed = rule.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    if let Some((addr_str, prefix_str)) = trimmed.split_once('/') {
+        if let Ok(prefix) = prefix_str.parse::<u8>() {
+            if let Ok(ip) = addr_str.parse::<std::net::IpAddr>() {
+                match ip {
+                    std::net::IpAddr::V4(_) => return prefix <= 32,
+                    std::net::IpAddr::V6(_) => return prefix <= 128,
+                }
+            }
+        }
+    }
+    false
+}
+
+fn get_client_ip(headers: &HeaderMap) -> String {
+    if let Some(val) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = val.split(',').next() {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    if let Some(val) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
 pub async fn create_key_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3767,71 +3883,266 @@ pub async fn create_key_handler(
     if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
         return resp;
     }
+    let name = payload.get("name").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+    if name.is_none() || name.as_deref() == Some("") {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Name is required"}))).into_response();
+    }
+    let owner_ref = payload.get("ownerRef").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+    if let Some(bm) = payload.get("billingMode").and_then(|v| v.as_str()) {
+        if bm == "byok" {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "Configure BYOK credentials after creating the key"}))).into_response();
+        }
+        if bm != "credits" {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid billingMode"}))).into_response();
+        }
+    }
+
     let hex_part = format!("{:x}", chrono::Utc::now().timestamp_micros());
     let id = payload
         .get("id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("key-{}", &hex_part[..hex_part.len().min(8)]));
-    let raw_key = payload
-        .get("key")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("9r-live-{}", hex_part));
-    let name = payload
-        .get("name")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let rate_limit_requests = payload
-        .get("rateLimitRequests")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let rate_limit_window_seconds = payload
-        .get("rateLimitWindowSeconds")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(60);
-    let allowed_models = payload
-        .get("allowedModels")
-        .and_then(|v| v.as_str())
-        .unwrap_or("*")
-        .to_string();
-    let now = chrono::Utc::now().to_rfc3339();
 
-    let key = ApiKey {
+    let mut custom_key_val = None;
+    if let Some(custom_key) = payload.get("key").and_then(|v| v.as_str()).map(|s| s.trim()) {
+        if !custom_key.is_empty() {
+            if custom_key.len() > 512 {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": "Custom key must be 512 characters or fewer"}))).into_response();
+            }
+            if state.db.get_api_key_by_key(custom_key).ok().flatten().is_some() {
+                return (StatusCode::CONFLICT, Json(json!({"error": "API key already in use"}))).into_response();
+            }
+            custom_key_val = Some(custom_key.to_string());
+        }
+    }
+
+    let machine_id = payload.get("machineId").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let raw_key = custom_key_val.unwrap_or_else(|| crate::auth::generate_api_key(machine_id.as_deref()));
+
+    let rate_limit_requests = payload.get("rateLimitRequests").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rate_limit_window_seconds = payload.get("rateLimitWindowSeconds").and_then(|v| v.as_i64()).unwrap_or(60);
+    let token_limit_daily = payload.get("tokenLimitDaily").and_then(|v| v.as_i64()).unwrap_or(0);
+    let token_limit_monthly = payload.get("tokenLimitMonthly").and_then(|v| v.as_i64()).unwrap_or(0);
+    let max_concurrent_requests = payload.get("maxConcurrentRequests").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    let allowed_models = normalize_list(payload.get("allowedModels")).unwrap_or(None).unwrap_or_else(|| "*".to_string());
+    let blocked_models = normalize_list(payload.get("blockedModels")).unwrap_or(None).unwrap_or_default();
+    let allowed_ips = normalize_list(payload.get("allowedIPs")).unwrap_or(None).unwrap_or_default();
+    let blocked_ips = normalize_list(payload.get("blockedIPs")).unwrap_or(None).unwrap_or_default();
+    let allowed_providers = normalize_list(payload.get("allowedProviders")).unwrap_or(None).unwrap_or_default();
+    let blocked_providers = normalize_list(payload.get("blockedProviders")).unwrap_or(None).unwrap_or_default();
+    let allowed_endpoints = normalize_list(payload.get("allowedEndpoints")).unwrap_or(None).unwrap_or_default();
+    let blocked_endpoints = normalize_list(payload.get("blockedEndpoints")).unwrap_or(None).unwrap_or_default();
+
+    let budget_usd = payload.get("budgetUsd").and_then(|v| v.as_f64());
+    let budget_reset_hours = payload.get("budgetResetHours").and_then(|v| v.as_f64());
+    let budget_window_started_at = payload.get("budgetWindowStartedAt").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let description = payload.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let expires_at = payload.get("expiresAt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let metadata = payload.get("metadata").map(|v| if v.is_string() { v.as_str().unwrap().to_string() } else { serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()) }).unwrap_or_else(|| "{}".to_string());
+
+    let key = crate::db::ApiKey {
         id: id.clone(),
         key: raw_key.clone(),
         name,
-        machine_id: None,
-        is_active: true,
-        created_at: now,
+        machine_id,
+        is_active: payload.get("isActive").and_then(|v| v.as_bool()).unwrap_or(true),
+        created_at: chrono::Utc::now().to_rfc3339(),
         rate_limit_requests,
         rate_limit_window_seconds,
-        token_limit_daily: 0,
-        token_limit_monthly: 0,
+        token_limit_daily,
+        token_limit_monthly,
         allowed_models,
-        blocked_models: String::new(),
-        allowed_ips: String::new(),
-        blocked_ips: String::new(),
-        expires_at: String::new(),
-        description: String::new(),
-        owner_ref: None,
-        max_concurrent_requests: 0,
-        allowed_providers: String::new(),
-        blocked_providers: String::new(),
-        force_provider: String::new(),
-        force_model: String::new(),
-        allowed_endpoints: String::new(),
-        blocked_endpoints: String::new(),
+        blocked_models,
+        allowed_ips,
+        blocked_ips,
+        expires_at,
+        description,
+        owner_ref,
+        max_concurrent_requests,
+        allowed_providers,
+        blocked_providers,
+        force_provider: payload.get("forceProvider").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        force_model: payload.get("forceModel").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        allowed_endpoints,
+        blocked_endpoints,
+        budget_usd,
+        budget_reset_hours,
+        budget_window_started_at,
+        billing_mode: "credits".to_string(),
+        byok_provider: None,
+        regenerate_version: 0,
+        metadata,
+        updated_at: None,
     };
 
     match state.db.save_api_key(&key) {
-        Ok(()) => (StatusCode::CREATED, Json(key)).into_response(),
+        Ok(()) => {
+            let serialized = serialize_api_key(&key, true);
+            (StatusCode::CREATED, Json(serialized)).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
         )
             .into_response(),
     }
+}
+
+pub async fn get_key_detail_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let key = match state.db.get_api_key_by_id(&id).or_else(|_| state.db.get_api_key_by_key(&id)) {
+        Ok(Some(k)) => k,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    };
+    let is_admin = crate::auth::verify_admin_api_token(&headers);
+    let mut serialized = serialize_api_key(&key, false);
+    if is_admin {
+        let budget = state.db.get_budget_state(&key);
+        if let Some(obj) = serialized.as_object_mut() {
+            obj.insert("budgetRemainingUsd".to_string(), budget.get("remaining").cloned().unwrap_or(json!(null)));
+            obj.insert("budgetResetAt".to_string(), budget.get("resetsAt").cloned().unwrap_or(json!(null)));
+            obj.insert("budgetSpendWindowUsd".to_string(), budget.get("used").cloned().unwrap_or(json!(null)));
+        }
+        Json(serialized).into_response()
+    } else {
+        Json(json!({ "key": serialized })).into_response()
+    }
+}
+
+pub async fn update_key_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let mut key = match state.db.get_api_key_by_id(&id).or_else(|_| state.db.get_api_key_by_key(&id)) {
+        Ok(Some(k)) => k,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    };
+    if let Some(n) = body.get("name").and_then(|v| v.as_str()) {
+        key.name = Some(n.trim().to_string());
+    }
+    if let Some(act) = body.get("isActive").and_then(|v| v.as_bool()) {
+        key.is_active = act;
+    }
+    if let Some(rl) = body.get("rateLimitRequests").and_then(|v| v.as_i64()) {
+        key.rate_limit_requests = rl;
+    }
+    if let Some(rw) = body.get("rateLimitWindowSeconds").and_then(|v| v.as_i64()) {
+        key.rate_limit_window_seconds = rw;
+    }
+    if let Some(tl) = body.get("tokenLimitDaily").and_then(|v| v.as_i64()) {
+        key.token_limit_daily = tl;
+    }
+    if let Some(tm) = body.get("tokenLimitMonthly").and_then(|v| v.as_i64()) {
+        key.token_limit_monthly = tm;
+    }
+    if let Some(mc) = body.get("maxConcurrentRequests").and_then(|v| v.as_i64()) {
+        key.max_concurrent_requests = mc;
+    }
+    if let Some(b) = body.get("budgetUsd").and_then(|v| v.as_f64()) {
+        key.budget_usd = Some(b);
+    }
+    if let Some(br) = body.get("budgetResetHours").and_then(|v| v.as_f64()) {
+        key.budget_reset_hours = Some(br);
+    }
+    if let Some(exp) = body.get("expiresAt").and_then(|v| v.as_str()) {
+        key.expires_at = exp.to_string();
+    }
+    if let Some(desc) = body.get("description").and_then(|v| v.as_str()) {
+        key.description = desc.to_string();
+    }
+    if let Ok(Some(am)) = normalize_list(body.get("allowedModels")) {
+        key.allowed_models = am;
+    }
+    if let Ok(Some(bm)) = normalize_list(body.get("blockedModels")) {
+        key.blocked_models = bm;
+    }
+    if let Ok(Some(aip)) = normalize_list(body.get("allowedIPs")) {
+        key.allowed_ips = aip;
+    }
+    if let Ok(Some(bip)) = normalize_list(body.get("blockedIPs")) {
+        key.blocked_ips = bip;
+    }
+    key.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+    if let Err(e) = state.db.save_api_key(&key) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+    }
+    let serialized = serialize_api_key(&key, false);
+    Json(json!({ "key": serialized })).into_response()
+}
+
+pub async fn regenerate_key_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    match state.db.regenerate_api_key(&id) {
+        Ok(Some(k)) => Json(serialize_api_key(&k, true)).into_response(),
+        _ => (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    }
+}
+
+pub async fn byok_key_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let mut key = match state.db.get_api_key_by_id(&id) {
+        Ok(Some(k)) => k,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    };
+    if body.get("credentialsCiphertext").is_none() || body.get("credentialsCiphertext").unwrap().is_null() {
+        key.billing_mode = "credits".to_string();
+        key.byok_provider = None;
+        let _ = state.db.save_api_key(&key);
+        return Json(json!({ "billingMode": "credits" })).into_response();
+    }
+    let Some(provider) = body.get("provider").and_then(|v| v.as_str()).map(|s| s.trim()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "provider is required"}))).into_response();
+    };
+    key.billing_mode = "byok".to_string();
+    key.byok_provider = Some(provider.to_string());
+    let _ = state.db.save_api_key(&key);
+    Json(json!({ "billingMode": "byok" })).into_response()
+}
+
+pub async fn byok_clear_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
+        return resp;
+    }
+    let mut key = match state.db.get_api_key_by_id(&id) {
+        Ok(Some(k)) => k,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    };
+    key.billing_mode = "credits".to_string();
+    key.byok_provider = None;
+    let _ = state.db.save_api_key(&key);
+    Json(json!({ "billingMode": "credits" })).into_response()
 }
 
 pub async fn delete_key_handler(
@@ -3843,7 +4154,7 @@ pub async fn delete_key_handler(
         return resp;
     }
     match state.db.delete_api_key(&id) {
-        Ok(true) => Json(json!({ "success": true })).into_response(),
+        Ok(true) => Json(json!({ "success": true, "message": "Key deleted successfully" })).into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "API key not found" })),
@@ -3855,6 +4166,609 @@ pub async fn delete_key_handler(
         )
             .into_response(),
     }
+}
+
+// ==========================================
+// Admin API Routes (Gated by ADMIN_API_TOKEN)
+// ==========================================
+
+pub async fn admin_gateway_get_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
+    let gw = settings.get("gatewayControl").cloned().unwrap_or_else(|| {
+        json!({
+            "disabled": false,
+            "reason": "",
+            "drain": false,
+            "blockedProviders": [],
+            "blockedModels": []
+        })
+    });
+    Json(json!({ "gatewayControl": gw })).into_response()
+}
+
+pub async fn admin_gateway_put_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let mut settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
+    let current_gw = settings.get("gatewayControl").cloned().unwrap_or_else(|| {
+        json!({
+            "disabled": false,
+            "reason": "",
+            "drain": false,
+            "blockedProviders": [],
+            "blockedModels": []
+        })
+    });
+
+    let disabled = body.get("disabled").and_then(|v| v.as_bool())
+        .unwrap_or_else(|| current_gw.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false));
+    let reason_val = body.get("reason").and_then(|v| v.as_str())
+        .unwrap_or_else(|| current_gw.get("reason").and_then(|v| v.as_str()).unwrap_or(""));
+    if reason_val.len() > 500 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "reason must be 500 characters or fewer"}))).into_response();
+    }
+    let drain = body.get("drain").and_then(|v| v.as_bool())
+        .unwrap_or_else(|| current_gw.get("drain").and_then(|v| v.as_bool()).unwrap_or(false));
+
+    let blocked_providers = match body.get("blockedProviders") {
+        Some(v) => {
+            let Some(arr) = v.as_array() else {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": "blockedProviders must be a string array"}))).into_response();
+            };
+            if arr.iter().any(|item| !item.is_string()) {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": "blockedProviders must be a string array"}))).into_response();
+            }
+            v.clone()
+        }
+        None => current_gw.get("blockedProviders").cloned().unwrap_or_else(|| json!([])),
+    };
+
+    let blocked_models = match body.get("blockedModels") {
+        Some(v) => {
+            let Some(arr) = v.as_array() else {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": "blockedModels must be a string array"}))).into_response();
+            };
+            if arr.iter().any(|item| !item.is_string()) {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": "blockedModels must be a string array"}))).into_response();
+            }
+            v.clone()
+        }
+        None => current_gw.get("blockedModels").cloned().unwrap_or_else(|| json!([])),
+    };
+
+    let new_gw = json!({
+        "disabled": disabled,
+        "reason": reason_val,
+        "drain": drain,
+        "blockedProviders": blocked_providers,
+        "blockedModels": blocked_models
+    });
+
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert("gatewayControl".to_string(), new_gw.clone());
+    }
+    let _ = state.db.save_settings(&settings);
+
+    let _ = state.db.append_audit_event(&json!({
+        "actor": "admin-token",
+        "action": "gateway_control.updated",
+        "resourceType": "gateway",
+        "resourceId": "global",
+        "requestId": headers.get("x-request-id").and_then(|v| v.to_str().ok()),
+        "sourceIp": get_client_ip(&headers),
+        "before": current_gw,
+        "after": new_gw,
+    }));
+
+    Json(json!({ "gatewayControl": new_gw })).into_response()
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct AdminAuditQuery {
+    #[serde(rename = "ownerRef")]
+    pub owner_ref: Option<String>,
+    pub action: Option<String>,
+    pub limit: Option<usize>,
+}
+
+pub async fn admin_audit_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<AdminAuditQuery>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let Some(ref owner) = query.owner_ref else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "ownerRef is required"}))).into_response();
+    };
+    let owner_trimmed = owner.trim();
+    if owner_trimmed.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "ownerRef is required"}))).into_response();
+    }
+    let limit = query.limit.unwrap_or(100);
+    match state.db.list_audit_events(Some(owner_trimmed), query.action.as_deref(), limit) {
+        Ok(events) => Json(json!({ "events": events })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct AdminKeysQuery {
+    #[serde(rename = "ownerRef")]
+    pub owner_ref: Option<String>,
+}
+
+pub async fn admin_keys_get_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<AdminKeysQuery>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let Some(ref owner) = query.owner_ref else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "ownerRef is required"}))).into_response();
+    };
+    let owner_trimmed = owner.trim();
+    if owner_trimmed.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "ownerRef is required"}))).into_response();
+    }
+    match state.db.list_api_keys_by_owner(owner_trimmed) {
+        Ok(keys) => {
+            let serialized: Vec<serde_json::Value> = keys.iter().map(|k| serialize_admin_key(k, false)).collect();
+            Json(json!({ "keys": serialized })).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+pub async fn admin_keys_post_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let Some(owner) = body.get("ownerRef").and_then(|v| v.as_str()).map(|s| s.trim()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "ownerRef is required"}))).into_response();
+    };
+    if owner.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "ownerRef is required"}))).into_response();
+    }
+    let Some(name) = body.get("name").and_then(|v| v.as_str()).map(|s| s.trim()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "name is required"}))).into_response();
+    };
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "name is required"}))).into_response();
+    }
+
+    if let Some(bm) = body.get("billingMode").and_then(|v| v.as_str()) {
+        if bm == "byok" {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "Configure BYOK credentials after creating the key"}))).into_response();
+        }
+        if bm != "credits" {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "billingMode must be credits or byok"}))).into_response();
+        }
+    }
+
+    // Parse lists
+    let allowed_models = normalize_list(body.get("allowedModels")).unwrap_or(None).unwrap_or_default();
+    let blocked_models = normalize_list(body.get("blockedModels")).unwrap_or(None).unwrap_or_default();
+    let allowed_ips = normalize_list(body.get("allowedIPs")).unwrap_or(None).unwrap_or_default();
+    let blocked_ips = normalize_list(body.get("blockedIPs")).unwrap_or(None).unwrap_or_default();
+    let allowed_providers = normalize_list(body.get("allowedProviders")).unwrap_or(None).unwrap_or_default();
+    let blocked_providers = normalize_list(body.get("blockedProviders")).unwrap_or(None).unwrap_or_default();
+    let allowed_endpoints = normalize_list(body.get("allowedEndpoints")).unwrap_or(None).unwrap_or_default();
+    let blocked_endpoints = normalize_list(body.get("blockedEndpoints")).unwrap_or(None).unwrap_or_default();
+
+    // Conflict checks
+    if !allowed_models.is_empty() && !blocked_models.is_empty() {
+        let am: Vec<&str> = allowed_models.split(',').collect();
+        let bm: Vec<&str> = blocked_models.split(',').collect();
+        if am.iter().any(|m| bm.contains(m)) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "allowedModels and blockedModels must not overlap"}))).into_response();
+        }
+    }
+    if !allowed_ips.is_empty() && !blocked_ips.is_empty() {
+        let aip: Vec<&str> = allowed_ips.split(',').collect();
+        let bip: Vec<&str> = blocked_ips.split(',').collect();
+        if aip.iter().any(|ip| bip.contains(ip)) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "allowedIPs and blockedIPs must not overlap"}))).into_response();
+        }
+    }
+    for ip in allowed_ips.split(',').filter(|s| !s.is_empty()) {
+        if !is_valid_ip_rule(ip) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "allowedIPs contains an invalid IP or CIDR"}))).into_response();
+        }
+    }
+    for ip in blocked_ips.split(',').filter(|s| !s.is_empty()) {
+        if !is_valid_ip_rule(ip) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "blockedIPs contains an invalid IP or CIDR"}))).into_response();
+        }
+    }
+
+    let force_provider = body.get("forceProvider").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let force_model = body.get("forceModel").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if !force_model.is_empty() && !blocked_models.is_empty() {
+        let bm: Vec<&str> = blocked_models.split(',').collect();
+        if bm.contains(&force_model.as_str()) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "forceModel must not be in blockedModels"}))).into_response();
+        }
+    }
+    if !force_provider.is_empty() && !blocked_providers.is_empty() {
+        let bp: Vec<&str> = blocked_providers.split(',').collect();
+        if bp.contains(&force_provider.as_str()) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "forceProvider must not be in blockedProviders"}))).into_response();
+        }
+    }
+
+    let machine_id = body.get("machineId").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let mut custom_key_val = None;
+    if let Some(custom_key) = body.get("key").and_then(|v| v.as_str()).map(|s| s.trim()) {
+        if !custom_key.is_empty() {
+            if custom_key.len() > 512 {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": "key must be 512 characters or fewer"}))).into_response();
+            }
+            if state.db.get_api_key_by_key(custom_key).ok().flatten().is_some() {
+                return (StatusCode::CONFLICT, Json(json!({"error": "API key already in use"}))).into_response();
+            }
+            custom_key_val = Some(custom_key.to_string());
+        }
+    }
+
+    let id = body.get("id").and_then(|v| v.as_str()).map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{:x}", chrono::Utc::now().timestamp_micros()));
+    let key_secret = custom_key_val.unwrap_or_else(|| crate::auth::generate_api_key(machine_id.as_deref()));
+
+    let is_active = body.get("isActive").and_then(|v| v.as_bool()).unwrap_or(true);
+    let rate_limit_requests = body.get("rateLimitRequests").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rate_limit_window_seconds = body.get("rateLimitWindowSeconds").and_then(|v| v.as_i64()).unwrap_or(60);
+    let token_limit_daily = body.get("tokenLimitDaily").and_then(|v| v.as_i64()).unwrap_or(0);
+    let token_limit_monthly = body.get("tokenLimitMonthly").and_then(|v| v.as_i64()).unwrap_or(0);
+    let max_concurrent_requests = body.get("maxConcurrentRequests").and_then(|v| v.as_i64()).unwrap_or(0);
+    let budget_usd = body.get("budgetUsd").and_then(|v| v.as_f64());
+    let budget_reset_hours = body.get("budgetResetHours").and_then(|v| v.as_f64());
+    let budget_window_started_at = body.get("budgetWindowStartedAt").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let description = body.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let expires_at = body.get("expiresAt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let metadata = body.get("metadata").map(|v| if v.is_string() { v.as_str().unwrap().to_string() } else { serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()) }).unwrap_or_else(|| "{}".to_string());
+
+    let api_key = crate::db::ApiKey {
+        id: id.clone(),
+        key: key_secret,
+        name: Some(name.to_string()),
+        machine_id,
+        is_active,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        rate_limit_requests,
+        rate_limit_window_seconds,
+        token_limit_daily,
+        token_limit_monthly,
+        allowed_models,
+        blocked_models,
+        allowed_ips,
+        blocked_ips,
+        expires_at,
+        description,
+        owner_ref: Some(owner.to_string()),
+        max_concurrent_requests,
+        allowed_providers,
+        blocked_providers,
+        force_provider,
+        force_model,
+        allowed_endpoints,
+        blocked_endpoints,
+        budget_usd,
+        budget_reset_hours,
+        budget_window_started_at,
+        billing_mode: "credits".to_string(),
+        byok_provider: None,
+        regenerate_version: 0,
+        metadata,
+        updated_at: None,
+    };
+
+    if let Err(e) = state.db.save_api_key(&api_key) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+    }
+
+    let serialized = serialize_admin_key(&api_key, true);
+    let _ = state.db.append_audit_event(&json!({
+        "actor": "admin-token",
+        "action": "api_key.created",
+        "resourceType": "api_key",
+        "resourceId": api_key.id,
+        "ownerRef": owner,
+        "requestId": headers.get("x-request-id").and_then(|v| v.to_str().ok()),
+        "sourceIp": get_client_ip(&headers),
+        "after": serialize_admin_key(&api_key, false),
+    }));
+
+    (StatusCode::CREATED, Json(serialized)).into_response()
+}
+
+pub async fn admin_key_detail_get_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<AdminKeysQuery>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let Some(ref owner) = query.owner_ref else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "ownerRef is required"}))).into_response();
+    };
+    let key = match state.db.get_api_key_by_id(&id) {
+        Ok(Some(k)) if k.owner_ref.as_deref() == Some(owner.trim()) => k,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    };
+    Json(serialize_admin_key(&key, false)).into_response()
+}
+
+pub async fn admin_key_detail_put_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<AdminKeysQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let Some(ref owner) = query.owner_ref else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "ownerRef is required"}))).into_response();
+    };
+    if let Some(body_owner) = body.get("ownerRef").and_then(|v| v.as_str()) {
+        if body_owner.trim() != owner.trim() {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response();
+        }
+    }
+    let mut key = match state.db.get_api_key_by_id(&id) {
+        Ok(Some(k)) if k.owner_ref.as_deref() == Some(owner.trim()) => k,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    };
+    let before_serialized = serialize_admin_key(&key, false);
+
+    if let Some(n) = body.get("name").and_then(|v| v.as_str()) {
+        key.name = Some(n.trim().to_string());
+    }
+    if let Some(act) = body.get("isActive").and_then(|v| v.as_bool()) {
+        key.is_active = act;
+    }
+    if let Some(rl) = body.get("rateLimitRequests").and_then(|v| v.as_i64()) {
+        key.rate_limit_requests = rl;
+    }
+    if let Some(rw) = body.get("rateLimitWindowSeconds").and_then(|v| v.as_i64()) {
+        key.rate_limit_window_seconds = rw;
+    }
+    if let Some(tl) = body.get("tokenLimitDaily").and_then(|v| v.as_i64()) {
+        key.token_limit_daily = tl;
+    }
+    if let Some(tm) = body.get("tokenLimitMonthly").and_then(|v| v.as_i64()) {
+        key.token_limit_monthly = tm;
+    }
+    if let Some(mc) = body.get("maxConcurrentRequests").and_then(|v| v.as_i64()) {
+        key.max_concurrent_requests = mc;
+    }
+    if let Some(b) = body.get("budgetUsd").and_then(|v| v.as_f64()) {
+        key.budget_usd = Some(b);
+    }
+    if let Some(br) = body.get("budgetResetHours").and_then(|v| v.as_f64()) {
+        key.budget_reset_hours = Some(br);
+    }
+    if let Some(exp) = body.get("expiresAt").and_then(|v| v.as_str()) {
+        key.expires_at = exp.to_string();
+    }
+    if let Some(desc) = body.get("description").and_then(|v| v.as_str()) {
+        key.description = desc.to_string();
+    }
+    if let Ok(Some(am)) = normalize_list(body.get("allowedModels")) {
+        key.allowed_models = am;
+    }
+    if let Ok(Some(bm)) = normalize_list(body.get("blockedModels")) {
+        key.blocked_models = bm;
+    }
+    if let Ok(Some(aip)) = normalize_list(body.get("allowedIPs")) {
+        key.allowed_ips = aip;
+    }
+    if let Ok(Some(bip)) = normalize_list(body.get("blockedIPs")) {
+        key.blocked_ips = bip;
+    }
+    if let Ok(Some(ap)) = normalize_list(body.get("allowedProviders")) {
+        key.allowed_providers = ap;
+    }
+    if let Ok(Some(bp)) = normalize_list(body.get("blockedProviders")) {
+        key.blocked_providers = bp;
+    }
+    if let Ok(Some(ae)) = normalize_list(body.get("allowedEndpoints")) {
+        key.allowed_endpoints = ae;
+    }
+    if let Ok(Some(be)) = normalize_list(body.get("blockedEndpoints")) {
+        key.blocked_endpoints = be;
+    }
+    if let Some(fp) = body.get("forceProvider").and_then(|v| v.as_str()) {
+        key.force_provider = fp.trim().to_string();
+    }
+    if let Some(fm) = body.get("forceModel").and_then(|v| v.as_str()) {
+        key.force_model = fm.trim().to_string();
+    }
+    key.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+    if let Err(e) = state.db.save_api_key(&key) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+    }
+    let after_serialized = serialize_admin_key(&key, false);
+
+    let _ = state.db.append_audit_event(&json!({
+        "actor": "admin-token",
+        "action": "api_key.updated",
+        "resourceType": "api_key",
+        "resourceId": id,
+        "ownerRef": owner.trim(),
+        "requestId": headers.get("x-request-id").and_then(|v| v.to_str().ok()),
+        "sourceIp": get_client_ip(&headers),
+        "before": before_serialized,
+        "after": after_serialized.clone(),
+    }));
+
+    Json(after_serialized).into_response()
+}
+
+pub async fn admin_key_detail_delete_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<AdminKeysQuery>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let Some(ref owner) = query.owner_ref else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "ownerRef is required"}))).into_response();
+    };
+    let existing = match state.db.get_api_key_by_id(&id) {
+        Ok(Some(k)) if k.owner_ref.as_deref() == Some(owner.trim()) => k,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    };
+
+    match state.db.delete_api_key(&id) {
+        Ok(true) => {
+            let _ = state.db.append_audit_event(&json!({
+                "actor": "admin-token",
+                "action": "api_key.deleted",
+                "resourceType": "api_key",
+                "resourceId": id,
+                "ownerRef": owner.trim(),
+                "requestId": headers.get("x-request-id").and_then(|v| v.to_str().ok()),
+                "sourceIp": get_client_ip(&headers),
+                "before": serialize_admin_key(&existing, false),
+            }));
+            Json(json!({ "message": "Key deleted successfully" })).into_response()
+        }
+        _ => (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    }
+}
+
+pub async fn admin_key_rotate_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let Some(owner) = body.get("ownerRef").and_then(|v| v.as_str()).map(|s| s.trim()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "ownerRef is required"}))).into_response();
+    };
+    let _existing = match state.db.get_api_key_by_id(&id) {
+        Ok(Some(k)) if k.owner_ref.as_deref() == Some(owner) => k,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    };
+    match state.db.regenerate_api_key(&id) {
+        Ok(Some(new_key)) => {
+            let _ = state.db.append_audit_event(&json!({
+                "actor": "admin-token",
+                "action": "api_key.rotated",
+                "resourceType": "api_key",
+                "resourceId": id,
+                "ownerRef": owner,
+                "requestId": headers.get("x-request-id").and_then(|v| v.to_str().ok()),
+                "sourceIp": get_client_ip(&headers),
+                "metadata": { "regenerateVersion": new_key.regenerate_version },
+            }));
+            Json(serialize_admin_key(&new_key, true)).into_response()
+        }
+        _ => (StatusCode::NOT_FOUND, Json(json!({"error": "Key not found"}))).into_response(),
+    }
+}
+
+pub async fn key_actions_debit_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let Some(key_id) = body.get("keyId").and_then(|v| v.as_str()).map(|s| s.trim()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "keyId and requestId are required"}))).into_response();
+    };
+    let Some(request_id) = body.get("requestId").and_then(|v| v.as_str()).map(|s| s.trim()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "keyId and requestId are required"}))).into_response();
+    };
+    if key_id.is_empty() || request_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "keyId and requestId are required"}))).into_response();
+    }
+
+    let reserve_usd = body.get("reserveUsd").and_then(|v| v.as_f64());
+    let commit_usd = body.get("commitUsd").and_then(|v| v.as_f64());
+
+    match state.db.debit_budget(key_id, request_id, reserve_usd, commit_usd) {
+        Ok(budget) => Json(json!({ "budget": budget })).into_response(),
+        Err((code, msg, opt_budget)) => {
+            let mut err_obj = json!({ "error": msg });
+            if let Some(b) = opt_budget {
+                if let Some(obj) = err_obj.as_object_mut() {
+                    obj.insert("budget".to_string(), b);
+                }
+            }
+            (code, Json(err_obj)).into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct ObservabilityQuery {
+    pub tenant: Option<String>,
+    pub format: Option<String>,
+}
+
+pub async fn observability_alerts_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<ObservabilityQuery>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let alerts = state.db.get_alerts(query.tenant.as_deref());
+    Json(json!({ "alerts": alerts })).into_response()
+}
+
+pub async fn observability_metrics_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<ObservabilityQuery>,
+) -> Response {
+    if !crate::auth::verify_admin_api_token(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let snapshot = state.db.get_metrics_snapshot(query.tenant.as_deref());
+    if query.format.as_deref() == Some("prometheus") {
+        let text = state.db.get_prometheus_metrics(&snapshot);
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+            text,
+        )
+            .into_response();
+    }
+    Json(snapshot).into_response()
 }
 
 pub async fn get_settings_handler(
@@ -5702,7 +6616,67 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/keys/{id}",
-            axum::routing::delete(delete_key_handler).options(options_handler),
+            axum::routing::get(get_key_detail_handler)
+                .put(update_key_handler)
+                .delete(delete_key_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/keys/{id}/regenerate",
+            axum::routing::post(regenerate_key_handler)
+                .put(regenerate_key_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/keys/{id}/byok",
+            axum::routing::put(byok_key_handler)
+                .delete(byok_clear_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/admin/gateway",
+            axum::routing::get(admin_gateway_get_handler)
+                .put(admin_gateway_put_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/admin/audit",
+            axum::routing::get(admin_audit_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/admin/keys",
+            axum::routing::get(admin_keys_get_handler)
+                .post(admin_keys_post_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/admin/keys/{id}",
+            axum::routing::get(admin_key_detail_get_handler)
+                .put(admin_key_detail_put_handler)
+                .delete(admin_key_detail_delete_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/admin/keys/{id}/rotate",
+            axum::routing::post(admin_key_rotate_handler)
+                .put(admin_key_rotate_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/key-actions/debit",
+            axum::routing::post(key_actions_debit_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/observability/alerts",
+            axum::routing::get(observability_alerts_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/observability/metrics",
+            axum::routing::get(observability_metrics_handler)
+                .options(options_handler),
         )
         .route(
             "/api/tunnel/status",
@@ -6004,6 +6978,7 @@ mod tests {
             force_model: String::new(),
             allowed_endpoints: String::new(),
             blocked_endpoints: String::new(),
+            ..Default::default()
         };
         db.save_api_key(&test_key).unwrap();
 
@@ -6069,6 +7044,7 @@ mod tests {
             force_model: String::new(),
             allowed_endpoints: String::new(),
             blocked_endpoints: String::new(),
+            ..Default::default()
         };
         db.save_api_key(&test_key).unwrap();
 
@@ -6397,6 +7373,7 @@ mod tests {
             force_model: String::new(),
             allowed_endpoints: String::new(),
             blocked_endpoints: String::new(),
+            ..Default::default()
         };
         db.save_api_key(&test_key).unwrap();
 
@@ -6532,6 +7509,7 @@ mod tests {
             force_model: String::new(),
             allowed_endpoints: String::new(),
             blocked_endpoints: String::new(),
+            ..Default::default()
         };
         db.save_api_key(&test_key).unwrap();
 
@@ -7033,6 +8011,7 @@ mod tests {
             force_model: String::new(),
             allowed_endpoints: String::new(),
             blocked_endpoints: String::new(),
+            ..Default::default()
         };
         db.save_api_key(&test_key).unwrap();
 
@@ -7172,6 +8151,7 @@ mod tests {
             force_model: String::new(),
             allowed_endpoints: String::new(),
             blocked_endpoints: String::new(),
+            ..Default::default()
         };
         db.save_api_key(&test_key).unwrap();
 
@@ -7286,6 +8266,7 @@ mod tests {
             force_model: String::new(),
             allowed_endpoints: String::new(),
             blocked_endpoints: String::new(),
+            ..Default::default()
         };
 
         // 1. Test normal stream completion through wrap_byte_stream_with_usage
@@ -7343,6 +8324,216 @@ mod tests {
         let details = db.get_request_details(1, 10, None, None, None).unwrap();
         let items = details["details"].as_array().unwrap();
         assert!(items.iter().any(|item| item["status"].as_str() == Some("interrupted")));
+    }
+
+    #[tokio::test]
+    async fn test_admin_api_endpoints_full_lifecycle() {
+        let db = Database::open_in_memory().unwrap();
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test-admin.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            ..Default::default()
+        });
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState {
+            config,
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+        };
+        let app = create_router(state);
+
+        unsafe { std::env::set_var("ADMIN_API_TOKEN", "test-admin-secret-xyz") };
+
+        // 1. GET /api/admin/gateway without token -> 401
+        let req = Request::builder().uri("/api/admin/gateway").body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 2. GET /api/admin/gateway with Bearer token -> 200
+        let req = Request::builder()
+            .uri("/api/admin/gateway")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["gatewayControl"]["disabled"], false);
+
+        // 3. PUT /api/admin/gateway with Bearer token -> 200
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/gateway")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"disabled":true,"reason":"Testing gateway maintenance","drain":true}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["gatewayControl"]["disabled"], true);
+        assert_eq!(body["gatewayControl"]["reason"], "Testing gateway maintenance");
+
+        // 4. POST /api/admin/keys without ownerRef -> 400
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/keys")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"name":"Tenant Alpha Key"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // 5. POST /api/admin/keys with ownerRef -> 201 (secret included)
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/keys")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"name":"Tenant Alpha Key","ownerRef":"tenant-alpha","budgetUsd":50.0}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created_key: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let key_id = created_key["id"].as_str().unwrap().to_string();
+        let key_secret = created_key["key"].as_str().unwrap().to_string();
+        assert!(!key_secret.is_empty());
+        assert_eq!(created_key["ownerRef"], "tenant-alpha");
+
+        // 6. GET /api/admin/keys?ownerRef=tenant-alpha -> 200 (secret omitted)
+        let req = Request::builder()
+            .uri("/api/admin/keys?ownerRef=tenant-alpha")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let list_body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let keys_arr = list_body["keys"].as_array().unwrap();
+        assert_eq!(keys_arr.len(), 1);
+        assert!(keys_arr[0].get("key").is_none());
+
+        // 7. GET /api/admin/keys/{id}?ownerRef=tenant-alpha -> 200
+        let req = Request::builder()
+            .uri(format!("/api/admin/keys/{}?ownerRef=tenant-alpha", key_id))
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 8. PUT /api/admin/keys/{id}?ownerRef=tenant-alpha -> 200
+        let req = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/admin/keys/{}?ownerRef=tenant-alpha", key_id))
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"description":"Updated description for tenant key"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 9. POST /api/admin/keys/{id}/rotate -> 200 (returns new secret)
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/admin/keys/{}/rotate", key_id))
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"ownerRef":"tenant-alpha"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rotated: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let new_key_secret = rotated["key"].as_str().unwrap().to_string();
+        assert_ne!(new_key_secret, key_secret);
+
+        // 10. POST /api/key-actions/debit -> reserve budget
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/key-actions/debit")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(r#"{{"keyId":"{}","requestId":"req-abc-1","reserveUsd":2.5}}"#, key_id)))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let debit_body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(debit_body["budget"]["reserved"], true);
+
+        // 11. POST /api/key-actions/debit -> commit budget
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/key-actions/debit")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(r#"{{"keyId":"{}","requestId":"req-abc-1","commitUsd":2.0}}"#, key_id)))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let commit_body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(commit_body["budget"]["committed"], true);
+
+        // 12. GET /api/admin/audit?ownerRef=tenant-alpha -> 200
+        let req = Request::builder()
+            .uri("/api/admin/audit?ownerRef=tenant-alpha")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let audit_body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let events = audit_body["events"].as_array().unwrap();
+        assert!(!events.is_empty());
+
+        // 13. GET /api/observability/alerts -> 200
+        let req = Request::builder()
+            .uri("/api/observability/alerts")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 14. GET /api/observability/metrics (JSON) -> 200
+        let req = Request::builder()
+            .uri("/api/observability/metrics")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 15. GET /api/observability/metrics?format=prometheus -> 200
+        let req = Request::builder()
+            .uri("/api/observability/metrics?format=prometheus")
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), "text/plain; version=0.0.4; charset=utf-8");
+
+        // 16. DELETE /api/admin/keys/{id}?ownerRef=tenant-alpha -> 200
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/admin/keys/{}?ownerRef=tenant-alpha", key_id))
+            .header(header::AUTHORIZATION, "Bearer test-admin-secret-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
 

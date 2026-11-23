@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
 
@@ -69,6 +70,14 @@ pub struct ApiKey {
     pub force_model: String,
     pub allowed_endpoints: String,
     pub blocked_endpoints: String,
+    pub budget_usd: Option<f64>,
+    pub budget_reset_hours: Option<f64>,
+    pub budget_window_started_at: Option<String>,
+    pub billing_mode: String,
+    pub byok_provider: Option<String>,
+    pub regenerate_version: i64,
+    pub metadata: String,
+    pub updated_at: Option<String>,
 }
 
 impl Default for ApiKey {
@@ -98,6 +107,14 @@ impl Default for ApiKey {
             force_model: String::new(),
             allowed_endpoints: String::new(),
             blocked_endpoints: String::new(),
+            budget_usd: None,
+            budget_reset_hours: None,
+            budget_window_started_at: None,
+            billing_mode: "credits".to_string(),
+            byok_provider: None,
+            regenerate_version: 0,
+            metadata: "{}".to_string(),
+            updated_at: None,
         }
     }
 }
@@ -300,12 +317,81 @@ impl std::fmt::Display for KeyValidationError {
 
 impl std::error::Error for KeyValidationError {}
 
+pub struct BudgetReservation {
+    pub api_key: String,
+    pub amount: f64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderOutcome {
+    pub tenant: String,
+    pub provider: String,
+    pub connection_id: String,
+    pub model: String,
+    pub successes: u64,
+    pub failures: u64,
+    pub consecutive_failures: u64,
+    pub last_status: u16,
+    pub last_latency_ms: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricAlert {
+    pub fingerprint: String,
+    pub severity: String,
+    #[serde(rename = "type")]
+    pub alert_type: String,
+    pub tenant: String,
+    pub provider: String,
+    pub model: String,
+    pub connection_id: String,
+    pub consecutive_failures: u64,
+    pub observed_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricCounter {
+    pub name: String,
+    pub labels: HashMap<String, String>,
+    pub value: u64,
+}
+
+pub struct GatewayMetrics {
+    pub started_at: u64,
+    pub counters: Arc<Mutex<HashMap<String, MetricCounter>>>,
+    pub provider_outcomes: Arc<Mutex<HashMap<String, ProviderOutcome>>>,
+    pub alerts: Arc<Mutex<Vec<MetricAlert>>>,
+    pub latency_count: Arc<Mutex<u64>>,
+    pub latency_sum_ms: Arc<Mutex<f64>>,
+    pub latency_max_ms: Arc<Mutex<f64>>,
+}
+
+impl GatewayMetrics {
+    pub fn new() -> Self {
+        Self {
+            started_at: chrono::Utc::now().timestamp_millis() as u64,
+            counters: Arc::new(Mutex::new(HashMap::new())),
+            provider_outcomes: Arc::new(Mutex::new(HashMap::new())),
+            alerts: Arc::new(Mutex::new(Vec::new())),
+            latency_count: Arc::new(Mutex::new(0)),
+            latency_sum_ms: Arc::new(Mutex::new(0.0)),
+            latency_max_ms: Arc::new(Mutex::new(0.0)),
+        }
+    }
+}
+
 /// Shared SQLite database handle and background write-behind coordinator.
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
     usage_tx: mpsc::Sender<UsageRecord>,
     request_details_tx: mpsc::Sender<RequestDetail>,
     rate_limiter: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    pub budget_reservations: Arc<Mutex<HashMap<String, BudgetReservation>>>,
+    pub metrics: Arc<GatewayMetrics>,
 }
 
 impl Database {
@@ -483,17 +569,50 @@ impl Database {
         let _ = conn.execute("ALTER TABLE combos ADD COLUMN matchRules TEXT DEFAULT '[]'", []);
         let _ = conn.execute("ALTER TABLE combos ADD COLUMN customPrompt TEXT DEFAULT ''", []);
         let _ = conn.execute("ALTER TABLE usageHistory ADD COLUMN cachedTokens INTEGER DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE apiKeys ADD COLUMN budgetUsd REAL", []);
+        let _ = conn.execute("ALTER TABLE apiKeys ADD COLUMN budgetResetHours REAL", []);
+        let _ = conn.execute("ALTER TABLE apiKeys ADD COLUMN budgetWindowStartedAt TEXT", []);
+        let _ = conn.execute("ALTER TABLE apiKeys ADD COLUMN billingMode TEXT DEFAULT 'credits'", []);
+        let _ = conn.execute("ALTER TABLE apiKeys ADD COLUMN byokProvider TEXT", []);
+        let _ = conn.execute("ALTER TABLE apiKeys ADD COLUMN regenerateVersion INTEGER DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE apiKeys ADD COLUMN metadata TEXT DEFAULT '{}'", []);
+        let _ = conn.execute("ALTER TABLE apiKeys ADD COLUMN updatedAt TEXT", []);
+
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS auditLog (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                resourceType TEXT NOT NULL,
+                resourceId TEXT,
+                ownerRef TEXT,
+                requestId TEXT,
+                sourceIp TEXT,
+                outcome TEXT NOT NULL,
+                before TEXT,
+                after TEXT,
+                metadata TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_owner_time ON auditLog(ownerRef, timestamp DESC);
+            "#
+        )?;
 
         let (usage_tx, usage_rx) = mpsc::channel(10_000);
         let (request_details_tx, request_details_rx) = mpsc::channel(10_000);
         let conn_arc = Arc::new(Mutex::new(conn));
         let rate_limiter = Arc::new(Mutex::new(HashMap::new()));
+        let budget_reservations = Arc::new(Mutex::new(HashMap::new()));
+        let metrics = Arc::new(GatewayMetrics::new());
 
         let db = Arc::new(Self {
             conn: Arc::clone(&conn_arc),
             usage_tx,
             request_details_tx,
             rate_limiter,
+            budget_reservations,
+            metrics,
         });
 
         // Spawn background workers for batching writes
@@ -717,6 +836,43 @@ impl Database {
     // API Keys Operations
     // ==========================================
 
+    fn row_to_api_key(row: &rusqlite::Row) -> rusqlite::Result<ApiKey> {
+        Ok(ApiKey {
+            id: row.get(0)?,
+            key: row.get(1)?,
+            name: row.get(2)?,
+            machine_id: row.get(3)?,
+            is_active: row.get::<_, i64>(4)? == 1,
+            created_at: row.get(5)?,
+            rate_limit_requests: row.get(6)?,
+            rate_limit_window_seconds: row.get(7)?,
+            token_limit_daily: row.get(8)?,
+            token_limit_monthly: row.get(9)?,
+            allowed_models: row.get(10)?,
+            blocked_models: row.get(11)?,
+            allowed_ips: row.get(12)?,
+            blocked_ips: row.get(13)?,
+            expires_at: row.get(14)?,
+            description: row.get(15)?,
+            owner_ref: row.get(16)?,
+            max_concurrent_requests: row.get(17)?,
+            allowed_providers: row.get(18)?,
+            blocked_providers: row.get(19)?,
+            force_provider: row.get(20)?,
+            force_model: row.get(21)?,
+            allowed_endpoints: row.get(22)?,
+            blocked_endpoints: row.get(23)?,
+            budget_usd: row.get(24)?,
+            budget_reset_hours: row.get(25)?,
+            budget_window_started_at: row.get(26)?,
+            billing_mode: row.get::<_, Option<String>>(27)?.unwrap_or_else(|| "credits".to_string()),
+            byok_provider: row.get(28)?,
+            regenerate_version: row.get::<_, Option<i64>>(29)?.unwrap_or(0),
+            metadata: row.get::<_, Option<String>>(30)?.unwrap_or_else(|| "{}".to_string()),
+            updated_at: row.get(31)?,
+        })
+    }
+
     /// Look up an API key by exact key string.
     pub fn get_api_key_by_key(&self, key: &str) -> anyhow::Result<Option<ApiKey>> {
         let guard = self.conn.lock().unwrap();
@@ -726,42 +882,34 @@ impl Database {
                    rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly,
                    allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description,
                    ownerRef, maxConcurrentRequests, allowedProviders, blockedProviders,
-                   forceProvider, forceModel, allowedEndpoints, blockedEndpoints
+                   forceProvider, forceModel, allowedEndpoints, blockedEndpoints,
+                   budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode,
+                   byokProvider, regenerateVersion, metadata, updatedAt
             FROM apiKeys WHERE key = ?
             "#,
         )?;
 
-        let result = stmt
-            .query_row(params![key], |row| {
-                Ok(ApiKey {
-                    id: row.get(0)?,
-                    key: row.get(1)?,
-                    name: row.get(2)?,
-                    machine_id: row.get(3)?,
-                    is_active: row.get::<_, i64>(4)? == 1,
-                    created_at: row.get(5)?,
-                    rate_limit_requests: row.get(6)?,
-                    rate_limit_window_seconds: row.get(7)?,
-                    token_limit_daily: row.get(8)?,
-                    token_limit_monthly: row.get(9)?,
-                    allowed_models: row.get(10)?,
-                    blocked_models: row.get(11)?,
-                    allowed_ips: row.get(12)?,
-                    blocked_ips: row.get(13)?,
-                    expires_at: row.get(14)?,
-                    description: row.get(15)?,
-                    owner_ref: row.get(16)?,
-                    max_concurrent_requests: row.get(17)?,
-                    allowed_providers: row.get(18)?,
-                    blocked_providers: row.get(19)?,
-                    force_provider: row.get(20)?,
-                    force_model: row.get(21)?,
-                    allowed_endpoints: row.get(22)?,
-                    blocked_endpoints: row.get(23)?,
-                })
-            })
-            .optional()?;
+        let result = stmt.query_row(params![key], Self::row_to_api_key).optional()?;
+        Ok(result)
+    }
 
+    /// Look up an API key by ID.
+    pub fn get_api_key_by_id(&self, id: &str) -> anyhow::Result<Option<ApiKey>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare_cached(
+            r#"
+            SELECT id, key, name, machineId, isActive, createdAt,
+                   rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly,
+                   allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description,
+                   ownerRef, maxConcurrentRequests, allowedProviders, blockedProviders,
+                   forceProvider, forceModel, allowedEndpoints, blockedEndpoints,
+                   budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode,
+                   byokProvider, regenerateVersion, metadata, updatedAt
+            FROM apiKeys WHERE id = ?
+            "#,
+        )?;
+
+        let result = stmt.query_row(params![id], Self::row_to_api_key).optional()?;
         Ok(result)
     }
 
@@ -775,14 +923,26 @@ impl Database {
                 rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly,
                 allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description,
                 ownerRef, maxConcurrentRequests, allowedProviders, blockedProviders,
-                forceProvider, forceModel, allowedEndpoints, blockedEndpoints
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                forceProvider, forceModel, allowedEndpoints, blockedEndpoints,
+                budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode,
+                byokProvider, regenerateVersion, metadata, updatedAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 key=excluded.key, name=excluded.name, machineId=excluded.machineId,
                 isActive=excluded.isActive, rateLimitRequests=excluded.rateLimitRequests,
                 rateLimitWindowSeconds=excluded.rateLimitWindowSeconds,
+                tokenLimitDaily=excluded.tokenLimitDaily, tokenLimitMonthly=excluded.tokenLimitMonthly,
                 allowedModels=excluded.allowedModels, blockedModels=excluded.blockedModels,
-                expiresAt=excluded.expiresAt
+                allowedIPs=excluded.allowedIPs, blockedIPs=excluded.blockedIPs,
+                expiresAt=excluded.expiresAt, description=excluded.description,
+                ownerRef=excluded.ownerRef, maxConcurrentRequests=excluded.maxConcurrentRequests,
+                allowedProviders=excluded.allowedProviders, blockedProviders=excluded.blockedProviders,
+                forceProvider=excluded.forceProvider, forceModel=excluded.forceModel,
+                allowedEndpoints=excluded.allowedEndpoints, blockedEndpoints=excluded.blockedEndpoints,
+                budgetUsd=excluded.budgetUsd, budgetResetHours=excluded.budgetResetHours,
+                budgetWindowStartedAt=excluded.budgetWindowStartedAt, billingMode=excluded.billingMode,
+                byokProvider=excluded.byokProvider, regenerateVersion=excluded.regenerateVersion,
+                metadata=excluded.metadata, updatedAt=excluded.updatedAt
             "#,
             params![
                 key.id,
@@ -809,6 +969,14 @@ impl Database {
                 key.force_model,
                 key.allowed_endpoints,
                 key.blocked_endpoints,
+                key.budget_usd,
+                key.budget_reset_hours,
+                key.budget_window_started_at,
+                key.billing_mode,
+                key.byok_provider,
+                key.regenerate_version,
+                key.metadata,
+                key.updated_at,
             ],
         )?;
         Ok(())
@@ -823,45 +991,57 @@ impl Database {
                    rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly,
                    allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description,
                    ownerRef, maxConcurrentRequests, allowedProviders, blockedProviders,
-                   forceProvider, forceModel, allowedEndpoints, blockedEndpoints
+                   forceProvider, forceModel, allowedEndpoints, blockedEndpoints,
+                   budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode,
+                   byokProvider, regenerateVersion, metadata, updatedAt
             FROM apiKeys ORDER BY createdAt ASC
             "#,
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok(ApiKey {
-                id: row.get(0)?,
-                key: row.get(1)?,
-                name: row.get(2)?,
-                machine_id: row.get(3)?,
-                is_active: row.get::<_, i64>(4)? == 1,
-                created_at: row.get(5)?,
-                rate_limit_requests: row.get(6)?,
-                rate_limit_window_seconds: row.get(7)?,
-                token_limit_daily: row.get(8)?,
-                token_limit_monthly: row.get(9)?,
-                allowed_models: row.get(10)?,
-                blocked_models: row.get(11)?,
-                allowed_ips: row.get(12)?,
-                blocked_ips: row.get(13)?,
-                expires_at: row.get(14)?,
-                description: row.get(15)?,
-                owner_ref: row.get(16)?,
-                max_concurrent_requests: row.get(17)?,
-                allowed_providers: row.get(18)?,
-                blocked_providers: row.get(19)?,
-                force_provider: row.get(20)?,
-                force_model: row.get(21)?,
-                allowed_endpoints: row.get(22)?,
-                blocked_endpoints: row.get(23)?,
-            })
-        })?;
-
+        let rows = stmt.query_map([], Self::row_to_api_key)?;
         let mut list = Vec::new();
         for r in rows {
             list.push(r?);
         }
         Ok(list)
+    }
+
+    /// List API keys belonging to a specific ownerRef.
+    pub fn list_api_keys_by_owner(&self, owner_ref: &str) -> anyhow::Result<Vec<ApiKey>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare(
+            r#"
+            SELECT id, key, name, machineId, isActive, createdAt,
+                   rateLimitRequests, rateLimitWindowSeconds, tokenLimitDaily, tokenLimitMonthly,
+                   allowedModels, blockedModels, allowedIPs, blockedIPs, expiresAt, description,
+                   ownerRef, maxConcurrentRequests, allowedProviders, blockedProviders,
+                   forceProvider, forceModel, allowedEndpoints, blockedEndpoints,
+                   budgetUsd, budgetResetHours, budgetWindowStartedAt, billingMode,
+                   byokProvider, regenerateVersion, metadata, updatedAt
+            FROM apiKeys WHERE ownerRef = ? ORDER BY createdAt ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map(params![owner_ref], Self::row_to_api_key)?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    /// Regenerate secret for an API key.
+    pub fn regenerate_api_key(&self, id: &str) -> anyhow::Result<Option<ApiKey>> {
+        let existing = self.get_api_key_by_id(id)?;
+        let Some(mut key) = existing else {
+            return Ok(None);
+        };
+        let new_key = crate::auth::generate_api_key(key.machine_id.as_deref());
+        key.key = new_key;
+        key.regenerate_version += 1;
+        key.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        self.save_api_key(&key)?;
+        Ok(Some(key))
     }
 
     /// Delete an API key by ID or Key string.
@@ -872,6 +1052,524 @@ impl Database {
             params![id],
         )?;
         Ok(affected > 0)
+    }
+
+    // ==========================================
+    // Audit Log Operations
+    // ==========================================
+
+    pub fn append_audit_event(&self, event: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let guard = self.conn.lock().unwrap();
+        let id = event
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                format!("{:x}", chrono::Utc::now().timestamp_micros())
+            });
+        let timestamp = event
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        let actor = event.get("actor").and_then(|v| v.as_str()).unwrap_or("admin-token");
+        let action = event.get("action").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let resource_type = event.get("resourceType").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let resource_id = event.get("resourceId").and_then(|v| v.as_str());
+        let owner_ref = event.get("ownerRef").and_then(|v| v.as_str());
+        let request_id = event.get("requestId").and_then(|v| v.as_str());
+        let source_ip = event.get("sourceIp").and_then(|v| v.as_str());
+        let outcome = event.get("outcome").and_then(|v| v.as_str()).unwrap_or("success");
+        let before = event.get("before").map(|v| v.to_string());
+        let after = event.get("after").map(|v| v.to_string());
+        let metadata = event
+            .get("metadata")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "{}".to_string());
+
+        guard.execute(
+            r#"
+            INSERT INTO auditLog(id, timestamp, actor, action, resourceType, resourceId, ownerRef, requestId, sourceIp, outcome, before, after, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+            params![
+                id, timestamp, actor, action, resource_type, resource_id, owner_ref, request_id, source_ip, outcome, before, after, metadata
+            ],
+        )?;
+
+        let mut row = event.clone();
+        if let Some(obj) = row.as_object_mut() {
+            obj.insert("id".to_string(), json!(id));
+            obj.insert("timestamp".to_string(), json!(timestamp));
+        }
+        Ok(row)
+    }
+
+    pub fn list_audit_events(
+        &self,
+        owner_ref: Option<&str>,
+        action: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let guard = self.conn.lock().unwrap();
+        let mut sql = "SELECT id, timestamp, actor, action, resourceType, resourceId, ownerRef, requestId, sourceIp, outcome, before, after, metadata FROM auditLog".to_string();
+        let mut conditions = Vec::new();
+        if owner_ref.is_some() {
+            conditions.push("ownerRef = ?");
+        }
+        if action.is_some() {
+            conditions.push("action = ?");
+        }
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+        sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
+
+        let bounded = limit.clamp(1, 500);
+        let mut stmt = guard.prepare(&sql)?;
+
+        let mut params: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(owner) = owner_ref {
+            params.push(rusqlite::types::Value::Text(owner.to_string()));
+        }
+        if let Some(act) = action {
+            params.push(rusqlite::types::Value::Text(act.to_string()));
+        }
+        params.push(rusqlite::types::Value::Integer(bounded as i64));
+
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            let id: String = row.get(0)?;
+            let timestamp: String = row.get(1)?;
+            let actor: String = row.get(2)?;
+            let action: String = row.get(3)?;
+            let resource_type: String = row.get(4)?;
+            let resource_id: Option<String> = row.get(5)?;
+            let owner_ref: Option<String> = row.get(6)?;
+            let request_id: Option<String> = row.get(7)?;
+            let source_ip: Option<String> = row.get(8)?;
+            let outcome: String = row.get(9)?;
+            let before_str: Option<String> = row.get(10)?;
+            let after_str: Option<String> = row.get(11)?;
+            let meta_str: Option<String> = row.get(12)?;
+
+            let before = before_str.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let after = after_str.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let metadata = meta_str
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .unwrap_or_else(|| json!({}));
+
+            Ok(json!({
+                "id": id,
+                "timestamp": timestamp,
+                "actor": actor,
+                "action": action,
+                "resourceType": resource_type,
+                "resourceId": resource_id,
+                "ownerRef": owner_ref,
+                "requestId": request_id,
+                "sourceIp": source_ip,
+                "outcome": outcome,
+                "before": before,
+                "after": after,
+                "metadata": metadata,
+            }))
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    // ==========================================
+    // Budget & Debit Operations
+    // ==========================================
+
+    pub fn get_budget_state(&self, key: &ApiKey) -> serde_json::Value {
+        let Some(limit) = key.budget_usd else {
+            return json!({
+                "enabled": false,
+                "limit": 0,
+                "used": 0,
+                "reserved": 0,
+                "remaining": null,
+                "exceeded": false,
+                "resetsAt": null
+            });
+        };
+
+        let guard = self.conn.lock().unwrap();
+        let used: f64 = if key.regenerate_version > 0 {
+            guard
+                .query_row(
+                    "SELECT COALESCE(SUM(cost), 0.0) FROM usageHistory WHERE (apiKey = ? OR apiKeyId = ?) AND cost > 0",
+                    params![key.key, key.id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0)
+        } else {
+            guard
+                .query_row(
+                    "SELECT COALESCE(SUM(cost), 0.0) FROM usageHistory WHERE apiKey = ? AND cost > 0",
+                    params![key.key],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0)
+        };
+        drop(guard);
+
+        let mut res_guard = self.budget_reservations.lock().unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        res_guard.retain(|_, v| v.expires_at > now_ms);
+        let reserved: f64 = res_guard
+            .values()
+            .filter(|v| v.api_key == key.key)
+            .map(|v| v.amount)
+            .sum();
+        drop(res_guard);
+
+        let remaining = (limit - used - reserved).max(0.0);
+        let exceeded = used + reserved >= limit;
+
+        json!({
+            "enabled": true,
+            "limit": limit,
+            "used": used,
+            "reserved": reserved,
+            "remaining": remaining,
+            "exceeded": exceeded,
+            "resetsAt": null
+        })
+    }
+
+    pub fn debit_budget(
+        &self,
+        key_id: &str,
+        request_id: &str,
+        reserve_usd: Option<f64>,
+        commit_usd: Option<f64>,
+    ) -> Result<serde_json::Value, (axum::http::StatusCode, String, Option<serde_json::Value>)> {
+        let key = self
+            .get_api_key_by_id(key_id)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None))?
+            .ok_or_else(|| (axum::http::StatusCode::NOT_FOUND, "API key not found".to_string(), None))?;
+
+        if key.budget_usd.is_none() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "API key does not have a budget".to_string(),
+                None,
+            ));
+        }
+
+        let reservation_key = format!("{}:{}", key.key, request_id);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        if let Some(reserve_amount) = reserve_usd {
+            if reserve_amount <= 0.0 {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "reserveUsd must be positive".to_string(),
+                    None,
+                ));
+            }
+            let mut state = self.get_budget_state(&key);
+            let remaining = state.get("remaining").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if reserve_amount > remaining {
+                if let Some(obj) = state.as_object_mut() {
+                    obj.insert("reserved".to_string(), json!(false));
+                }
+                return Err((
+                    axum::http::StatusCode::PAYMENT_REQUIRED,
+                    "Debit exceeds remaining budget".to_string(),
+                    Some(state),
+                ));
+            }
+
+            let mut res_guard = self.budget_reservations.lock().unwrap();
+            res_guard.insert(
+                reservation_key,
+                BudgetReservation {
+                    api_key: key.key.clone(),
+                    amount: reserve_amount,
+                    expires_at: now_ms + 3600 * 1000,
+                },
+            );
+            drop(res_guard);
+
+            let mut updated_state = self.get_budget_state(&key);
+            if let Some(obj) = updated_state.as_object_mut() {
+                obj.insert("reserved".to_string(), json!(true));
+            }
+            return Ok(updated_state);
+        }
+
+        if let Some(commit_amount) = commit_usd {
+            if commit_amount < 0.0 {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "commitUsd must be non-negative".to_string(),
+                    None,
+                ));
+            }
+            let commit_model = format!("budget-commit:{}", request_id);
+            let guard = self.conn.lock().unwrap();
+            let existing: Option<f64> = guard
+                .query_row(
+                    "SELECT cost FROM usageHistory WHERE apiKeyId = ? AND provider = 'budget' AND model = ? LIMIT 1",
+                    params![key.id, commit_model],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap_or(None);
+            drop(guard);
+
+            if existing.is_some() {
+                let mut res_guard = self.budget_reservations.lock().unwrap();
+                res_guard.remove(&reservation_key);
+                drop(res_guard);
+
+                let mut state = self.get_budget_state(&key);
+                if let Some(obj) = state.as_object_mut() {
+                    obj.insert("committed".to_string(), json!(true));
+                }
+                return Ok(state);
+            }
+
+            let mut res_guard = self.budget_reservations.lock().unwrap();
+            let reservation = res_guard.remove(&reservation_key);
+            drop(res_guard);
+
+            let mut state = self.get_budget_state(&key);
+            let remaining = state.get("remaining").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if reservation.is_none() && commit_amount > remaining {
+                if let Some(obj) = state.as_object_mut() {
+                    obj.insert("committed".to_string(), json!(false));
+                }
+                return Err((
+                    axum::http::StatusCode::PAYMENT_REQUIRED,
+                    "Debit exceeds remaining budget".to_string(),
+                    Some(state),
+                ));
+            }
+
+            let guard = self.conn.lock().unwrap();
+            let _ = guard.execute(
+                r#"
+                INSERT INTO usageHistory(timestamp, provider, model, apiKey, apiKeyId, cost)
+                VALUES (?, 'budget', ?, ?, ?, ?)
+                "#,
+                params![
+                    chrono::Utc::now().to_rfc3339(),
+                    commit_model,
+                    key.key,
+                    key.id,
+                    commit_amount
+                ],
+            );
+            drop(guard);
+
+            let mut updated_state = self.get_budget_state(&key);
+            if let Some(obj) = updated_state.as_object_mut() {
+                obj.insert("committed".to_string(), json!(true));
+            }
+            return Ok(updated_state);
+        }
+
+        Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Provide exactly one of reserveUsd or commitUsd".to_string(),
+            None,
+        ))
+    }
+
+    // ==========================================
+    // Observability & Metrics Operations
+    // ==========================================
+
+    pub fn record_metric_outcome(
+        &self,
+        tenant: Option<&str>,
+        provider: &str,
+        connection_id: &str,
+        model: &str,
+        success: bool,
+        status: u16,
+        latency_ms: u64,
+    ) {
+        let scope = tenant.filter(|t| !t.trim().is_empty()).unwrap_or("anonymous").to_string();
+        let key = format!("{}:{}:{}:{}", scope, provider, connection_id, model);
+
+        let mut outcomes = self.metrics.provider_outcomes.lock().unwrap();
+        let outcome = outcomes.entry(key.clone()).or_insert_with(|| ProviderOutcome {
+            tenant: scope.clone(),
+            provider: provider.to_string(),
+            connection_id: connection_id.to_string(),
+            model: model.to_string(),
+            successes: 0,
+            failures: 0,
+            consecutive_failures: 0,
+            last_status: status,
+            last_latency_ms: latency_ms,
+            updated_at: chrono::Utc::now().timestamp_millis() as u64,
+        });
+
+        if success {
+            outcome.successes += 1;
+            outcome.consecutive_failures = 0;
+        } else {
+            outcome.failures += 1;
+            outcome.consecutive_failures += 1;
+        }
+        outcome.last_status = status;
+        outcome.last_latency_ms = latency_ms;
+        outcome.updated_at = chrono::Utc::now().timestamp_millis() as u64;
+
+        let total = outcome.successes + outcome.failures;
+        let is_alert = outcome.consecutive_failures >= 3 || (total >= 5 && (outcome.failures as f64 / total as f64) >= 0.5);
+
+        let mut alerts = self.metrics.alerts.lock().unwrap();
+        alerts.retain(|a| a.fingerprint != key);
+        if is_alert {
+            alerts.push(MetricAlert {
+                fingerprint: key,
+                severity: if outcome.consecutive_failures >= 5 { "critical".to_string() } else { "warning".to_string() },
+                alert_type: "provider_degraded".to_string(),
+                tenant: scope,
+                provider: provider.to_string(),
+                model: model.to_string(),
+                connection_id: connection_id.to_string(),
+                consecutive_failures: outcome.consecutive_failures,
+                observed_at: outcome.updated_at,
+            });
+        }
+        drop(alerts);
+        drop(outcomes);
+
+        let mut count = self.metrics.latency_count.lock().unwrap();
+        *count += 1;
+        let mut sum = self.metrics.latency_sum_ms.lock().unwrap();
+        *sum += latency_ms as f64;
+        let mut max = self.metrics.latency_max_ms.lock().unwrap();
+        if (latency_ms as f64) > *max {
+            *max = latency_ms as f64;
+        }
+    }
+
+    pub fn get_metrics_snapshot(&self, tenant: Option<&str>) -> serde_json::Value {
+        let scope = tenant.filter(|t| !t.trim().is_empty()).unwrap_or("anonymous");
+        let filter_tenant = tenant.is_some();
+
+        let counters_guard = self.metrics.counters.lock().unwrap();
+        let mut counters: Vec<serde_json::Value> = Vec::new();
+        for counter in counters_guard.values() {
+            let item_tenant = counter.labels.get("tenant").map(|s| s.as_str()).unwrap_or("anonymous");
+            if !filter_tenant || item_tenant == scope {
+                counters.push(json!({
+                    "name": counter.name,
+                    "labels": counter.labels,
+                    "value": counter.value
+                }));
+            }
+        }
+        drop(counters_guard);
+
+        let outcomes_guard = self.metrics.provider_outcomes.lock().unwrap();
+        let mut providers: Vec<serde_json::Value> = Vec::new();
+        for outcome in outcomes_guard.values() {
+            if !filter_tenant || outcome.tenant == scope {
+                providers.push(serde_json::to_value(outcome).unwrap_or_else(|_| json!({})));
+            }
+        }
+        drop(outcomes_guard);
+
+        let alerts_guard = self.metrics.alerts.lock().unwrap();
+        let mut alerts: Vec<serde_json::Value> = Vec::new();
+        for alert in alerts_guard.iter() {
+            if !filter_tenant || alert.tenant == scope {
+                alerts.push(serde_json::to_value(alert).unwrap_or_else(|_| json!({})));
+            }
+        }
+        drop(alerts_guard);
+
+        let count = *self.metrics.latency_count.lock().unwrap();
+        let sum = *self.metrics.latency_sum_ms.lock().unwrap();
+        let max = *self.metrics.latency_max_ms.lock().unwrap();
+        let avg = if count > 0 { sum / (count as f64) } else { 0.0 };
+
+        let latency = if filter_tenant {
+            if !counters.is_empty() || !providers.is_empty() {
+                json!({ "count": null, "sumMs": 0, "maxMs": null, "averageMs": null })
+            } else {
+                json!({ "count": 0, "sumMs": 0, "maxMs": 0, "averageMs": 0 })
+            }
+        } else {
+            json!({ "count": count, "sumMs": sum, "maxMs": max, "averageMs": avg })
+        };
+
+        json!({
+            "startedAt": self.metrics.started_at,
+            "now": chrono::Utc::now().timestamp_millis() as u64,
+            "counters": counters,
+            "providers": providers,
+            "latency": latency,
+            "alerts": alerts,
+        })
+    }
+
+    pub fn get_prometheus_metrics(&self, snapshot: &serde_json::Value) -> String {
+        let mut lines = Vec::new();
+        if let Some(counters) = snapshot.get("counters").and_then(|v| v.as_array()) {
+            for c in counters {
+                let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("metric");
+                let val = c.get("value").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut label_parts = Vec::new();
+                if let Some(labels) = c.get("labels").and_then(|v| v.as_object()) {
+                    for (k, v) in labels {
+                        let str_v = v.as_str().unwrap_or("");
+                        let escaped = str_v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                        label_parts.push(format!("{}=\"{}\"", k, escaped));
+                    }
+                }
+                if label_parts.is_empty() {
+                    lines.push(format!("{} {}", name, val));
+                } else {
+                    lines.push(format!("{}{{{}}} {}", name, label_parts.join(","), val));
+                }
+            }
+        }
+        if let Some(providers) = snapshot.get("providers").and_then(|v| v.as_array()) {
+            for p in providers {
+                let tenant = p.get("tenant").and_then(|v| v.as_str()).unwrap_or("anonymous");
+                let provider = p.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+                let model = p.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                let conn = p.get("connectionId").and_then(|v| v.as_str()).unwrap_or("");
+                let labels = format!("tenant=\"{}\",provider=\"{}\",model=\"{}\",connection=\"{}\"", tenant, provider, model, conn);
+                let successes = p.get("successes").and_then(|v| v.as_u64()).unwrap_or(0);
+                let failures = p.get("failures").and_then(|v| v.as_u64()).unwrap_or(0);
+                let consecutive = p.get("consecutiveFailures").and_then(|v| v.as_u64()).unwrap_or(0);
+                let last_lat = p.get("lastLatencyMs").and_then(|v| v.as_u64()).unwrap_or(0);
+                lines.push(format!("provider_successes_total{{{}}} {}", labels, successes));
+                lines.push(format!("provider_failures_total{{{}}} {}", labels, failures));
+                lines.push(format!("provider_consecutive_failures{{{}}} {}", labels, consecutive));
+                lines.push(format!("provider_last_latency_ms{{{}}} {}", labels, last_lat));
+            }
+        }
+        let avg = snapshot.get("latency").and_then(|l| l.get("averageMs")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let max = snapshot.get("latency").and_then(|l| l.get("maxMs")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let alert_count = snapshot.get("alerts").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        lines.push(format!("gateway_latency_average_ms {}", avg));
+        lines.push(format!("gateway_latency_max_ms {}", max));
+        lines.push(format!("gateway_alerts {}", alert_count));
+        lines.push(String::new());
+        lines.join("\n")
+    }
+
+    pub fn get_alerts(&self, tenant: Option<&str>) -> Vec<serde_json::Value> {
+        let snapshot = self.get_metrics_snapshot(tenant);
+        snapshot.get("alerts").and_then(|v| v.as_array()).cloned().unwrap_or_default()
     }
 
     /// Validates an API key: checks active flag, expiration date, and rate limits.
@@ -2994,6 +3692,7 @@ mod tests {
             force_model: "".to_string(),
             allowed_endpoints: "".to_string(),
             blocked_endpoints: "".to_string(),
+            ..Default::default()
         };
 
         db.save_api_key(&key).expect("save api key");

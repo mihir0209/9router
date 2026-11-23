@@ -350,6 +350,7 @@ mod tests {
             force_model: String::new(),
             allowed_endpoints: String::new(),
             blocked_endpoints: String::new(),
+            ..Default::default()
         };
         db.save_api_key(&test_key).unwrap();
 

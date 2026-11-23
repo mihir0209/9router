@@ -277,6 +277,27 @@ pub fn create_dashboard_jwt(jwt_secret: &str) -> String {
     format!("{}.{}", signing_input, sig_b64)
 }
 
+/// Generate API key with machineId embedded in sk-{machineId}-{keyId}-{crc8} format.
+pub fn generate_api_key(machine_id: Option<&str>) -> String {
+    use ring::rand::SecureRandom;
+    let machine = machine_id.unwrap_or("0000000000000000");
+    let machine_slice = if machine.len() >= 16 { &machine[..16] } else { machine };
+    let rng = ring::rand::SystemRandom::new();
+    let mut random_bytes = [0u8; 6];
+    let _ = rng.fill(&mut random_bytes);
+    let chars = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let key_id: String = random_bytes.iter().map(|b| chars[(*b as usize) % chars.len()] as char).collect();
+
+    let secret = std::env::var("API_KEY_SECRET").unwrap_or_else(|_| "endpoint-proxy-api-key-secret".to_string());
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    let mut ctx = ring::hmac::Context::with_key(&key);
+    ctx.update(format!("{}{}", machine_slice, key_id).as_bytes());
+    let tag = ctx.sign();
+    let hex_sig: String = tag.as_ref().iter().map(|b| format!("{:02x}", b)).collect();
+    let crc8 = &hex_sig[..8.min(hex_sig.len())];
+    format!("sk-{}-{}-{}", machine_slice, key_id, crc8)
+}
+
 /// Constant-time comparison of two secret byte slices to prevent timing attacks.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -597,6 +618,7 @@ mod tests {
             force_model: "".to_string(),
             allowed_endpoints: "".to_string(),
             blocked_endpoints: "".to_string(),
+            ..Default::default()
         };
         db.save_api_key(&key).expect("save key");
 
