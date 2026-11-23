@@ -7,6 +7,7 @@ pub mod config;
 pub mod custom_adapter;
 pub mod db;
 pub mod db_pg;
+pub mod edge;
 pub mod embed;
 pub mod gemini;
 pub mod media;
