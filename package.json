@@ -73,6 +73,7 @@
   "comment_pg": "kept in optionalDependencies and imported lazily in lib/db/adapters/postgresMemoryAdapter.js — only Postgres deployments (DATABASE_URL / POSTGRES_URL set) need it; SQLite is the default driver. It must be a declared dependency because the bundler resolves the dynamic import at build time even though the runtime path is opt-in",
   "comment_playwright_core": "devDependency only (keeps end-user installs small); open-sse/services/lazyRuntime.js downloads it + wreq-js on first use into <DATA_DIR>/runtime. playwright-core ships no browser binaries (run `npx playwright-core install chromium` or point OBSCURA_CDP_ENDPOINT/cloakbrowser at a stealth engine)",
   "devDependencies": {
+    "@faker-js/faker": "^10.6.0",
     "@opennextjs/cloudflare": "^1.20.5",
     "@tailwindcss/postcss": "^4.1.18",
     "eslint": "^9",
@@ -80,8 +81,8 @@
     "playwright-core": "^1.62.1",
     "postcss": "^8.5.6",
     "tailwindcss": "^4",
-    "wreq-js": "^3.2.0",
-    "wrangler": "^4.125.0"
+    "wrangler": "^4.125.0",
+    "wreq-js": "^3.2.0"
   },
   "comment_cloudflare_tooling": "the Cloudflare scripts (build/deploy/upload/preview) and wrangler.toml need these two binaries. They were only ever installed manually, so every npm install pruned them and broke build:cloudflare — declare them so a clean install is self-sufficient. opennextjs 1.20.5 is the newest whose peer range covers our next 16.3.6",
   "overrides": {

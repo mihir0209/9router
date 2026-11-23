@@ -1,0 +1,126 @@
+{
+  "database_size_bytes": 5379518464,
+  "database_size_gb": "5.01",
+  "index_benchmarks": [
+    {
+      "label": "apiKeys: auth key seek (25k keys)",
+      "scanUs": 9.32944,
+      "indexedUs": 3.832266,
+      "speedup": 2.4344447906277904,
+      "planScanDesc": "SEARCH apiKeys USING INDEX sqlite_autoindex_apiKeys_2 (key=?)",
+      "planIndexedDesc": "SEARCH apiKeys USING INDEX sqlite_autoindex_apiKeys_2 (key=?)",
+      "indexBuildMs": 27
+    },
+    {
+      "label": "providerConnections: priority routing",
+      "scanUs": 55.3623,
+      "indexedUs": 3.769368,
+      "speedup": 14.687422400784428,
+      "planScanDesc": "SCAN providerConnections",
+      "planIndexedDesc": "SEARCH providerConnections USING INDEX idx_pc_provider_priority (provider=? AND isActive=?)",
+      "indexBuildMs": 1
+    },
+    {
+      "label": "proxyPools: active health filtering",
+      "scanUs": 24.11405,
+      "indexedUs": 26.304844,
+      "speedup": 0.9167151875145125,
+      "planScanDesc": "SCAN proxyPools",
+      "planIndexedDesc": "SEARCH proxyPools USING INDEX idx_pp_active (isActive=?)",
+      "indexBuildMs": 1
+    },
+    {
+      "label": "usageHistory: daily cost sum (1.2M rows)",
+      "scanUs": 140957.4822,
+      "indexedUs": 11.081318,
+      "speedup": 12720.281305887982,
+      "planScanDesc": "SCAN usageHistory",
+      "planIndexedDesc": "SEARCH usageHistory USING INDEX idx_uh_key_ts (apiKeyId=? AND timestamp>?)",
+      "indexBuildMs": 1378
+    },
+    {
+      "label": "requestDetails: inspect per-connection (3GB+)",
+      "scanUs": 7687310.1778,
+      "indexedUs": 16.373328,
+      "speedup": 469501.99603892374,
+      "planScanDesc": "SCAN requestDetails",
+      "planIndexedDesc": "SEARCH requestDetails USING INDEX idx_rd_key_ts (connectionId=? AND timestamp>?)",
+      "indexBuildMs": 7243
+    }
+  ],
+  "concurrency_benchmarks": [
+    {
+      "concurrency": 1,
+      "requests": 500,
+      "stats": {
+        "min": 0.003707,
+        "mean": 0.016922256000000007,
+        "median": 0.010249,
+        "p95": 0.023635,
+        "p99": 0.034114,
+        "max": 2.975636
+      },
+      "rps": 3571.428571428571
+    },
+    {
+      "concurrency": 5,
+      "requests": 500,
+      "stats": {
+        "min": 0.002093,
+        "mean": 0.014219613999999992,
+        "median": 0.011442,
+        "p95": 0.02632,
+        "p99": 0.040606,
+        "max": 0.196629
+      },
+      "rps": 3164.5569620253164
+    },
+    {
+      "concurrency": 10,
+      "requests": 500,
+      "stats": {
+        "min": 0.002084,
+        "mean": 0.020765607999999998,
+        "median": 0.014798,
+        "p95": 0.041378,
+        "p99": 0.232107,
+        "max": 0.408428
+      },
+      "rps": 1930.5019305019305
+    },
+    {
+      "concurrency": 25,
+      "requests": 500,
+      "stats": {
+        "min": 0.002835,
+        "mean": 0.037561588,
+        "median": 0.019256,
+        "p95": 0.171202,
+        "p99": 0.317417,
+        "max": 3.302831
+      },
+      "rps": 737.4631268436577
+    },
+    {
+      "concurrency": 50,
+      "requests": 500,
+      "stats": {
+        "min": 0.004378,
+        "mean": 0.06525781999999998,
+        "median": 0.023133,
+        "p95": 0.268054,
+        "p99": 0.322155,
+        "max": 5.219615
+      },
+      "rps": 370.64492216456637
+    }
+  ],
+  "writer_benchmark": {
+    "min": 0.115708,
+    "mean": 0.4562599850000001,
+    "median": 0.187072,
+    "p95": 1.674729,
+    "p99": 4.253117,
+    "max": 7.782534
+  }
+}
