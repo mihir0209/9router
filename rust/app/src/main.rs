@@ -7,6 +7,7 @@ pub mod config;
 pub mod custom_adapter;
 pub mod db;
 pub mod embed;
+pub mod gemini;
 pub mod media;
 pub mod original;
 pub mod proxy;
@@ -15,6 +16,7 @@ pub mod sse;
 pub mod token_refresh;
 pub mod token_saver;
 pub mod translator;
+pub mod tunnel;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

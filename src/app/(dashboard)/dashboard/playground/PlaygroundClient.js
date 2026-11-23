@@ -82,6 +82,22 @@ function formatMs(ms) {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
+function formatModelDisplayName(model) {
+  if (!model) return "";
+  let name = typeof model === "string" ? model : (model.name || model.id || "");
+  if (typeof model === "object" && (!name || name === model.id)) {
+    if (model.id && model.id.includes("/")) {
+      const parts = model.id.split("/");
+      name = parts.slice(1).join("/");
+    }
+  }
+  if (name.includes("openai-compatible-") || name.includes("anthropic-compatible-")) {
+    const parts = name.split("/");
+    name = parts[parts.length - 1];
+  }
+  return name;
+}
+
 function ModelCombobox({ models, value, onChange, capsMap = {}, capFilter = "all", onCapFilterChange, placeholder = "Select model..." }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -124,14 +140,17 @@ function ModelCombobox({ models, value, onChange, capsMap = {}, capFilter = "all
         return a[0].localeCompare(b[0]);
       })
       .map(([provider, items]) => {
-        const providerName = items[0]?.owned_by && items[0].owned_by !== provider && items[0].owned_by !== "custom"
+        let providerName = items[0]?.owned_by && items[0].owned_by !== provider && items[0].owned_by !== "custom"
           ? `${items[0].owned_by} (${provider})`
           : (provider || "Other");
+        if (providerName.includes("openai-compatible-") || providerName.includes("anthropic-compatible-")) {
+          providerName = provider || "Custom";
+        }
         return [
           providerName,
           items.sort((a, b) => {
-            const nameA = a.name || (a.id.includes("/") ? a.id.slice(a.id.indexOf("/") + 1) : a.id);
-            const nameB = b.name || (b.id.includes("/") ? b.id.slice(b.id.indexOf("/") + 1) : b.id);
+            const nameA = formatModelDisplayName(a);
+            const nameB = formatModelDisplayName(b);
             return nameA.localeCompare(nameB);
           }),
         ];
@@ -179,7 +198,7 @@ function ModelCombobox({ models, value, onChange, capsMap = {}, capFilter = "all
       >
         <span className="flex min-w-0 items-center gap-1.5">
           <span className="truncate font-sans font-medium text-text-main">
-            {models.find((m) => m.id === value)?.name || value || placeholder}
+            {formatModelDisplayName(models.find((m) => m.id === value)) || formatModelDisplayName(value) || placeholder}
           </span>
           <CapabilityBadges caps={value ? capsMap[value] : null} />
         </span>
@@ -256,9 +275,9 @@ function ModelCombobox({ models, value, onChange, capsMap = {}, capFilter = "all
                     >
                       <div className="flex flex-col min-w-0 flex-1">
                         <span className="truncate font-sans font-medium text-text-main">
-                          {m.name || (m.id.includes("/") ? m.id.slice(m.id.indexOf("/") + 1) : m.id)}
+                          {formatModelDisplayName(m)}
                         </span>
-                        {m.name && m.name !== m.id && (
+                        {m.name && m.name !== m.id && !m.id.includes("openai-compatible-") && !m.id.includes("anthropic-compatible-") && (
                           <span className="truncate font-mono text-[10px] text-text-muted">
                             {m.id}
                           </span>

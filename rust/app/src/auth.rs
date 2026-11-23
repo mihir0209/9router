@@ -148,7 +148,17 @@ pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
         }
     }
 
-    // 4. Check x-router-key header
+    // 4. Check x-goog-api-key header (Gemini SDKs)
+    if let Some(val) = headers.get("x-goog-api-key") {
+        if let Ok(s) = val.to_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    // 5. Check x-router-key header
     if let Some(val) = headers.get("x-router-key") {
         if let Ok(s) = val.to_str() {
             let trimmed = s.trim();

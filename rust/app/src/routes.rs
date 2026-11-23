@@ -371,7 +371,17 @@ pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -
         let friendly_owner = provider_nodes.iter()
             .find(|n| n.id == conn.provider || n.prefix == conn.provider || n.name.as_deref() == Some(&conn.provider))
             .and_then(|n| n.name.clone())
-            .unwrap_or_else(|| conn.provider.clone());
+            .or_else(|| conn.data.extra.get("name").and_then(|v| v.as_str()).map(ToString::to_string))
+            .or_else(|| conn.name.clone())
+            .unwrap_or_else(|| {
+                if conn.provider.starts_with("openai-compatible-") {
+                    "OpenAI-Compatible".to_string()
+                } else if conn.provider.starts_with("anthropic-compatible-") {
+                    "Anthropic-Compatible".to_string()
+                } else {
+                    conn.provider.clone()
+                }
+            });
 
         if let Some(dm) = &conn.data.default_model {
             let trimmed = dm.trim();
@@ -465,7 +475,16 @@ async fn query_live_upstream_models(
             .find(|n| n.id == conn.provider || n.prefix == conn.provider || n.name.as_deref() == Some(&conn.provider))
             .and_then(|n| n.name.clone())
             .or_else(|| conn.data.extra.get("name").and_then(|v| v.as_str()).map(ToString::to_string))
-            .unwrap_or_else(|| conn.provider.clone());
+            .or_else(|| conn.name.clone())
+            .unwrap_or_else(|| {
+                if conn.provider.starts_with("openai-compatible-") {
+                    "OpenAI-Compatible".to_string()
+                } else if conn.provider.starts_with("anthropic-compatible-") {
+                    "Anthropic-Compatible".to_string()
+                } else {
+                    conn.provider.clone()
+                }
+            });
 
         let models_url = if let Some(base) = &conn.data.base_url {
             let b = base.trim_end_matches('/');
@@ -3749,24 +3768,8 @@ pub async fn get_keys_handler(
     }
 }
 
-pub async fn tunnel_status_handler() -> Response {
-    Json(json!({
-        "tunnel": {
-            "enabled": false,
-            "running": false,
-            "url": "",
-            "provider": "cloudflare"
-        },
-        "tailscale": {
-            "enabled": false,
-            "running": false,
-            "url": ""
-        },
-        "download": {
-            "active": false
-        }
-    }))
-    .into_response()
+pub async fn tunnel_status_handler(state: axum::extract::State<AppState>) -> Response {
+    crate::tunnel::tunnel_status_handler(state).await
 }
 
 pub async fn models_alias_handler() -> Response {
@@ -6821,10 +6824,7 @@ pub fn create_router(state: AppState) -> Router {
             axum::routing::get(observability_metrics_handler)
                 .options(options_handler),
         )
-        .route(
-            "/api/tunnel/status",
-            axum::routing::get(tunnel_status_handler).options(options_handler),
-        )
+
         .route(
             "/api/settings",
             axum::routing::get(get_settings_handler)
@@ -6926,6 +6926,46 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/dashboard/chat/completions",
             axum::routing::post(dashboard_chat_completions_handler).options(options_handler),
+        )
+        // Gemini API v1beta compatibility
+        .route(
+            "/v1beta/models",
+            axum::routing::get(crate::gemini::gemini_models_handler).options(options_handler),
+        )
+        .route(
+            "/v1beta/models/{*path}",
+            axum::routing::get(crate::gemini::gemini_model_get_handler)
+                .post(crate::gemini::gemini_action_handler)
+                .options(options_handler),
+        )
+        // Tunnel Service
+        .route(
+            "/api/tunnel/status",
+            axum::routing::get(crate::tunnel::tunnel_status_handler).options(options_handler),
+        )
+        .route(
+            "/api/tunnel/enable",
+            axum::routing::post(crate::tunnel::tunnel_enable_handler).options(options_handler),
+        )
+        .route(
+            "/api/tunnel/disable",
+            axum::routing::post(crate::tunnel::tunnel_disable_handler).options(options_handler),
+        )
+        .route(
+            "/api/tunnel/tailscale-check",
+            axum::routing::get(crate::tunnel::tailscale_check_handler).options(options_handler),
+        )
+        .route(
+            "/api/tunnel/tailscale-enable",
+            axum::routing::post(crate::tunnel::tailscale_enable_handler).options(options_handler),
+        )
+        .route(
+            "/api/tunnel/tailscale-disable",
+            axum::routing::post(crate::tunnel::tailscale_disable_handler).options(options_handler),
+        )
+        .route(
+            "/api/tunnel/tailscale-install",
+            axum::routing::post(crate::tunnel::tailscale_install_handler).options(options_handler),
         )
         // Reverse proxy fallback to original Next.js for UI, static assets, and full dashboard APIs
         .fallback(crate::original::proxy)
