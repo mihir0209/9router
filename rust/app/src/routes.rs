@@ -77,7 +77,7 @@ impl axum::extract::FromRef<AppState> for Arc<Database> {
     }
 }
 
-fn authenticate(
+pub(crate) fn authenticate(
     headers: &HeaderMap,
     db: &Database,
 ) -> Result<ApiKey, Response> {
@@ -452,6 +452,8 @@ async fn query_live_upstream_models(
         Ok(c) => c,
         Err(_) => return,
     };
+    let provider_nodes = state.db.load_provider_nodes().unwrap_or_default();
+    let display_names = state.db.load_model_display_names().unwrap_or_default();
 
     let active_connections: Vec<_> = connections
         .into_iter()
@@ -459,6 +461,12 @@ async fn query_live_upstream_models(
         .collect();
 
     for conn in active_connections {
+        let friendly_owner = provider_nodes.iter()
+            .find(|n| n.id == conn.provider || n.prefix == conn.provider || n.name.as_deref() == Some(&conn.provider))
+            .and_then(|n| n.name.clone())
+            .or_else(|| conn.data.extra.get("name").and_then(|v| v.as_str()).map(ToString::to_string))
+            .unwrap_or_else(|| conn.provider.clone());
+
         let models_url = if let Some(base) = &conn.data.base_url {
             let b = base.trim_end_matches('/');
             if b.ends_with("/models") {
@@ -499,11 +507,19 @@ async fn query_live_upstream_models(
                                 if state.db.check_model_allowed(api_key, id).is_ok()
                                     && seen_ids.insert(id.to_string())
                                 {
+                                    let clean_name = id.split('/').last().unwrap_or(id);
+                                    let disp_name = display_names.get(id)
+                                        .or_else(|| display_names.get(clean_name))
+                                        .cloned()
+                                        .or_else(|| m.get("name").and_then(|v| v.as_str()).map(ToString::to_string))
+                                        .unwrap_or_else(|| clean_name.to_string());
+
                                     data.push(json!({
                                         "id": id,
                                         "object": "model",
                                         "created": now,
-                                        "owned_by": conn.provider,
+                                        "owned_by": friendly_owner,
+                                        "name": disp_name,
                                         "permission": [],
                                         "root": id,
                                         "parent": null
@@ -732,8 +748,10 @@ fn resolve_target_for_candidate(
         ("anthropic".to_string(), candidate.to_string())
     } else if candidate.contains("gemini") {
         ("vertex".to_string(), candidate.to_string())
-    } else {
+    } else if candidate.starts_with("gpt-") || candidate.starts_with("text-") || candidate.starts_with("dall-e") || candidate.starts_with("o1") || candidate.starts_with("o3") {
         ("openai".to_string(), candidate.to_string())
+    } else {
+        ("unknown".to_string(), candidate.to_string())
     };
 
     let conn_opt = all_connections.iter().find(|c| c.is_active && c.provider.eq_ignore_ascii_case(&provider));
@@ -5582,23 +5600,43 @@ pub async fn provider_connection_models_handler(
     let all_conns = state.db.load_provider_connections().unwrap_or_default();
     let conn = all_conns.into_iter().find(|c| c.id == connection_id || c.provider == connection_id);
 
-    let (provider_id, api_key) = match conn {
-        Some(c) => (c.provider, c.data.api_key.unwrap_or_default()),
-        None => {
-            return Json(json!({
-                "provider": connection_id,
-                "connectionId": connection_id,
-                "models": []
-            })).into_response();
-        }
+    let (provider_id, api_key) = match &conn {
+        Some(c) => (c.provider.clone(), c.data.api_key.clone().unwrap_or_default()),
+        None => (connection_id.clone(), String::new()),
     };
 
     let all_nodes = state.db.load_provider_nodes().unwrap_or_default();
     let matching_node = all_nodes.into_iter().find(|n| n.id == provider_id || n.name.as_deref() == Some(&provider_id) || n.prefix == provider_id);
 
-    if let Some(node) = matching_node {
-        let base_url = node.base_url.trim_end_matches('/');
-        let models_url = format!("{}/models", base_url);
+    let raw_base = matching_node.as_ref().map(|n| n.base_url.as_str())
+        .or_else(|| conn.as_ref().and_then(|c| c.data.base_url.as_deref()))
+        .unwrap_or("");
+
+    let resolved_base = if !raw_base.is_empty() {
+        raw_base.to_string()
+    } else {
+        match provider_id.to_ascii_lowercase().as_str() {
+            "openai" => "https://api.openai.com/v1".to_string(),
+            "groq" => "https://api.groq.com/openai/v1".to_string(),
+            "openrouter" => "https://openrouter.ai/api/v1".to_string(),
+            "mistral" => "https://api.mistral.ai/v1".to_string(),
+            "together" => "https://api.together.xyz/v1".to_string(),
+            "perplexity" => "https://api.perplexity.ai".to_string(),
+            "deepseek" => "https://api.deepseek.com/v1".to_string(),
+            _ => String::new(),
+        }
+    };
+
+    if !resolved_base.is_empty() {
+        let b = resolved_base.trim_end_matches('/');
+        let models_url = if b.ends_with("/models") {
+            b.to_string()
+        } else if b.ends_with("/v1") || b.ends_with("/compat") || b.ends_with("/v2") {
+            format!("{}/models", b)
+        } else {
+            format!("{}/v1/models", b)
+        };
+
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(8))
             .build()
@@ -5639,31 +5677,47 @@ pub async fn provider_connection_models_handler(
                 }
             }
         }
+    }
 
-        let default_candidates = if node.name.as_deref() == Some("HCNSEC") || node.prefix == "h" {
-            vec!["Qwen3.8-Flash-Next", "hy4", "DeepSeek-V4.1-Flash", "MiMo-V2.6-Flash", "kimi-k3.1-pro", "MiniMax-M3.1-Flash", "sensenova-6.8-flash"]
-        } else {
-            vec!["default", "chat", "main"]
-        };
-        let fallback_models: Vec<serde_json::Value> = default_candidates.into_iter().map(|m| {
+    if let Ok(cms) = state.db.load_custom_models() {
+        let matching_cms: Vec<serde_json::Value> = cms.into_iter().filter(|m| {
+            let pa = m.get("providerAlias").or_else(|| m.get("provider")).and_then(|v| v.as_str()).unwrap_or("");
+            pa == provider_id || pa == connection_id || matching_node.as_ref().map(|n| n.prefix.as_str() == pa || n.name.as_deref() == Some(pa)).unwrap_or(false)
+        }).map(|m| {
+            let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let name = m.get("name").and_then(|v| v.as_str()).unwrap_or(id);
             json!({
-                "id": m,
-                "name": m,
-                "rawId": m
+                "id": id,
+                "name": name,
+                "rawId": id
             })
         }).collect();
-
-        return Json(json!({
-            "provider": provider_id,
-            "connectionId": connection_id,
-            "models": fallback_models
-        })).into_response();
+        if !matching_cms.is_empty() {
+            return Json(json!({
+                "provider": provider_id,
+                "connectionId": connection_id,
+                "models": matching_cms
+            })).into_response();
+        }
     }
+
+    let default_candidates = if matching_node.as_ref().map(|n| n.name.as_deref() == Some("HCNSEC") || n.prefix == "h").unwrap_or(false) {
+        vec!["Qwen3.8-Flash-Next", "hy4", "DeepSeek-V4.1-Flash", "MiMo-V2.6-Flash", "kimi-k3.1-pro", "MiniMax-M3.1-Flash", "sensenova-6.8-flash"]
+    } else {
+        vec!["default", "chat", "main"]
+    };
+    let fallback_models: Vec<serde_json::Value> = default_candidates.into_iter().map(|m| {
+        json!({
+            "id": m,
+            "name": m,
+            "rawId": m
+        })
+    }).collect();
 
     Json(json!({
         "provider": provider_id,
         "connectionId": connection_id,
-        "models": []
+        "models": fallback_models
     })).into_response()
 }
 
@@ -6463,6 +6517,95 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/v1/messages",
             axum::routing::post(messages_handler).options(options_handler),
+        )
+        // Embeddings
+        .route(
+            "/v1/embeddings",
+            axum::routing::post(crate::media::embeddings_handler).options(options_handler),
+        )
+        .route(
+            "/embeddings",
+            axum::routing::post(crate::media::embeddings_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/embeddings",
+            axum::routing::post(crate::media::embeddings_handler).options(options_handler),
+        )
+        // Image Generations
+        .route(
+            "/v1/images/generations",
+            axum::routing::post(crate::media::image_generations_handler).options(options_handler),
+        )
+        .route(
+            "/images/generations",
+            axum::routing::post(crate::media::image_generations_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/images/generations",
+            axum::routing::post(crate::media::image_generations_handler).options(options_handler),
+        )
+        // Video Generations
+        .route(
+            "/v1/videos/generations",
+            axum::routing::post(crate::media::video_generations_handler).options(options_handler),
+        )
+        .route(
+            "/videos/generations",
+            axum::routing::post(crate::media::video_generations_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/videos/generations",
+            axum::routing::post(crate::media::video_generations_handler).options(options_handler),
+        )
+        // Audio: Transcriptions (STT) & Speech (TTS)
+        .route(
+            "/v1/audio/transcriptions",
+            axum::routing::post(crate::media::transcriptions_handler).options(crate::media::audio_options_handler),
+        )
+        .route(
+            "/audio/transcriptions",
+            axum::routing::post(crate::media::transcriptions_handler).options(crate::media::audio_options_handler),
+        )
+        .route(
+            "/api/v1/audio/transcriptions",
+            axum::routing::post(crate::media::transcriptions_handler).options(crate::media::audio_options_handler),
+        )
+        .route(
+            "/v1/audio/speech",
+            axum::routing::post(crate::media::speech_handler).options(crate::media::audio_options_handler),
+        )
+        .route(
+            "/audio/speech",
+            axum::routing::post(crate::media::speech_handler).options(crate::media::audio_options_handler),
+        )
+        .route(
+            "/api/v1/audio/speech",
+            axum::routing::post(crate::media::speech_handler).options(crate::media::audio_options_handler),
+        )
+        // Web Fetch & Search & System One
+        .route(
+            "/api/v1/web/fetch",
+            axum::routing::post(crate::media::web_fetch_handler).options(options_handler),
+        )
+        .route(
+            "/v1/web/fetch",
+            axum::routing::post(crate::media::web_fetch_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/search",
+            axum::routing::post(crate::media::web_search_handler).options(options_handler),
+        )
+        .route(
+            "/v1/search",
+            axum::routing::post(crate::media::web_search_handler).options(options_handler),
+        )
+        .route(
+            "/v1/systemone",
+            axum::routing::post(crate::media::systemone_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/systemone",
+            axum::routing::post(crate::media::systemone_handler).options(options_handler),
         )
         // Provider Nodes (Rust native custom provider extensions)
         .route(

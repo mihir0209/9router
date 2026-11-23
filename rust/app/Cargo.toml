@@ -14,10 +14,10 @@ name = "9r"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
@@ -36,6 +36,8 @@ dashmap = "6.1"
 ring = "0.17"
 base64 = "0.22"
 bcrypt = "0.19.3"
+url = "2.5"
+percent-encoding = "2.3"
 
 [workspace]
 

@@ -7,6 +7,7 @@ pub mod config;
 pub mod custom_adapter;
 pub mod db;
 pub mod embed;
+pub mod media;
 pub mod original;
 pub mod proxy;
 pub mod routes;
