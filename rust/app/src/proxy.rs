@@ -1,5 +1,8 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use dashmap::DashMap;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
@@ -599,6 +602,90 @@ pub struct UpstreamConnection {
     pub api_version: Option<String>,
     pub custom_headers: Option<HeaderMap>,
     pub schema_mapping: Option<crate::custom_adapter::CustomSchemaMapping>,
+    pub proxy_url: Option<String>,
+}
+
+/// Active proxy entry used for rotation and request dispatching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveProxyEntry {
+    pub id: String,
+    pub name: Option<String>,
+    pub proxy_url: String,
+    pub no_proxy: Option<String>,
+    pub proxy_type: String,
+    pub strict_proxy: bool,
+}
+
+/// Rotator for distributing outbound model requests across active proxy pools.
+#[derive(Default)]
+pub struct ProxyPoolRotator {
+    active_proxies: RwLock<Vec<ActiveProxyEntry>>,
+    client_cache: DashMap<String, reqwest::Client>,
+    round_robin_counter: AtomicUsize,
+}
+
+impl ProxyPoolRotator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the list of active proxies available for rotation.
+    pub fn set_active_proxies(&self, proxies: Vec<ActiveProxyEntry>) {
+        let mut guard = self.active_proxies.write().unwrap();
+        *guard = proxies;
+    }
+
+    /// Retrieves all active proxies.
+    pub fn get_active_proxies(&self) -> Vec<ActiveProxyEntry> {
+        self.active_proxies.read().unwrap().clone()
+    }
+
+    /// Returns the number of active proxies.
+    pub fn count(&self) -> usize {
+        self.active_proxies.read().unwrap().len()
+    }
+
+    /// Selects the next active proxy in round-robin fashion.
+    pub fn next_proxy(&self) -> Option<ActiveProxyEntry> {
+        let guard = self.active_proxies.read().unwrap();
+        if guard.is_empty() {
+            return None;
+        }
+        let idx = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) % guard.len();
+        Some(guard[idx].clone())
+    }
+
+    /// Retrieves an existing reqwest::Client for the given proxy URL or constructs a new one.
+    pub fn get_or_create_client(&self, proxy_url: &str, no_proxy: Option<&str>) -> reqwest::Client {
+        let key = format!("{}|{}", proxy_url, no_proxy.unwrap_or(""));
+        if let Some(existing) = self.client_cache.get(&key) {
+            return existing.clone();
+        }
+
+        let mut builder = reqwest::Client::builder()
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .pool_max_idle_per_host(32)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(180));
+
+        if let Ok(mut p) = reqwest::Proxy::all(proxy_url) {
+            if let Some(np) = no_proxy {
+                let trimmed = np.trim();
+                if !trimmed.is_empty() {
+                    p = p.no_proxy(reqwest::NoProxy::from_string(trimmed));
+                }
+            }
+            builder = builder.proxy(p);
+        }
+
+        let client = builder
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        self.client_cache.insert(key, client.clone());
+        client
+    }
 }
 
 /// Constructs the chat completions upstream URL based on baseUrl conventions:
@@ -624,6 +711,7 @@ pub fn build_chat_completions_url(base_url: &str, model: &str) -> String {
 pub struct ProxyService {
     client: reqwest::Client,
     config: Option<NetworkConfig>,
+    rotator: Arc<ProxyPoolRotator>,
 }
 
 impl Default for ProxyService {
@@ -650,6 +738,7 @@ impl ProxyService {
         Self {
             client,
             config: Some(net),
+            rotator: Arc::new(ProxyPoolRotator::new()),
         }
     }
 
@@ -669,6 +758,111 @@ impl ProxyService {
 
     pub fn config(&self) -> Option<&NetworkConfig> {
         self.config.as_ref()
+    }
+
+    pub fn rotator(&self) -> &Arc<ProxyPoolRotator> {
+        &self.rotator
+    }
+
+    pub fn set_active_proxies(&self, proxies: Vec<ActiveProxyEntry>) {
+        self.rotator.set_active_proxies(proxies);
+    }
+
+    pub fn get_active_proxies(&self) -> Vec<ActiveProxyEntry> {
+        self.rotator.get_active_proxies()
+    }
+
+    pub fn next_proxy(&self) -> Option<ActiveProxyEntry> {
+        self.rotator.next_proxy()
+    }
+
+    /// Syncs active proxy pools from the database into the rotator.
+    pub fn sync_active_proxies_from_db(&self, db: &crate::db::Database) -> anyhow::Result<usize> {
+        let pools = db.load_proxy_pools()?;
+        let mut entries = Vec::new();
+        for p in pools {
+            if p.is_active {
+                if let Some(url) = p.proxy_url() {
+                    let trimmed = url.trim();
+                    if !trimmed.is_empty() {
+                        let id = p.id.clone();
+                        let name = p.name().map(ToString::to_string);
+                        let no_proxy = p.no_proxy().map(ToString::to_string);
+                        let proxy_type = p.proxy_type().to_string();
+                        let strict_proxy = p.strict_proxy();
+                        entries.push(ActiveProxyEntry {
+                            id,
+                            name,
+                            proxy_url: trimmed.to_string(),
+                            no_proxy,
+                            proxy_type,
+                            strict_proxy,
+                        });
+                    }
+                }
+            }
+        }
+        let count = entries.len();
+        self.set_active_proxies(entries);
+        Ok(count)
+    }
+
+    fn resolve_dispatch(
+        &self,
+        target_url: &str,
+        conn: &UpstreamConnection,
+        headers: &mut HeaderMap,
+    ) -> (reqwest::Client, String) {
+        let selected_proxy = if let Some(p_url) = &conn.proxy_url {
+            Some(ActiveProxyEntry {
+                id: "explicit".to_string(),
+                name: None,
+                proxy_url: p_url.clone(),
+                no_proxy: None,
+                proxy_type: "http".to_string(),
+                strict_proxy: false,
+            })
+        } else {
+            self.rotator.next_proxy()
+        };
+
+        if let Some(proxy) = selected_proxy {
+            let ptype = proxy.proxy_type.to_ascii_lowercase();
+            if ptype == "vercel" || ptype == "cloudflare" || ptype == "deno" || ptype == "netlify" {
+                if let Ok(parsed) = url::Url::parse(target_url) {
+                    let target_host = format!(
+                        "{}://{}",
+                        parsed.scheme(),
+                        parsed.host_str().unwrap_or_default()
+                    );
+                    let target_path = if let Some(q) = parsed.query() {
+                        format!("{}?{}", parsed.path(), q)
+                    } else {
+                        parsed.path().to_string()
+                    };
+                    if let Ok(v) = HeaderValue::from_str(&target_host) {
+                        headers.insert(
+                            reqwest::header::HeaderName::from_static("x-relay-target"),
+                            v,
+                        );
+                    }
+                    if let Ok(v) = HeaderValue::from_str(&target_path) {
+                        headers.insert(
+                            reqwest::header::HeaderName::from_static("x-relay-path"),
+                            v,
+                        );
+                    }
+                    return (self.client.clone(), proxy.proxy_url);
+                }
+            }
+
+            let client = self
+                .rotator
+                .get_or_create_client(&proxy.proxy_url, proxy.no_proxy.as_deref());
+            (client, target_url.to_string())
+        } else {
+            (self.client.clone(), target_url.to_string())
+        }
     }
 
     /// Forwards an OpenAI chat completions request to upstream provider.
@@ -743,8 +937,10 @@ impl ProxyService {
             headers.extend(custom.clone());
         }
 
-        self.client
-            .post(&url)
+        let (client, dispatch_url) = self.resolve_dispatch(&url, conn, &mut headers);
+
+        client
+            .post(&dispatch_url)
             .headers(headers)
             .json(req)
             .send()
@@ -784,8 +980,10 @@ impl ProxyService {
             headers.extend(custom.clone());
         }
 
-        self.client
-            .post(&url)
+        let (client, dispatch_url) = self.resolve_dispatch(&url, conn, &mut headers);
+
+        client
+            .post(&dispatch_url)
             .headers(headers)
             .json(req)
             .send()
@@ -811,8 +1009,10 @@ impl ProxyService {
             headers.extend(custom.clone());
         }
 
-        self.client
-            .post(url)
+        let (client, dispatch_url) = self.resolve_dispatch(url, conn, &mut headers);
+
+        client
+            .post(&dispatch_url)
             .headers(headers)
             .json(body)
             .send()
@@ -1292,6 +1492,76 @@ mod tests {
         assert_eq!(
             resolve_models_list_source(Some("invalid-source"), None, None),
             "cached"
+        );
+    }
+
+    #[test]
+    fn test_proxy_pool_rotator_round_robin() {
+        let rotator = ProxyPoolRotator::new();
+        assert_eq!(rotator.count(), 0);
+        assert!(rotator.next_proxy().is_none());
+
+        let p1 = ActiveProxyEntry {
+            id: "p1".to_string(),
+            name: Some("Proxy 1".to_string()),
+            proxy_url: "http://10.0.0.1:8080".to_string(),
+            no_proxy: None,
+            proxy_type: "http".to_string(),
+            strict_proxy: false,
+        };
+        let p2 = ActiveProxyEntry {
+            id: "p2".to_string(),
+            name: Some("Proxy 2".to_string()),
+            proxy_url: "http://10.0.0.2:8080".to_string(),
+            no_proxy: None,
+            proxy_type: "http".to_string(),
+            strict_proxy: false,
+        };
+
+        rotator.set_active_proxies(vec![p1, p2]);
+        assert_eq!(rotator.count(), 2);
+
+        let first = rotator.next_proxy().unwrap();
+        let second = rotator.next_proxy().unwrap();
+        let third = rotator.next_proxy().unwrap();
+
+        assert_eq!(first.id, "p1");
+        assert_eq!(second.id, "p2");
+        assert_eq!(third.id, "p1");
+    }
+
+    #[test]
+    fn test_proxy_service_relay_dispatch() {
+        let service = ProxyService::new();
+        let relay_proxy = ActiveProxyEntry {
+            id: "relay-1".to_string(),
+            name: Some("Vercel Relay".to_string()),
+            proxy_url: "https://my-relay.vercel.app/api/relay".to_string(),
+            no_proxy: None,
+            proxy_type: "vercel".to_string(),
+            strict_proxy: false,
+        };
+        service.set_active_proxies(vec![relay_proxy]);
+
+        let conn = UpstreamConnection {
+            provider: "openai".to_string(),
+            ..Default::default()
+        };
+        let target_url = "https://api.openai.com/v1/chat/completions";
+        let mut headers = HeaderMap::new();
+
+        let (_client, dispatch_url) = service.resolve_dispatch(target_url, &conn, &mut headers);
+
+        // Target URL is rewritten to the relay endpoint
+        assert_eq!(dispatch_url, "https://my-relay.vercel.app/api/relay");
+        // Header x-relay-target and x-relay-path are added
+        assert_eq!(
+            headers.get("x-relay-target").unwrap(),
+            "https://api.openai.com"
+        );
+        assert_eq!(
+            headers.get("x-relay-path").unwrap(),
+            "/v1/chat/completions"
         );
     }
 }

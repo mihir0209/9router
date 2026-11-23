@@ -3325,17 +3325,7 @@ pub async fn get_proxy_pools_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(resp) = crate::auth::verify_internal_auth(&headers, &state.config.jwt_secret, &state.db) {
-        return resp;
-    }
-    match state.db.load_proxy_pools() {
-        Ok(pools) => Json(json!({ "proxyPools": pools })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
+    crate::proxy_pools::get_proxy_pools_handler(State(state), headers, Query(Default::default())).await
 }
 
 pub async fn require_login_handler(
@@ -6660,9 +6650,74 @@ pub fn create_router(state: AppState) -> Router {
             "/api/plans",
             axum::routing::get(get_plans_handler).options(options_handler),
         )
+        // Proxy Pools Endpoints
         .route(
             "/api/proxy-pools",
-            axum::routing::get(get_proxy_pools_handler).options(options_handler),
+            axum::routing::get(crate::proxy_pools::get_proxy_pools_handler)
+                .post(crate::proxy_pools::create_proxy_pool_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/inactive",
+            axum::routing::delete(crate::proxy_pools::delete_inactive_proxy_pools_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/proxyscrape",
+            axum::routing::get(crate::proxy_pools::get_proxyscrape_config_handler)
+                .put(crate::proxy_pools::update_proxyscrape_config_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/proxyscrape/refresh",
+            axum::routing::post(crate::proxy_pools::refresh_proxyscrape_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/providers",
+            axum::routing::get(crate::proxy_pools::get_providers_handler)
+                .post(crate::proxy_pools::update_providers_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/providers/{id}",
+            axum::routing::get(crate::proxy_pools::get_provider_handler)
+                .put(crate::proxy_pools::update_provider_handler)
+                .delete(crate::proxy_pools::delete_provider_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/providers/{id}/refresh",
+            axum::routing::post(crate::proxy_pools::refresh_provider_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/vercel-deploy",
+            axum::routing::post(crate::proxy_pools::deploy_vercel_handler).options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/cloudflare-deploy",
+            axum::routing::post(crate::proxy_pools::deploy_cloudflare_handler).options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/deno-deploy",
+            axum::routing::post(crate::proxy_pools::deploy_deno_handler).options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/netlify-deploy",
+            axum::routing::post(crate::proxy_pools::deploy_netlify_handler).options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/{id}",
+            axum::routing::get(crate::proxy_pools::get_proxy_pool_handler)
+                .put(crate::proxy_pools::update_proxy_pool_handler)
+                .delete(crate::proxy_pools::delete_proxy_pool_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/proxy-pools/{id}/test",
+            axum::routing::post(crate::proxy_pools::test_proxy_pool_handler)
+                .options(options_handler),
         )
         .route(
             "/api/require-login",

@@ -11,6 +11,7 @@ pub mod gemini;
 pub mod media;
 pub mod original;
 pub mod proxy;
+pub mod proxy_pools;
 pub mod routes;
 pub mod sse;
 pub mod token_refresh;

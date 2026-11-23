@@ -167,6 +167,80 @@ pub struct ProxyPool {
     pub updated_at: String,
 }
 
+impl ProxyPool {
+    /// Formats the pool into a JSON Value with all flattened fields expected by the frontend.
+    pub fn to_json_value(&self, bound_count: Option<usize>) -> serde_json::Value {
+        let mut obj = match &self.data {
+            serde_json::Value::Object(map) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+
+        obj.insert("id".to_string(), serde_json::json!(self.id));
+        obj.insert("isActive".to_string(), serde_json::json!(self.is_active));
+        obj.insert("active".to_string(), serde_json::json!(self.is_active));
+        obj.insert("testStatus".to_string(), serde_json::json!(self.test_status));
+        obj.insert("status".to_string(), serde_json::json!(self.test_status));
+        obj.insert("createdAt".to_string(), serde_json::json!(self.created_at));
+        obj.insert("updatedAt".to_string(), serde_json::json!(self.updated_at));
+
+        if let Some(url) = obj.get("proxyUrl") {
+            if !obj.contains_key("url") {
+                obj.insert("url".to_string(), url.clone());
+            }
+        } else if let Some(url) = obj.get("url") {
+            obj.insert("proxyUrl".to_string(), url.clone());
+        }
+
+        if !obj.contains_key("name") {
+            obj.insert("name".to_string(), serde_json::json!("Proxy"));
+        }
+        if !obj.contains_key("type") {
+            obj.insert("type".to_string(), serde_json::json!("http"));
+        }
+        if !obj.contains_key("tags") {
+            obj.insert("tags".to_string(), serde_json::json!([]));
+        }
+        if !obj.contains_key("latency") {
+            obj.insert("latency".to_string(), serde_json::json!(null));
+        }
+        if !obj.contains_key("successRate") {
+            obj.insert("successRate".to_string(), serde_json::json!(null));
+        }
+
+        if let Some(count) = bound_count {
+            obj.insert("boundConnectionCount".to_string(), serde_json::json!(count));
+        } else if !obj.contains_key("boundConnectionCount") {
+            obj.insert("boundConnectionCount".to_string(), serde_json::json!(0));
+        }
+
+        serde_json::Value::Object(obj)
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.data.get("name").and_then(|v| v.as_str())
+    }
+
+    pub fn proxy_url(&self) -> Option<&str> {
+        self.data.get("proxyUrl").or_else(|| self.data.get("url")).and_then(|v| v.as_str())
+    }
+
+    pub fn no_proxy(&self) -> Option<&str> {
+        self.data.get("noProxy").and_then(|v| v.as_str())
+    }
+
+    pub fn proxy_type(&self) -> &str {
+        self.data.get("type").and_then(|v| v.as_str()).unwrap_or("http")
+    }
+
+    pub fn strict_proxy(&self) -> bool {
+        self.data.get("strictProxy").and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
+    pub fn source(&self) -> Option<&str> {
+        self.data.get("source").and_then(|v| v.as_str())
+    }
+}
+
 /// Plan definition for key budget and concurrency constraints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
@@ -2998,6 +3072,153 @@ impl Database {
             list.push(r?);
         }
         Ok(list)
+    }
+
+    /// Retrieves a single proxy pool by ID.
+    pub fn get_proxy_pool_by_id(&self, id: &str) -> anyhow::Result<Option<ProxyPool>> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare_cached(
+            "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools WHERE id = ?",
+        )?;
+
+        let result = stmt
+            .query_row(params![id], |row| {
+                let id: String = row.get(0)?;
+                let is_active: i64 = row.get(1)?;
+                let test_status: Option<String> = row.get(2)?;
+                let data_str: String = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let updated_at: String = row.get(5)?;
+                let val: serde_json::Value =
+                    serde_json::from_str(&data_str).unwrap_or(serde_json::Value::Null);
+
+                Ok(ProxyPool {
+                    id,
+                    is_active: is_active == 1,
+                    test_status,
+                    data: val,
+                    created_at,
+                    updated_at,
+                })
+            })
+            .optional()?;
+
+        Ok(result)
+    }
+
+    /// Upserts a proxy pool configuration into the database.
+    pub fn save_proxy_pool(&self, pool: &ProxyPool) -> anyhow::Result<()> {
+        let guard = self.conn.lock().unwrap();
+        let data_str = serde_json::to_string(&pool.data)?;
+        let is_active = if pool.is_active { 1 } else { 0 };
+        guard.execute(
+            r#"
+            INSERT INTO proxyPools(id, isActive, testStatus, data, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                isActive=excluded.isActive, testStatus=excluded.testStatus, data=excluded.data, updatedAt=excluded.updatedAt
+            "#,
+            params![
+                pool.id,
+                is_active,
+                pool.test_status,
+                data_str,
+                pool.created_at,
+                pool.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes a proxy pool by ID.
+    pub fn delete_proxy_pool(&self, id: &str) -> anyhow::Result<bool> {
+        let guard = self.conn.lock().unwrap();
+        let affected = guard.execute(
+            "DELETE FROM proxyPools WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Deletes all inactive proxy pools except those in protected_ids.
+    pub fn delete_inactive_proxy_pools(
+        &self,
+        protected_ids: &[String],
+    ) -> anyhow::Result<(usize, Vec<String>, Vec<String>)> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare("SELECT id FROM proxyPools WHERE isActive = 0")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let protect_set: std::collections::HashSet<&str> =
+            protected_ids.iter().map(|s| s.as_str()).collect();
+        let mut deleted_ids = Vec::new();
+        let mut skipped_ids = Vec::new();
+
+        for r in rows {
+            let id = r?;
+            if protect_set.contains(id.as_str()) {
+                skipped_ids.push(id);
+            } else {
+                deleted_ids.push(id);
+            }
+        }
+
+        for id in &deleted_ids {
+            guard.execute("DELETE FROM proxyPools WHERE id = ?", params![id])?;
+        }
+
+        Ok((deleted_ids.len(), deleted_ids, skipped_ids))
+    }
+
+    /// Replaces all proxy pools belonging to a specific source (e.g. "proxyscrape", "geonode").
+    pub fn replace_proxy_pools_by_source(
+        &self,
+        source: &str,
+        pools: &[ProxyPool],
+    ) -> anyhow::Result<usize> {
+        let guard = self.conn.lock().unwrap();
+        let mut stmt = guard.prepare("SELECT id, data FROM proxyPools")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let data_str: String = row.get(1)?;
+            Ok((id, data_str))
+        })?;
+
+        let mut ids_to_delete = Vec::new();
+        for r in rows {
+            let (id, data_str) = r?;
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&data_str) {
+                if val.get("source").and_then(|v| v.as_str()) == Some(source) {
+                    ids_to_delete.push(id);
+                }
+            }
+        }
+
+        for id in ids_to_delete {
+            guard.execute("DELETE FROM proxyPools WHERE id = ?", params![id])?;
+        }
+
+        for pool in pools {
+            let data_str = serde_json::to_string(&pool.data)?;
+            let is_active = if pool.is_active { 1 } else { 0 };
+            guard.execute(
+                r#"
+                INSERT INTO proxyPools(id, isActive, testStatus, data, createdAt, updatedAt)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    isActive=excluded.isActive, testStatus=excluded.testStatus, data=excluded.data, updatedAt=excluded.updatedAt
+                "#,
+                params![
+                    pool.id,
+                    is_active,
+                    pool.test_status,
+                    data_str,
+                    pool.created_at,
+                    pool.updated_at,
+                ],
+            )?;
+        }
+
+        Ok(pools.len())
     }
 
     // ==========================================
