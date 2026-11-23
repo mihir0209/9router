@@ -6560,6 +6560,57 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/videos/generations",
             axum::routing::post(crate::media::video_generations_handler).options(options_handler),
         )
+        // Video Edits
+        .route(
+            "/v1/videos/edits",
+            axum::routing::post(crate::media::video_edits_handler).options(options_handler),
+        )
+        .route(
+            "/videos/edits",
+            axum::routing::post(crate::media::video_edits_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/videos/edits",
+            axum::routing::post(crate::media::video_edits_handler).options(options_handler),
+        )
+        // Video Extensions
+        .route(
+            "/v1/videos/extensions",
+            axum::routing::post(crate::media::video_extensions_handler).options(options_handler),
+        )
+        .route(
+            "/videos/extensions",
+            axum::routing::post(crate::media::video_extensions_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/videos/extensions",
+            axum::routing::post(crate::media::video_extensions_handler).options(options_handler),
+        )
+        // Video Polling & Listing
+        .route(
+            "/v1/videos",
+            axum::routing::get(crate::media::video_list_handler).options(options_handler),
+        )
+        .route(
+            "/videos",
+            axum::routing::get(crate::media::video_list_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/videos",
+            axum::routing::get(crate::media::video_list_handler).options(options_handler),
+        )
+        .route(
+            "/v1/videos/{id}",
+            axum::routing::get(crate::media::video_get_handler).options(options_handler),
+        )
+        .route(
+            "/videos/{id}",
+            axum::routing::get(crate::media::video_get_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/videos/{id}",
+            axum::routing::get(crate::media::video_get_handler).options(options_handler),
+        )
         // Audio: Transcriptions (STT) & Speech (TTS)
         .route(
             "/v1/audio/transcriptions",
