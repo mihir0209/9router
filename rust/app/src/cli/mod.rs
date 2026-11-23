@@ -1,6 +1,7 @@
 pub mod bench;
 pub mod common;
 pub mod daemon;
+pub mod mitm;
 pub mod models;
 pub mod service;
 pub mod tokens;
@@ -39,6 +40,14 @@ OS Service Integration:
   service install          Install 9Router as native user autostart service (systemd / launchd)
   service uninstall        Remove native user autostart service
   service status           Inspect native user service status
+
+MITM Transparent TLS Interception:
+  mitm start [-d] [--port] Start transparent TLS interceptor (daemon or foreground)
+  mitm stop                Stop background MITM interceptor & clean DNS
+  mitm status              Show MITM interceptor, Root CA & DNS status
+  mitm install-ca          Install 9Router Root CA certificate into OS trust store
+  mitm uninstall-ca        Remove 9Router Root CA certificate from OS trust store
+  mitm dns [enable|disable] Configure loopback DNS in /etc/hosts
 
 Flags:
   -v, --version            Display version information
@@ -263,6 +272,10 @@ pub async fn dispatch(args: &[String]) -> anyhow::Result<bool> {
             }
             Ok(true)
         }
+        "mitm" => {
+            mitm::run_mitm_command(&args[1..]).await?;
+            Ok(true)
+        }
         _ => {
             // If unknown argument starts with -, check if help or invalid
             if first.starts_with('-') {
@@ -303,6 +316,12 @@ mod tests {
     async fn test_dispatch_test_help() {
         assert!(dispatch(&["test".to_string(), "--help".to_string()]).await.unwrap());
         assert!(dispatch(&["bench".to_string(), "-h".to_string()]).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_mitm_help() {
+        assert!(dispatch(&["mitm".to_string(), "--help".to_string()]).await.unwrap());
+        assert!(dispatch(&["mitm".to_string(), "-h".to_string()]).await.unwrap());
     }
 
     #[tokio::test]
