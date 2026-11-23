@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -11,6 +11,90 @@ use tokio::sync::mpsc;
 use tracing::{error, warn};
 
 use crate::config::Config;
+
+/// SQLite connection manager for r2d2 connection pooling.
+#[derive(Debug)]
+pub struct SqliteConnectionManager {
+    path: std::path::PathBuf,
+    is_read_only: bool,
+}
+
+impl SqliteConnectionManager {
+    pub fn new<P: AsRef<Path>>(path: P, is_read_only: bool) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            is_read_only,
+        }
+    }
+}
+
+impl r2d2::ManageConnection for SqliteConnectionManager {
+    type Connection = Connection;
+    type Error = rusqlite::Error;
+
+    fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        let flags = if self.is_read_only {
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+        } else {
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+        };
+        let conn = Connection::open_with_flags(&self.path, flags)?;
+
+        // Ensure WAL mode and busy timeout are configured on all connections
+        conn.execute_batch(
+            r#"
+            PRAGMA busy_timeout = 5000;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA foreign_keys = ON;
+            "#,
+        )?;
+
+        if self.is_read_only {
+            let _ = conn.execute_batch("PRAGMA query_only = ON;");
+        }
+
+        Ok(conn)
+    }
+
+    fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
+        conn.execute_batch("")
+    }
+
+    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
+        false
+    }
+}
+
+/// Read connection handle: wraps either a pooled connection or a writer lock guard fallback.
+pub enum ReadConnection<'a> {
+    Pooled(r2d2::PooledConnection<SqliteConnectionManager>),
+    Writer(MutexGuard<'a, Connection>),
+}
+
+impl<'a> std::ops::Deref for ReadConnection<'a> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            ReadConnection::Pooled(conn) => conn,
+            ReadConnection::Writer(guard) => guard,
+        }
+    }
+}
+
+impl<'a> std::ops::DerefMut for ReadConnection<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            ReadConnection::Pooled(conn) => conn,
+            ReadConnection::Writer(guard) => guard,
+        }
+    }
+}
 
 /// Parsed data payload for provider connections.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -459,8 +543,11 @@ impl GatewayMetrics {
 }
 
 /// Shared SQLite database handle and background write-behind coordinator.
+/// Uses a dedicated writer connection and a pool of read-only connections
+/// for concurrent, non-blocking reads across CPU cores.
 pub struct Database {
-    conn: Arc<Mutex<Connection>>,
+    writer: Arc<Mutex<Connection>>,
+    reader_pool: Option<r2d2::Pool<SqliteConnectionManager>>,
     usage_tx: mpsc::Sender<UsageRecord>,
     request_details_tx: mpsc::Sender<RequestDetail>,
     rate_limiter: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
@@ -478,19 +565,60 @@ impl Database {
     /// Opens an in-memory database instance (primarily for tests).
     pub fn open_in_memory() -> anyhow::Result<Arc<Self>> {
         let conn = Connection::open_in_memory()?;
-        Self::init_connection(conn)
+        conn.execute_batch(
+            r#"
+            PRAGMA busy_timeout = 5000;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA foreign_keys = ON;
+            "#,
+        )?;
+        Self::init_schema(&conn)?;
+        Self::create_database_instance(conn, None)
     }
 
     /// Opens a database file at the given filesystem path.
     pub fn open_path(path: &Path) -> anyhow::Result<Arc<Self>> {
+        if path.to_str() == Some(":memory:") {
+            return Self::open_in_memory();
+        }
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
-        Self::init_connection(conn)
+
+        // Configure SQLite PRAGMAs on dedicated writer connection:
+        // WAL mode, busy timeout 5000ms, synchronous NORMAL
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA busy_timeout = 5000;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA foreign_keys = ON;
+            "#,
+        )?;
+
+        // Initialize schema tables if they do not exist
+        Self::init_schema(&conn)?;
+
+        // Build read-only connection pool for non-blocking concurrent reads across threads
+        let manager = SqliteConnectionManager::new(path, true);
+        let max_pool_size = (std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4) * 4)
+            .clamp(8, 32) as u32;
+
+        let pool = r2d2::Pool::builder()
+            .max_size(max_pool_size)
+            .min_idle(Some(2))
+            .connection_timeout(Duration::from_secs(5))
+            .build(manager)
+            .map_err(|e| anyhow::anyhow!("Failed to build SQLite reader connection pool: {}", e))?;
+
+        Self::create_database_instance(conn, Some(pool))
     }
 
-    fn init_connection(conn: Connection) -> anyhow::Result<Arc<Self>> {
+    fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         // Configure SQLite PRAGMAs: WAL mode, busy timeout 5000ms, synchronous NORMAL
         conn.execute_batch(
             r#"
@@ -673,15 +801,23 @@ impl Database {
             "#
         )?;
 
+        Ok(())
+    }
+
+    fn create_database_instance(
+        conn: Connection,
+        reader_pool: Option<r2d2::Pool<SqliteConnectionManager>>,
+    ) -> anyhow::Result<Arc<Self>> {
         let (usage_tx, usage_rx) = mpsc::channel(10_000);
         let (request_details_tx, request_details_rx) = mpsc::channel(10_000);
-        let conn_arc = Arc::new(Mutex::new(conn));
+        let writer_arc = Arc::new(Mutex::new(conn));
         let rate_limiter = Arc::new(Mutex::new(HashMap::new()));
         let budget_reservations = Arc::new(Mutex::new(HashMap::new()));
         let metrics = Arc::new(GatewayMetrics::new());
 
         let db = Arc::new(Self {
-            conn: Arc::clone(&conn_arc),
+            writer: Arc::clone(&writer_arc),
+            reader_pool,
             usage_tx,
             request_details_tx,
             rate_limiter,
@@ -689,11 +825,60 @@ impl Database {
             metrics,
         });
 
-        // Spawn background workers for batching writes
-        Self::spawn_usage_worker(Arc::clone(&conn_arc), usage_rx);
-        Self::spawn_request_details_worker(Arc::clone(&conn_arc), request_details_rx);
+        // Spawn background workers for batching writes on the dedicated writer connection
+        Self::spawn_usage_worker(Arc::clone(&writer_arc), usage_rx);
+        Self::spawn_request_details_worker(Arc::clone(&writer_arc), request_details_rx);
 
         Ok(db)
+    }
+
+    /// Returns a read connection: either borrowed from the read-only pool or from the writer fallback.
+    pub fn reader(&self) -> anyhow::Result<ReadConnection<'_>> {
+        if let Some(ref pool) = self.reader_pool {
+            let conn = pool
+                .get()
+                .map_err(|e| anyhow::anyhow!("Failed to acquire reader connection from pool: {}", e))?;
+            Ok(ReadConnection::Pooled(conn))
+        } else {
+            let guard = match self.writer.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            Ok(ReadConnection::Writer(guard))
+        }
+    }
+
+    /// Alias for reader().
+    pub fn read_conn(&self) -> anyhow::Result<ReadConnection<'_>> {
+        self.reader()
+    }
+
+    /// Returns a lock guard on the dedicated writer connection.
+    pub fn writer(&self) -> MutexGuard<'_, Connection> {
+        match self.writer.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    /// Alias for writer().
+    pub fn write_conn(&self) -> MutexGuard<'_, Connection> {
+        self.writer()
+    }
+
+    /// Returns a clone of the dedicated writer connection Arc.
+    pub fn writer_arc(&self) -> Arc<Mutex<Connection>> {
+        Arc::clone(&self.writer)
+    }
+
+    /// Returns whether the database is using a reader pool (file-based) or writer fallback (in-memory).
+    pub fn is_pooled(&self) -> bool {
+        self.reader_pool.is_some()
+    }
+
+    /// Returns reader pool state if pooled.
+    pub fn reader_pool_state(&self) -> Option<r2d2::State> {
+        self.reader_pool.as_ref().map(|p| p.state())
     }
 
     /// Spawns the write-behind background task for batch inserting usage records.
@@ -901,7 +1086,7 @@ impl Database {
 
     /// Returns the total count of request details records in SQLite.
     pub fn get_request_details_count(&self) -> anyhow::Result<i64> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let count: i64 = guard.query_row("SELECT COUNT(*) FROM requestDetails", [], |r| r.get(0))?;
         Ok(count)
     }
@@ -949,7 +1134,7 @@ impl Database {
 
     /// Look up an API key by exact key string.
     pub fn get_api_key_by_key(&self, key: &str) -> anyhow::Result<Option<ApiKey>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             r#"
             SELECT id, key, name, machineId, isActive, createdAt,
@@ -969,7 +1154,7 @@ impl Database {
 
     /// Look up an API key by ID.
     pub fn get_api_key_by_id(&self, id: &str) -> anyhow::Result<Option<ApiKey>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             r#"
             SELECT id, key, name, machineId, isActive, createdAt,
@@ -989,7 +1174,7 @@ impl Database {
 
     /// Insert or replace an API key record.
     pub fn save_api_key(&self, key: &ApiKey) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         guard.execute(
             r#"
             INSERT INTO apiKeys(
@@ -1058,7 +1243,7 @@ impl Database {
 
     /// List all API keys.
     pub fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKey>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare(
             r#"
             SELECT id, key, name, machineId, isActive, createdAt,
@@ -1082,7 +1267,7 @@ impl Database {
 
     /// List API keys belonging to a specific ownerRef.
     pub fn list_api_keys_by_owner(&self, owner_ref: &str) -> anyhow::Result<Vec<ApiKey>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare(
             r#"
             SELECT id, key, name, machineId, isActive, createdAt,
@@ -1120,7 +1305,7 @@ impl Database {
 
     /// Delete an API key by ID or Key string.
     pub fn delete_api_key(&self, id: &str) -> anyhow::Result<bool> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let affected = guard.execute(
             "DELETE FROM apiKeys WHERE id = ?1 OR key = ?1",
             params![id],
@@ -1133,7 +1318,7 @@ impl Database {
     // ==========================================
 
     pub fn append_audit_event(&self, event: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let id = event
             .get("id")
             .and_then(|v| v.as_str())
@@ -1185,7 +1370,7 @@ impl Database {
         action: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut sql = "SELECT id, timestamp, actor, action, resourceType, resourceId, ownerRef, requestId, sourceIp, outcome, before, after, metadata FROM auditLog".to_string();
         let mut conditions = Vec::new();
         if owner_ref.is_some() {
@@ -1274,7 +1459,21 @@ impl Database {
             });
         };
 
-        let guard = self.conn.lock().unwrap();
+        let guard = match self.reader() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("Failed to acquire reader for get_budget_state: {}", e);
+                return json!({
+                    "enabled": true,
+                    "limit": limit,
+                    "used": 0.0,
+                    "reserved": 0.0,
+                    "remaining": limit,
+                    "exceeded": false,
+                    "resetsAt": null
+                });
+            }
+        };
         let used: f64 = if key.regenerate_version > 0 {
             guard
                 .query_row(
@@ -1389,7 +1588,11 @@ impl Database {
                 ));
             }
             let commit_model = format!("budget-commit:{}", request_id);
-            let guard = self.conn.lock().unwrap();
+            let guard = self.reader().map_err(|e| (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to acquire reader connection: {}", e),
+                None,
+            ))?;
             let existing: Option<f64> = guard
                 .query_row(
                     "SELECT cost FROM usageHistory WHERE apiKeyId = ? AND provider = 'budget' AND model = ? LIMIT 1",
@@ -1429,7 +1632,7 @@ impl Database {
                 ));
             }
 
-            let guard = self.conn.lock().unwrap();
+            let guard = self.writer();
             let _ = guard.execute(
                 r#"
                 INSERT INTO usageHistory(timestamp, provider, model, apiKey, apiKeyId, cost)
@@ -1742,7 +1945,7 @@ impl Database {
 
     /// Loads all provider connections from the database.
     pub fn load_provider_connections(&self) -> anyhow::Result<Vec<ProviderConnection>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare(
             r#"
             SELECT id, provider, authType, name, email, priority, isActive, data, createdAt, updatedAt
@@ -1791,7 +1994,7 @@ impl Database {
 
     /// Saves or updates a provider connection.
     pub fn save_provider_connection(&self, conn: &ProviderConnection) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let data_json = if conn.raw_data.trim().is_empty() {
             serde_json::to_string(&conn.data)?
         } else {
@@ -1830,7 +2033,7 @@ impl Database {
 
     /// Loads settings JSON from the database. Returns defaults if unset.
     pub fn load_settings(&self) -> anyhow::Result<serde_json::Value> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached("SELECT data FROM settings WHERE id = 1")?;
 
         let row: Option<String> = stmt.query_row([], |r| r.get(0)).optional()?;
@@ -1852,7 +2055,7 @@ impl Database {
 
     /// Saves settings JSON into the database.
     pub fn save_settings(&self, settings: &serde_json::Value) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let data_str = serde_json::to_string(settings)?;
         guard.execute(
             r#"
@@ -1866,7 +2069,7 @@ impl Database {
 
     /// Loads custom models stored under kv scope 'customModels'.
     pub fn load_custom_models(&self) -> anyhow::Result<Vec<serde_json::Value>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached("SELECT value FROM kv WHERE scope = 'customModels'")?;
         let rows = stmt.query_map([], |row| {
             let val_str: String = row.get(0)?;
@@ -1907,7 +2110,7 @@ impl Database {
         let key = format!("{}|{}|{}", provider_alias, id, model_type);
         let value_str = serde_json::to_string(model)?;
 
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         guard.execute(
             r#"
             INSERT INTO kv(scope, key, value) VALUES ('customModels', ?, ?)
@@ -1921,7 +2124,7 @@ impl Database {
     /// Deletes a custom model from kv table under scope 'customModels'.
     pub fn delete_custom_model(&self, provider_alias: &str, id: &str, model_type: &str) -> anyhow::Result<()> {
         let key = format!("{}|{}|{}", provider_alias, id, model_type);
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         guard.execute(
             "DELETE FROM kv WHERE scope = 'customModels' AND key = ?",
             params![key],
@@ -1931,7 +2134,7 @@ impl Database {
 
     /// Loads model display names from kv scope 'modelDisplayNames'.
     pub fn load_model_display_names(&self) -> anyhow::Result<std::collections::HashMap<String, String>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached("SELECT key, value FROM kv WHERE scope = 'modelDisplayNames'")?;
         let rows = stmt.query_map([], |row| {
             let key: String = row.get(0)?;
@@ -1948,7 +2151,7 @@ impl Database {
 
     /// Sets a model display name in kv scope 'modelDisplayNames'.
     pub fn set_model_display_name(&self, model_id: &str, display_name: &str) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let val_str = serde_json::to_string(display_name)?;
         guard.execute(
             r#"
@@ -1962,7 +2165,7 @@ impl Database {
 
     /// Deletes a model display name in kv scope 'modelDisplayNames'.
     pub fn delete_model_display_name(&self, model_id: &str) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         guard.execute(
             "DELETE FROM kv WHERE scope = 'modelDisplayNames' AND key = ?",
             params![model_id],
@@ -1972,7 +2175,7 @@ impl Database {
 
     /// Loads disabled models by provider alias from kv scope 'disabledModels'.
     pub fn load_disabled_models(&self) -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached("SELECT key, value FROM kv WHERE scope = 'disabledModels'")?;
         let rows = stmt.query_map([], |row| {
             let key: String = row.get(0)?;
@@ -1989,7 +2192,7 @@ impl Database {
 
     /// Disables models for a provider alias.
     pub fn disable_models(&self, provider_alias: &str, ids: &[String]) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let existing_str: Option<String> = guard
             .query_row(
                 "SELECT value FROM kv WHERE scope = 'disabledModels' AND key = ?",
@@ -2021,7 +2224,7 @@ impl Database {
 
     /// Enables models for a provider alias (removes from disabled list).
     pub fn enable_models(&self, provider_alias: &str, ids: &[String]) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         if ids.is_empty() {
             guard.execute(
                 "DELETE FROM kv WHERE scope = 'disabledModels' AND key = ?",
@@ -2068,7 +2271,7 @@ impl Database {
 
     /// Loads all model aliases from kv scope 'modelAliases'.
     pub fn load_model_aliases(&self) -> anyhow::Result<std::collections::HashMap<String, String>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached("SELECT key, value FROM kv WHERE scope = 'modelAliases'")?;
         let rows = stmt.query_map([], |row| {
             let key: String = row.get(0)?;
@@ -2085,7 +2288,7 @@ impl Database {
 
     /// Sets a model alias in kv scope 'modelAliases'.
     pub fn set_model_alias(&self, alias: &str, model: &str) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let val_str = serde_json::to_string(model)?;
         guard.execute(
             r#"
@@ -2099,7 +2302,7 @@ impl Database {
 
     /// Deletes a model alias from kv scope 'modelAliases'.
     pub fn delete_model_alias(&self, alias: &str) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         guard.execute(
             "DELETE FROM kv WHERE scope = 'modelAliases' AND key = ?",
             params![alias],
@@ -2113,7 +2316,7 @@ impl Database {
 
     /// Loads all model combos.
     pub fn load_combos(&self) -> anyhow::Result<Vec<Combo>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare(
             "SELECT id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt FROM combos ORDER BY createdAt ASC",
         )?;
@@ -2143,7 +2346,7 @@ impl Database {
 
     /// Retrieves a combo by its unique name.
     pub fn get_combo_by_name(&self, name: &str) -> anyhow::Result<Option<Combo>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             "SELECT id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt FROM combos WHERE name = ?",
         )?;
@@ -2171,7 +2374,7 @@ impl Database {
 
     /// Retrieves a combo by its ID.
     pub fn get_combo_by_id(&self, id: &str) -> anyhow::Result<Option<Combo>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             "SELECT id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt FROM combos WHERE id = ?",
         )?;
@@ -2199,7 +2402,7 @@ impl Database {
 
     /// Saves or updates a combo.
     pub fn save_combo(&self, combo: &Combo) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let models_json = serde_json::to_string(&combo.models)?;
         let strategy = combo.strategy.as_deref().unwrap_or("fallback");
         let match_rules = combo.match_rules.as_deref().unwrap_or("[]");
@@ -2230,7 +2433,7 @@ impl Database {
 
     /// Deletes a combo by ID or name.
     pub fn delete_combo(&self, id: &str) -> anyhow::Result<bool> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let affected = guard.execute(
             "DELETE FROM combos WHERE id = ?1 OR name = ?1",
             params![id],
@@ -2240,7 +2443,7 @@ impl Database {
 
     /// Bulk deletes combos by IDs.
     pub fn bulk_delete_combos(&self, ids: &[String]) -> anyhow::Result<usize> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let mut count = 0;
         for id in ids {
             let affected = guard.execute(
@@ -2254,7 +2457,7 @@ impl Database {
 
     /// Returns count of total rows in usageHistory.
     pub fn get_usage_count(&self) -> anyhow::Result<i64> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let count: i64 =
             guard.query_row("SELECT COUNT(*) FROM usageHistory", [], |r| r.get(0))?;
         Ok(count)
@@ -2262,7 +2465,7 @@ impl Database {
 
     /// Aggregates usage statistics for the given time period ("today", "24h", "7d", "30d", "60d", "all").
     pub fn get_usage_statistics(&self, period: &str) -> anyhow::Result<serde_json::Value> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
 
         let cutoff = match period {
             "today" => {
@@ -2523,7 +2726,7 @@ impl Database {
 
     /// Computes aggregated chart buckets for the specified period.
     pub fn get_chart_data(&self, period: &str) -> anyhow::Result<serde_json::Value> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
 
         let now = chrono::Utc::now();
         let (bucket_count, bucket_hours, cutoff) = match period {
@@ -2595,7 +2798,7 @@ impl Database {
     /// Aggregates per-API-key usage summary for the specified period.
     pub fn get_api_keys_usage(&self, period: &str) -> anyhow::Result<serde_json::Value> {
         let keys = self.list_api_keys()?;
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
 
         let cutoff = match period {
             "today" => {
@@ -2688,7 +2891,7 @@ impl Database {
 
     /// Returns list of unique providers found in usage history and provider nodes.
     pub fn get_usage_providers(&self) -> anyhow::Result<serde_json::Value> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut provider_set = std::collections::HashSet::new();
 
         if let Ok(mut stmt) = guard.prepare(
@@ -2734,7 +2937,7 @@ impl Database {
         model: Option<&str>,
         status: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let p = page.max(1);
         let ps = page_size.clamp(1, 100);
         let offset = (p - 1) * ps;
@@ -2890,7 +3093,13 @@ impl Database {
 
     /// Returns formatted log lines from recent usage history.
     pub fn get_recent_logs(&self, limit: i64) -> Vec<String> {
-        let guard = self.conn.lock().unwrap();
+        let guard = match self.reader() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("Failed to acquire reader for get_recent_logs: {}", e);
+                return Vec::new();
+            }
+        };
         let l = limit.clamp(1, 500);
         let mut logs = Vec::new();
 
@@ -2927,7 +3136,7 @@ impl Database {
 
     /// Loads all provider nodes (custom endpoints with prefixes).
     pub fn load_provider_nodes(&self) -> anyhow::Result<Vec<ProviderNode>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare(
             "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes ORDER BY createdAt ASC",
         )?;
@@ -2967,7 +3176,7 @@ impl Database {
 
     /// Saves or updates a provider node.
     pub fn save_provider_node(&self, node: &ProviderNode) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let data_str = serde_json::to_string(&node.data)?;
         guard.execute(
             r#"
@@ -2990,7 +3199,7 @@ impl Database {
 
     /// Deletes a provider node by ID.
     pub fn delete_provider_node(&self, id: &str) -> anyhow::Result<bool> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let affected = guard.execute(
             "DELETE FROM providerNodes WHERE id = ?1",
             params![id],
@@ -3000,7 +3209,7 @@ impl Database {
 
     /// Retrieves a single provider node by ID.
     pub fn get_provider_node_by_id(&self, id: &str) -> anyhow::Result<Option<ProviderNode>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes WHERE id = ?",
         )?;
@@ -3043,7 +3252,7 @@ impl Database {
 
     /// Loads all proxy pool configurations.
     pub fn load_proxy_pools(&self) -> anyhow::Result<Vec<ProxyPool>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare(
             "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools ORDER BY createdAt ASC",
         )?;
@@ -3076,7 +3285,7 @@ impl Database {
 
     /// Retrieves a single proxy pool by ID.
     pub fn get_proxy_pool_by_id(&self, id: &str) -> anyhow::Result<Option<ProxyPool>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools WHERE id = ?",
         )?;
@@ -3108,7 +3317,7 @@ impl Database {
 
     /// Upserts a proxy pool configuration into the database.
     pub fn save_proxy_pool(&self, pool: &ProxyPool) -> anyhow::Result<()> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let data_str = serde_json::to_string(&pool.data)?;
         let is_active = if pool.is_active { 1 } else { 0 };
         guard.execute(
@@ -3132,7 +3341,7 @@ impl Database {
 
     /// Deletes a proxy pool by ID.
     pub fn delete_proxy_pool(&self, id: &str) -> anyhow::Result<bool> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let affected = guard.execute(
             "DELETE FROM proxyPools WHERE id = ?1",
             params![id],
@@ -3145,7 +3354,7 @@ impl Database {
         &self,
         protected_ids: &[String],
     ) -> anyhow::Result<(usize, Vec<String>, Vec<String>)> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let mut stmt = guard.prepare("SELECT id FROM proxyPools WHERE isActive = 0")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let protect_set: std::collections::HashSet<&str> =
@@ -3175,7 +3384,7 @@ impl Database {
         source: &str,
         pools: &[ProxyPool],
     ) -> anyhow::Result<usize> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.writer();
         let mut stmt = guard.prepare("SELECT id, data FROM proxyPools")?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -3227,7 +3436,7 @@ impl Database {
 
     /// Loads all rate-limit / token usage plans.
     pub fn load_plans(&self) -> anyhow::Result<Vec<Plan>> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
         let mut stmt = guard.prepare(
             "SELECT id, tenant_id, name, description, limit_micros, limit_tokens, rpm_limit, tpm_limit, concurrency_limit, period, alert_pct, hard_cutoff, allowed_models, created_at, updated_at FROM plans ORDER BY created_at ASC",
         )?;
@@ -3300,7 +3509,7 @@ impl Database {
 
     /// Exports full database backup payload matching Next.js exportDb schema.
     pub fn export_database(&self) -> anyhow::Result<serde_json::Value> {
-        let guard = self.conn.lock().unwrap();
+        let guard = self.reader()?;
 
         let settings = match guard.prepare_cached("SELECT data FROM settings WHERE id = 1") {
             Ok(mut stmt) => stmt
@@ -3586,7 +3795,7 @@ impl Database {
             anyhow::bail!("Invalid database payload: it contains none of the backup tables");
         }
 
-        let mut guard = self.conn.lock().unwrap();
+        let mut guard = self.writer();
         let tx = guard.transaction()?;
 
         // Wipe tables (preserve _meta and usageHistory)
@@ -4174,5 +4383,141 @@ mod tests {
         let reloaded_combos = db2.load_combos().expect("load combos db2");
         assert_eq!(reloaded_combos.len(), 1);
         assert_eq!(reloaded_combos[0].name, "smart-fallback");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_reader_pool_file_based() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp_dir = std::env::temp_dir();
+        let test_id = format!("ninerouter_pool_test_{}_{}", std::process::id(), Utc::now().timestamp_micros());
+        let db_path = temp_dir.join(format!("{}.db", test_id));
+
+        // Clean up any stale file
+        let _ = std::fs::remove_file(&db_path);
+
+        let db = Database::open_path(&db_path).expect("open file-based db");
+        assert!(db.is_pooled(), "File-based database must be pooled");
+
+        // Verify WAL mode on dedicated writer
+        {
+            let guard = db.writer();
+            let journal_mode: String = guard
+                .query_row("PRAGMA journal_mode;", [], |r| r.get(0))
+                .expect("query journal_mode");
+            assert_eq!(journal_mode.to_lowercase(), "wal");
+
+            let busy_timeout: i64 = guard
+                .query_row("PRAGMA busy_timeout;", [], |r| r.get(0))
+                .expect("query busy_timeout");
+            assert_eq!(busy_timeout, 5000);
+        }
+
+        // Verify pooled reader has busy_timeout and query_only configured
+        {
+            let reader = db.reader().expect("acquire reader");
+            let busy_timeout: i64 = reader
+                .query_row("PRAGMA busy_timeout;", [], |r| r.get(0))
+                .expect("query busy_timeout");
+            assert_eq!(busy_timeout, 5000);
+
+            let query_only: i64 = reader
+                .query_row("PRAGMA query_only;", [], |r| r.get(0))
+                .expect("query query_only");
+            assert_eq!(query_only, 1);
+        }
+
+        // Insert seed API key on writer
+        let key = ApiKey {
+            id: "key-concurrent-1".to_string(),
+            key: "sk-pool-concurrent-test".to_string(),
+            name: Some("Concurrent Key".to_string()),
+            is_active: true,
+            ..Default::default()
+        };
+        db.save_api_key(&key).expect("save api key");
+
+        // Spawn multiple concurrent reader tasks reading simultaneously across CPU cores
+        let reader_count = 8;
+        let reads_per_thread = 50;
+        let successful_reads = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..reader_count {
+            let db_clone = Arc::clone(&db);
+            let counter = Arc::clone(&successful_reads);
+
+            handles.push(tokio::spawn(async move {
+                for _ in 0..reads_per_thread {
+                    let k = db_clone
+                        .get_api_key_by_key("sk-pool-concurrent-test")
+                        .expect("read key from pool");
+                    assert!(k.is_some());
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+
+        // Concurrently perform writes on dedicated writer while readers are executing
+        for i in 0..10 {
+            db.record_request_detail(RequestDetail {
+                id: format!("req_concurrent_{}", i),
+                timestamp: Utc::now().to_rfc3339(),
+                provider: Some("openai".to_string()),
+                model: Some("gpt-4o".to_string()),
+                status: Some("ok".to_string()),
+                ..Default::default()
+            });
+            tokio::task::yield_now().await;
+        }
+
+        for h in handles {
+            h.await.expect("reader task join");
+        }
+
+        assert_eq!(
+            successful_reads.load(Ordering::Relaxed),
+            reader_count * reads_per_thread
+        );
+
+        // Verify pool state shows connections were used
+        if let Some(state) = db.reader_pool_state() {
+            assert!(state.connections > 0);
+        }
+
+        // Clean up temp database files
+        drop(db);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(temp_dir.join(format!("{}.db-wal", test_id)));
+        let _ = std::fs::remove_file(temp_dir.join(format!("{}.db-shm", test_id)));
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_writer_fallback() {
+        let db = Database::open_in_memory().expect("open in memory db");
+        assert!(!db.is_pooled(), "In-memory database should use writer fallback");
+
+        // Verify busy timeout on writer
+        {
+            let guard = db.writer();
+            let busy_timeout: i64 = guard
+                .query_row("PRAGMA busy_timeout;", [], |r| r.get(0))
+                .expect("query busy_timeout");
+            assert_eq!(busy_timeout, 5000);
+        }
+
+        // Reader should work seamlessly via fallback
+        let key = ApiKey {
+            id: "key-inmem-1".to_string(),
+            key: "sk-inmem-test".to_string(),
+            name: Some("Inmem Key".to_string()),
+            is_active: true,
+            ..Default::default()
+        };
+        db.save_api_key(&key).expect("save api key");
+
+        let loaded = db.get_api_key_by_key("sk-inmem-test").expect("read key");
+        assert_eq!(loaded.unwrap().id, "key-inmem-1");
     }
 }
