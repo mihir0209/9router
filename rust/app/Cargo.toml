@@ -14,6 +14,9 @@ name = "9r"
 path = "src/main.rs"
 
 [dependencies]
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio", "client", "client-legacy"] }
+http-body-util = "0.1"
 axum = { version = "0.8", features = ["macros", "multipart"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
@@ -38,6 +41,10 @@ base64 = "0.22"
 bcrypt = "0.19.3"
 url = "2.5"
 percent-encoding = "2.3"
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+tokio-rustls = "0.26.6"
+rustls = "0.23.46"
+rustls-pki-types = "1.16.0"
 
 [workspace]
 

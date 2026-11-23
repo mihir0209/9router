@@ -98,6 +98,32 @@ pub fn resolve_api_key(key_opt: Option<String>) -> Option<String> {
     resolve_api_key_from_dir(key_opt, &base_dir)
 }
 
+/// Standard graceful shutdown signal listener (Ctrl+C and SIGTERM)
+pub async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut stream) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            stream.recv().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
