@@ -1,30 +1,144 @@
+# ==============================================================================
+# 9Router Docker Compose Deployment Architecture
+# Two Production Profiles:
+#   1. sqlite:   Single-node ultra-high-performance 9Router with lock-free WAL mode
+#   2. postgres: Clustered 9Router with native Postgres adapter (db_pg.rs)
+# ==============================================================================
+
+name: ninerouter
+
 services:
-  9router:
+  # ============================================================================
+  # PROFILE: sqlite (Single-Node High-Performance Gateway)
+  # ============================================================================
+  9router-sqlite:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: mihir0209/9router:latest
-    container_name: 9router
-    restart: always
+    container_name: 9router-sqlite
+    restart: unless-stopped
+    profiles:
+      - sqlite
+    ports:
+      - "20127:20127"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "20127"
+      DATA_DIR: "/app/data"
+      STANDALONE: "1"
+      NODE_ENV: "production"
+      SQLITE_JOURNAL_MODE: "WAL"
+      SQLITE_SYNCHRONOUS: "NORMAL"
+    volumes:
+      - 9router-sqlite-data:/app/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/9r", "test", "-p", "20127", "-n", "1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - 9router-net
+
+  # ============================================================================
+  # PROFILE: postgres (Clustered Multi-Node Gateway with Centralized State)
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: 9router-postgres-db
+    restart: unless-stopped
+    profiles:
+      - postgres
+    environment:
+      POSTGRES_USER: ninerouter
+      POSTGRES_PASSWORD: ninerouter_cluster_secret
+      POSTGRES_DB: ninerouter
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - 9router-postgres-data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    ports:
+      - "54332:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ninerouter -d ninerouter"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - 9router-net
+
+  9router-pg-primary:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mihir0209/9router:latest
+    container_name: 9router-pg-primary
+    restart: unless-stopped
+    profiles:
+      - postgres
+    ports:
+      - "20127:20127"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "20127"
+      STANDALONE: "1"
+      NODE_ENV: "production"
+      DATABASE_URL: "postgres://ninerouter:ninerouter_cluster_secret@postgres:5432/ninerouter"
+      DB_POOL_MAX: "10"
+      DB_SSL: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/9r", "test", "-p", "20127", "-n", "1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - 9router-net
+
+  9router-pg-replica:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mihir0209/9router:latest
+    container_name: 9router-pg-replica
+    restart: unless-stopped
+    profiles:
+      - postgres
     ports:
       - "20128:20128"
-    volumes:
-      - 9router-data:/app/data
-    env_file:
-      - .env
     environment:
-      DATA_DIR: /app/data
-      PORT: "20128"
       HOST: "0.0.0.0"
+      PORT: "20128"
       STANDALONE: "1"
-      HEADROOM_URL: http://headroom:8787
+      NODE_ENV: "production"
+      DATABASE_URL: "postgres://ninerouter:ninerouter_cluster_secret@postgres:5432/ninerouter"
+      DB_POOL_MAX: "10"
+      DB_SSL: "false"
     depends_on:
-      - headroom
-
-  headroom:
-    image: ghcr.io/chopratejas/headroom:latest
-    container_name: headroom
-    restart: always
-    ports:
-      - "127.0.0.1:8787:8787"
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/9r", "test", "-p", "20128", "-n", "1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - 9router-net
 
 volumes:
-  9router-data:
-    name: 9router-data
+  9router-sqlite-data:
+    name: 9router-sqlite-data
+  9router-postgres-data:
+    name: 9router-postgres-data
+
+networks:
+  9router-net:
+    name: 9router-net
+    driver: bridge

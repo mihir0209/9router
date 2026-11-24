@@ -6476,6 +6476,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/health",
             axum::routing::get(health_handler).options(options_handler),
         )
+        .route(
+            "/health",
+            axum::routing::get(health_handler).options(options_handler),
+        )
         // Models
         .route(
             "/v1/models",

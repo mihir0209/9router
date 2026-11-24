@@ -90,6 +90,42 @@ services:
       - "8787:8787"
 ```
 
+## Docker Compose Profiles
+
+`docker-compose.yml` provides two production service profiles:
+
+### 1. SQLite Profile (Single-Node High Performance)
+Runs single-node 9Router with lock-free WAL journal mode and persistent volume mount:
+
+```bash
+docker compose --profile sqlite up -d
+```
+
+### 2. Postgres Profile (Clustered Multi-Node)
+Runs clustered 9Router connected to a healthy PostgreSQL 16 Alpine database with connection pooling and schema isolation:
+
+```bash
+docker compose --profile postgres up -d
+```
+
+---
+
+# ☸ Kubernetes Production Deployment
+
+Full Kubernetes manifests are available in [`deploy/k8s/`](file:///home/ghostrider/.gemini/antigravity/worktrees/d6bd882f-9161-40f7-b8fb-24810377c66b/swarm-container-k8s-9e722acc/deploy/k8s/):
+- **Deployment**: 2+ replicas, resource bounds (`requests: 100m/64Mi`, `limits: 500m/256Mi`), rolling updates, and nonroot distroless security.
+- **Probes**: Startup, Liveness, and Readiness probes targeting `/health`.
+- **Services**: `ClusterIP` (east-west) and `LoadBalancer` (north-south) on port `20127`.
+- **Autoscaler**: `HorizontalPodAutoscaler` targeting 70% CPU utilization.
+- **Configuration**: ConfigMap and Secret templates.
+
+Deploy with Kustomize:
+```bash
+kubectl apply -k deploy/k8s/
+```
+
+---
+
 ## Update to latest
 
 ```bash

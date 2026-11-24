@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: 9router-config
+  namespace: 9router
+  labels:
+    app.kubernetes.io/name: 9router
+    app.kubernetes.io/part-of: 9router-gateway
+data:
+  HOST: "0.0.0.0"
+  PORT: "20127"
+  STANDALONE: "1"
+  NODE_ENV: "production"
+  DATA_DIR: "/app/data"
+  MODELS_LIST_SOURCE: "live"
+  ENABLE_REQUEST_LOGS: "false"
+  DB_POOL_MAX: "10"
+  DB_SSL: "false"

@@ -22,12 +22,31 @@ else
 fi
 
 # Step 2: Build the Rust binary with embedded assets
-echo "🦀 [2/2] Compiling native Rust binary with rust-embed..."
-cargo build --release --manifest-path rust/app/Cargo.toml
+TARGET_FLAG=""
+if [ "${1:-}" = "--musl" ] || [ "${1:-}" = "--distroless" ] || [ "${2:-}" = "--musl" ] || [ "${2:-}" = "--distroless" ]; then
+    TARGET_FLAG="--target x86_64-unknown-linux-musl"
+    echo "🦀 [2/2] Compiling static musl Rust binary ($TARGET_FLAG)..."
+else
+    echo "🦀 [2/2] Compiling native Rust binary with rust-embed..."
+fi
 
-BINARY="$PROJECT_ROOT/rust/app/target/release/9r"
-if [ ! -f "$BINARY" ]; then
-    BINARY="$PROJECT_ROOT/rust/app/target/release/ninerouter"
+cargo build --release $TARGET_FLAG --manifest-path rust/app/Cargo.toml
+
+if [ -n "$TARGET_FLAG" ]; then
+    BINARY="$PROJECT_ROOT/rust/app/target/x86_64-unknown-linux-musl/release/9r"
+    if [ ! -f "$BINARY" ]; then
+        BINARY="$PROJECT_ROOT/rust/app/target/x86_64-unknown-linux-musl/release/ninerouter"
+    fi
+    mkdir -p "$PROJECT_ROOT/release_assets"
+    cp "$BINARY" "$PROJECT_ROOT/release_assets/9r-linux-x64"
+    if which upx >/dev/null 2>&1; then
+        upx --best --lzma "$PROJECT_ROOT/release_assets/9r-linux-x64" 2>/dev/null || true
+    fi
+else
+    BINARY="$PROJECT_ROOT/rust/app/target/release/9r"
+    if [ ! -f "$BINARY" ]; then
+        BINARY="$PROJECT_ROOT/rust/app/target/release/ninerouter"
+    fi
 fi
 
 if [ -f "$BINARY" ]; then
