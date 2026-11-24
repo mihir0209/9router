@@ -2178,7 +2178,7 @@ mod tests {
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = std::sync::Arc::clone(&combo_tracker.circuit_breakers);
         let state = crate::routes::AppState {
-            config,
+            config: std::sync::Arc::clone(&config),
             db: db.clone(),
             proxy: std::sync::Arc::clone(&proxy),
             original,
@@ -2186,6 +2186,7 @@ mod tests {
             token_cache,
             circuit_breaker,
             console_buffer: crate::routes::ConsoleLogBuffer::new(),
+            rate_limiter: std::sync::Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
         };
         let app = crate::routes::create_router(state);
         (app, db, proxy)

@@ -9,6 +9,7 @@ use axum::{
 use serde_json::json;
 
 use crate::db::{ApiKey, Database, KeyValidationError};
+pub use crate::ratelimit::*;
 
 /// Standard auth error representation aligning with OpenAI error responses.
 #[derive(Debug, Clone)]
@@ -17,52 +18,149 @@ pub enum AuthError {
     InvalidApiKey,
     DisabledApiKey,
     ExpiredApiKey,
-    RateLimitExceeded { limit: i64, window_seconds: i64 },
+    RateLimitExceeded {
+        limit: i64,
+        window_seconds: i64,
+    },
+    IpRateLimitExceeded {
+        ip: String,
+        limit: u32,
+        window_seconds: u64,
+        retry_after: u64,
+        quota_type: &'static str,
+    },
+    ModelRateLimitExceeded {
+        model: String,
+        limit: u64,
+        quota_type: &'static str,
+        window_seconds: u64,
+        retry_after: u64,
+    },
     ModelForbidden(String),
     Internal(String),
 }
 
+impl From<RateLimitError> for AuthError {
+    fn from(err: RateLimitError) -> Self {
+        match err {
+            RateLimitError::IpRateLimited {
+                ip,
+                limit,
+                window_secs,
+                retry_after,
+                quota_type,
+            } => Self::IpRateLimitExceeded {
+                ip,
+                limit,
+                window_seconds: window_secs,
+                retry_after,
+                quota_type,
+            },
+            RateLimitError::ModelRateLimited {
+                model,
+                limit,
+                window_secs,
+                retry_after,
+                quota_type,
+            } => Self::ModelRateLimitExceeded {
+                model,
+                limit,
+                quota_type,
+                window_seconds: window_secs,
+                retry_after,
+            },
+        }
+    }
+}
+
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
-        let (status, message, error_type): (StatusCode, String, &'static str) = match self {
+        let mut retry_after_hdr: Option<u64> = None;
+        let (status, message, error_type, param): (StatusCode, String, &'static str, Option<&'static str>) = match self {
             Self::MissingApiKey => (
                 StatusCode::UNAUTHORIZED,
                 "Missing API key. Provide via 'Authorization: Bearer <key>' or 'x-api-key' header.".to_string(),
                 "authentication_error",
+                None,
             ),
             Self::InvalidApiKey => (
                 StatusCode::UNAUTHORIZED,
                 "Invalid API key provided.".to_string(),
                 "authentication_error",
+                None,
             ),
             Self::DisabledApiKey => (
                 StatusCode::UNAUTHORIZED,
                 "The provided API key is disabled.".to_string(),
                 "authentication_error",
+                None,
             ),
             Self::ExpiredApiKey => (
                 StatusCode::UNAUTHORIZED,
                 "The provided API key has expired.".to_string(),
                 "authentication_error",
+                None,
             ),
             Self::RateLimitExceeded {
                 limit,
                 window_seconds,
-            } => (
-                StatusCode::TOO_MANY_REQUESTS,
-                format!(
-                    "Rate limit exceeded: max {} requests per {}s.",
-                    limit, window_seconds
-                ),
-                "rate_limit_error",
-            ),
+            } => {
+                retry_after_hdr = Some(1);
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "Rate limit exceeded: max {} requests per {}s.",
+                        limit, window_seconds
+                    ),
+                    "rate_limit_error",
+                    None,
+                )
+            }
+            Self::IpRateLimitExceeded {
+                ip,
+                limit,
+                window_seconds,
+                retry_after,
+                quota_type,
+            } => {
+                retry_after_hdr = Some(retry_after.max(1));
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "Rate limit exceeded for client IP {}: limit of {} requests per {}s ({}) exceeded. Please retry after {}s.",
+                        ip, limit, window_seconds, quota_type, retry_after
+                    ),
+                    "rate_limit_error",
+                    Some("ip"),
+                )
+            }
+            Self::ModelRateLimitExceeded {
+                model,
+                limit,
+                quota_type,
+                window_seconds,
+                retry_after,
+            } => {
+                retry_after_hdr = Some(retry_after.max(1));
+                let unit = if quota_type == "TPM" { "tokens" } else { "requests" };
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "Rate limit exceeded for model '{}': limit of {} {} per {}s ({}) exceeded. Please retry after {}s.",
+                        model, limit, unit, window_seconds, quota_type, retry_after
+                    ),
+                    "rate_limit_error",
+                    Some("model"),
+                )
+            }
             Self::ModelForbidden(reason) => {
-                (StatusCode::FORBIDDEN, reason, "permission_denied")
+                (StatusCode::FORBIDDEN, reason, "permission_denied", None)
             }
             Self::Internal(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 msg,
                 "internal_server_error",
+                None,
             ),
         };
 
@@ -70,15 +168,17 @@ impl IntoResponse for AuthError {
             "error": {
                 "message": message,
                 "type": error_type,
-                "param": null,
+                "param": param,
                 "code": status.as_u16(),
             }
         }));
 
         let mut res = (status, body).into_response();
         if status == StatusCode::TOO_MANY_REQUESTS {
-            res.headers_mut()
-                .insert(header::RETRY_AFTER, "1".parse().unwrap());
+            let retry_str = retry_after_hdr.unwrap_or(1).to_string();
+            if let Ok(hdr) = retry_str.parse() {
+                res.headers_mut().insert(header::RETRY_AFTER, hdr);
+            }
         }
         res
     }
@@ -567,6 +667,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RateLimitConfig;
     use axum::http::Request;
     use chrono::Utc;
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -836,5 +937,313 @@ mod tests {
         unsafe {
             std::env::remove_var("ROUTER_API_KEY");
         }
+    }
+
+    // =========================================================================
+    // Rate Limiting Unit Tests (Per-IP, Per-Model, Window Reset & Concurrency)
+    // =========================================================================
+
+    #[test]
+    fn test_extract_client_ip_headers_priority_and_fallbacks() {
+        use std::net::SocketAddr;
+
+        // 1. cf-connecting-ip priority over everything
+        let mut h = HeaderMap::new();
+        h.insert("cf-connecting-ip", "198.51.100.1".parse().unwrap());
+        h.insert("x-forwarded-for", "203.0.113.195, 70.41.3.18".parse().unwrap());
+        h.insert("x-real-ip", "192.0.2.1".parse().unwrap());
+        let peer: SocketAddr = "10.0.0.1:12345".parse().unwrap();
+        assert_eq!(extract_client_ip(&h, Some(peer)), "198.51.100.1");
+
+        // 2. x-forwarded-for first IP priority over x-real-ip and peer_addr
+        let mut h2 = HeaderMap::new();
+        h2.insert("x-forwarded-for", "  203.0.113.195  , 70.41.3.18 ".parse().unwrap());
+        h2.insert("x-real-ip", "192.0.2.1".parse().unwrap());
+        assert_eq!(extract_client_ip(&h2, Some(peer)), "203.0.113.195");
+
+        // 3. x-real-ip priority over peer_addr
+        let mut h3 = HeaderMap::new();
+        h3.insert("x-real-ip", "192.0.2.1:8080".parse().unwrap());
+        assert_eq!(extract_client_ip(&h3, Some(peer)), "192.0.2.1");
+
+        // 4. peer_addr when no headers present
+        let h4 = HeaderMap::new();
+        assert_eq!(extract_client_ip(&h4, Some(peer)), "10.0.0.1");
+
+        // 5. Default fallback to 127.0.0.1 when nothing present
+        assert_eq!(extract_client_ip(&h4, None), "127.0.0.1");
+
+        // 6. Normalization with IPv6 addresses
+        let mut h5 = HeaderMap::new();
+        h5.insert("cf-connecting-ip", "2001:db8::1".parse().unwrap());
+        assert_eq!(extract_client_ip(&h5, None), "2001:db8::1");
+    }
+
+    #[test]
+    fn test_ip_rate_limiting_rpm_and_rps_throttling() {
+        let mut cfg = RateLimitConfig::default();
+        cfg.ip_rate_limit_enabled = true;
+        cfg.ip_rpm = Some(3); // 3 requests per 60s
+        cfg.ip_rps = Some(2); // 2 requests per 1s
+        cfg.ip_window_secs = 60;
+
+        let limiter = RateLimiter::new(cfg);
+        let client_ip = "192.168.1.50";
+
+        // First 2 requests within same second succeed
+        assert!(limiter.check_ip(client_ip).is_ok());
+        assert!(limiter.check_ip(client_ip).is_ok());
+
+        // 3rd request in same second fails due to RPS limit (2 RPS)
+        let rps_err = limiter.check_ip(client_ip);
+        assert!(rps_err.is_err());
+        if let Err(RateLimitError::IpRateLimited { ip, limit, quota_type, .. }) = rps_err {
+            assert_eq!(ip, client_ip);
+            assert_eq!(limit, 2);
+            assert_eq!(quota_type, "RPS");
+        } else {
+            panic!("Expected RPS RateLimitError");
+        }
+
+        // Test RPM limit with RPS disabled
+        let mut cfg2 = RateLimitConfig::default();
+        cfg2.ip_rate_limit_enabled = true;
+        cfg2.ip_rpm = Some(2);
+        cfg2.ip_window_secs = 60;
+        let limiter2 = RateLimiter::new(cfg2);
+
+        assert!(limiter2.check_ip("10.1.1.1").is_ok());
+        assert!(limiter2.check_ip("10.1.1.1").is_ok());
+
+        let rpm_err = limiter2.check_ip("10.1.1.1");
+        assert!(rpm_err.is_err());
+        if let Err(RateLimitError::IpRateLimited { ip, limit, quota_type, retry_after, .. }) = rpm_err {
+            assert_eq!(ip, "10.1.1.1");
+            assert_eq!(limit, 2);
+            assert_eq!(quota_type, "RPM");
+            assert!(retry_after >= 1);
+        } else {
+            panic!("Expected RPM RateLimitError");
+        }
+    }
+
+    #[test]
+    fn test_ip_rate_limiting_allowlist_bypass() {
+        let mut cfg = RateLimitConfig::default();
+        cfg.ip_rate_limit_enabled = true;
+        cfg.ip_rpm = Some(1);
+        cfg.ip_allowlist = vec!["127.0.0.1".to_string(), "10.0.0.99".to_string()];
+
+        let limiter = RateLimiter::new(cfg);
+
+        // Allowlisted IP never gets throttled
+        for _ in 0..10 {
+            assert!(limiter.check_ip("127.0.0.1").is_ok());
+            assert!(limiter.check_ip("10.0.0.99").is_ok());
+        }
+
+        // Non-allowlisted IP is throttled on request 2
+        assert!(limiter.check_ip("192.168.1.10").is_ok());
+        assert!(limiter.check_ip("192.168.1.10").is_err());
+    }
+
+    #[test]
+    fn test_ip_rate_limiting_window_reset() {
+        let mut cfg = RateLimitConfig::default();
+        cfg.ip_rate_limit_enabled = true;
+        cfg.ip_rpm = Some(1);
+        let limiter = RateLimiter::new(cfg);
+
+        assert!(limiter.check_ip("1.1.1.1").is_ok());
+        assert!(limiter.check_ip("1.1.1.1").is_err());
+
+        // Explicit reset enables immediate access
+        limiter.reset_ip("1.1.1.1");
+        assert!(limiter.check_ip("1.1.1.1").is_ok());
+    }
+
+    #[test]
+    fn test_model_rate_limiting_rpm_and_tpm() {
+        let mut cfg = RateLimitConfig::default();
+        cfg.model_rate_limit_enabled = true;
+        cfg.model_default_rpm = Some(2);
+        cfg.model_default_tpm = Some(1000);
+
+        let mut limits = std::collections::HashMap::new();
+        limits.insert(
+            "gpt-4o".to_string(),
+            crate::config::ModelLimitConfig {
+                rpm: Some(2),
+                tpm: Some(500),
+            },
+        );
+        cfg.model_limits = limits;
+
+        let limiter = RateLimiter::new(cfg);
+
+        // Check model RPM limit (gpt-4o limit: 2 RPM)
+        assert!(limiter.check_model("gpt-4o", 100).is_ok());
+        assert!(limiter.check_model("gpt-4o", 100).is_ok());
+
+        let rpm_err = limiter.check_model("gpt-4o", 50);
+        assert!(rpm_err.is_err());
+        if let Err(RateLimitError::ModelRateLimited { model, limit, quota_type, retry_after, .. }) = rpm_err {
+            assert_eq!(model, "gpt-4o");
+            assert_eq!(limit, 2);
+            assert_eq!(quota_type, "RPM");
+            assert!(retry_after >= 1);
+        } else {
+            panic!("Expected Model RPM error");
+        }
+
+        // Check model TPM limit
+        limiter.reset_model("gpt-4o");
+        // Request 1: 300 tokens (allowed, total 300)
+        assert!(limiter.check_model("gpt-4o", 300).is_ok());
+        // Request 2: 300 tokens -> 300 + 300 = 600 > 500 limit (rejected)
+        let tpm_err = limiter.check_model("gpt-4o", 300);
+        assert!(tpm_err.is_err());
+        if let Err(RateLimitError::ModelRateLimited { quota_type, limit, .. }) = tpm_err {
+            assert_eq!(quota_type, "TPM");
+            assert_eq!(limit, 500);
+        } else {
+            panic!("Expected Model TPM error");
+        }
+    }
+
+    #[test]
+    fn test_model_partition_isolation() {
+        let mut cfg = RateLimitConfig::default();
+        cfg.model_rate_limit_enabled = true;
+
+        let mut limits = std::collections::HashMap::new();
+        limits.insert(
+            "gpt-4o".to_string(),
+            crate::config::ModelLimitConfig {
+                rpm: Some(1),
+                tpm: Some(100000),
+            },
+        );
+        limits.insert(
+            "claude-3-7-sonnet".to_string(),
+            crate::config::ModelLimitConfig {
+                rpm: Some(5),
+                tpm: Some(100000),
+            },
+        );
+        limits.insert(
+            "deepseek-r1".to_string(),
+            crate::config::ModelLimitConfig {
+                rpm: Some(5),
+                tpm: Some(100000),
+            },
+        );
+        cfg.model_limits = limits;
+
+        let limiter = RateLimiter::new(cfg);
+
+        // Exhaust gpt-4o (limit 1 RPM)
+        assert!(limiter.check_model("gpt-4o", 100).is_ok());
+        assert!(limiter.check_model("gpt-4o", 100).is_err());
+
+        // Verify claude-3-7-sonnet and deepseek-r1 are completely unaffected!
+        assert!(limiter.check_model("claude-3-7-sonnet", 100).is_ok());
+        assert!(limiter.check_model("claude-3-7-sonnet", 100).is_ok());
+        assert!(limiter.check_model("deepseek-r1", 100).is_ok());
+        assert!(limiter.check_model("deepseek-r1", 100).is_ok());
+
+        // Provider prefixes strip correctly ("openai/gpt-4o" matches "gpt-4o")
+        assert!(limiter.check_model("openai/gpt-4o", 100).is_err());
+    }
+
+    #[test]
+    fn test_rate_limiter_auto_cleanup() {
+        let mut cfg = RateLimitConfig::default();
+        cfg.ip_rate_limit_enabled = true;
+        cfg.ip_rpm = Some(10);
+        cfg.model_rate_limit_enabled = true;
+        cfg.model_default_rpm = Some(10);
+
+        let limiter = RateLimiter::new(cfg);
+
+        // Track 2 IPs and 2 models
+        assert!(limiter.check_ip("10.0.0.1").is_ok());
+        assert!(limiter.check_ip("10.0.0.2").is_ok());
+        assert!(limiter.check_model("gpt-4o", 10).is_ok());
+        assert!(limiter.check_model("claude-3-7-sonnet", 10).is_ok());
+
+        assert_eq!(limiter.tracked_ips_count(), 2);
+        assert_eq!(limiter.tracked_models_count(), 2);
+
+        // Calling cleanup with a long idle threshold (e.g., 100s) keeps active entries
+        let (p_ip, p_mod) = limiter.cleanup(std::time::Duration::from_secs(100));
+        assert_eq!(p_ip, 0);
+        assert_eq!(p_mod, 0);
+        assert_eq!(limiter.tracked_ips_count(), 2);
+        assert_eq!(limiter.tracked_models_count(), 2);
+
+        // Calling cleanup with zero duration prunes all idle entries
+        let (p_ip2, p_mod2) = limiter.cleanup(std::time::Duration::from_nanos(0));
+        assert_eq!(p_ip2, 2);
+        assert_eq!(p_mod2, 2);
+        assert_eq!(limiter.tracked_ips_count(), 0);
+        assert_eq!(limiter.tracked_models_count(), 0);
+    }
+
+    #[test]
+    fn test_rate_limiter_concurrent_safety() {
+        use std::sync::Arc;
+        let mut cfg = RateLimitConfig::default();
+        cfg.ip_rate_limit_enabled = true;
+        cfg.ip_rpm = Some(500);
+        cfg.model_rate_limit_enabled = true;
+        cfg.model_default_rpm = Some(500);
+
+        let limiter = Arc::new(RateLimiter::new(cfg));
+        let mut handles = Vec::new();
+
+        // 16 concurrent threads each performing 50 operations
+        for thread_idx in 0..16 {
+            let lim = Arc::clone(&limiter);
+            handles.push(std::thread::spawn(move || {
+                let ip = format!("10.10.{}.1", thread_idx % 4);
+                let model = if thread_idx % 2 == 0 { "gpt-4o" } else { "claude-3-7-sonnet" };
+                for _ in 0..50 {
+                    let _ = lim.check_ip(&ip);
+                    let _ = lim.check_model(model, 10);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread join succeeded");
+        }
+
+        assert!(limiter.tracked_ips_count() <= 4);
+        assert!(limiter.tracked_models_count() <= 2);
+    }
+
+    #[test]
+    fn test_auth_error_rate_limiting_response_format() {
+        use axum::response::IntoResponse;
+
+        let err = AuthError::IpRateLimitExceeded {
+            ip: "203.0.113.5".to_string(),
+            limit: 60,
+            window_seconds: 60,
+            retry_after: 12,
+            quota_type: "RPM",
+        };
+
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER).unwrap().to_str().unwrap(),
+            "12"
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            "application/json"
+        );
     }
 }

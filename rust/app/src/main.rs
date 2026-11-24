@@ -13,6 +13,7 @@ pub mod mitm;
 pub mod original;
 pub mod proxy;
 pub mod proxy_pools;
+pub mod ratelimit;
 pub mod routes;
 pub mod sse;
 pub mod token_refresh;
@@ -109,6 +110,11 @@ async fn main() -> anyhow::Result<()> {
     let circuit_breaker = Arc::new(circuit_breaker::CircuitBreakerRegistry::default());
     let combo_tracker = combo_router::ComboTracker::with_circuit_breakers(Arc::clone(&circuit_breaker));
     let token_cache = cache::TokenCache::default();
+    let rate_limiter = Arc::new(ratelimit::RateLimiter::from_config(&config));
+    let cleanup_interval = std::time::Duration::from_secs(config.rate_limit.cleanup_interval_secs);
+    let max_idle = std::time::Duration::from_secs(config.rate_limit.max_idle_secs);
+    let cleanup_handle = Arc::clone(&rate_limiter).spawn_cleanup_task(cleanup_interval, max_idle);
+
     let state = routes::AppState {
         config: Arc::clone(&config),
         db,
@@ -118,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
         token_cache,
         circuit_breaker,
         console_buffer: routes::ConsoleLogBuffer::new(),
+        rate_limiter,
     };
     let app = routes::create_router(state);
 
@@ -160,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(h) = token_refresh_handle {
         h.stop();
     }
+    cleanup_handle.abort();
     original.stop();
     tracing::info!("9Router shutdown gracefully");
     Ok(())
