@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: 9router
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - deployment.yaml
+  - service-clusterip.yaml
+  - service-loadbalancer.yaml
+  - hpa.yaml
+
+commonLabels:
+  app.kubernetes.io/name: 9router
+  app.kubernetes.io/part-of: 9router-gateway
+  app.kubernetes.io/managed-by: kustomize
