@@ -1,4 +1,4 @@
-.PHONY: all build build-ui test run clean install-systemd status-systemd restart-systemd
+.PHONY: all build build-ui build-wasm benchmark-wasm test test-wasm run clean install-systemd status-systemd restart-systemd
 
 TARGET_BIN := rust/app/target/release/9r
 PORT ?= 20127
@@ -11,9 +11,20 @@ build:
 build-ui:
 	@./build.sh --rebuild-ui
 
+build-wasm:
+	@echo "Compiling Cloudflare Edge WebAssembly target..."
+	@cargo build --manifest-path rust/edge-wasm/Cargo.toml --target wasm32-unknown-unknown --release
+
+benchmark-wasm: build-wasm
+	@node scripts/benchmark-edge-wasm.mjs
+
 test:
 	@echo "Running Rust test suite..."
 	@cargo test --manifest-path rust/app/Cargo.toml
+
+test-wasm:
+	@echo "Running Edge WebAssembly test suite..."
+	@cargo test --manifest-path rust/edge-wasm/Cargo.toml
 
 run: build
 	@echo "Launching 9Router on port $(PORT)..."

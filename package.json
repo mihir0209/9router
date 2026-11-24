@@ -21,6 +21,8 @@
     "start:bun": "bun ./.next/standalone/custom-server.js",
     "cli:pack": "npm --prefix cli run pack:cli",
     "cli:publish": "npm --prefix cli run publish:cli",
+    "build:wasm": "cargo build --manifest-path rust/edge-wasm/Cargo.toml --target wasm32-unknown-unknown --release",
+    "benchmark:wasm": "node scripts/benchmark-edge-wasm.mjs",
     "preview:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare preview",
     "build:cloudflare": "node scripts/build-cloudflare.mjs",
     "deploy:cloudflare": "node scripts/build-cloudflare.mjs && opennextjs-cloudflare deploy",

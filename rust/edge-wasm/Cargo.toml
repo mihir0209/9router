@@ -1,0 +1,19 @@
+[package]
+name = "ninerouter-edge-wasm"
+version = "0.6.0"
+edition = "2024"
+description = "Cloudflare Edge WebAssembly compilation of 9Router edge routing logic"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive", "std"] }
+serde_json = { version = "1.0", features = ["std"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
