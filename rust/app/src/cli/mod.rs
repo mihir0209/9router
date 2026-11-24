@@ -438,7 +438,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let state = crate::routes::AppState {
-            config,
+            config: Arc::clone(&config),
             db,
             proxy,
             original,
@@ -446,6 +446,7 @@ mod tests {
             token_cache,
             circuit_breaker,
             console_buffer: crate::routes::ConsoleLogBuffer::new(),
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
         };
         let app = crate::routes::create_router(state);
 

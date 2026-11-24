@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io;
@@ -70,6 +71,34 @@ fn parse_u64_aliases_from<F: Fn(&str) -> Option<String>>(
         }
     }
     default
+}
+
+fn parse_opt_u32_aliases_from<F: Fn(&str) -> Option<String>>(
+    lookup: &F,
+    keys: &[&str],
+) -> Option<u32> {
+    for &key in keys {
+        if let Some(v) = lookup(key) {
+            if let Ok(num) = v.trim().parse::<u32>() {
+                return Some(num);
+            }
+        }
+    }
+    None
+}
+
+fn parse_opt_u64_aliases_from<F: Fn(&str) -> Option<String>>(
+    lookup: &F,
+    keys: &[&str],
+) -> Option<u64> {
+    for &key in keys {
+        if let Some(v) = lookup(key) {
+            if let Ok(num) = v.trim().parse::<u64>() {
+                return Some(num);
+            }
+        }
+    }
+    None
 }
 
 fn parse_usize_from<F: Fn(&str) -> Option<String>>(lookup: &F, key: &str, default: usize) -> usize {
@@ -724,6 +753,222 @@ impl ObservabilityConfig {
 }
 
 // ---------------------------------------------------------------------------
+// 8. RateLimitConfig (Tier 8: Per-IP & Per-Model Sliding Window Rate Limiting)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelLimitConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    /// Master toggle for client IP rate limiting (default: false, auto-enabled if rpm/rps configured).
+    pub ip_rate_limit_enabled: bool,
+    /// Requests per minute limit per client IP (default: None).
+    pub ip_rpm: Option<u32>,
+    /// Requests per second limit per client IP (default: None).
+    pub ip_rps: Option<u32>,
+    /// Sliding window duration in seconds for IP rate limiting (default: 60s).
+    pub ip_window_secs: u64,
+    /// IPs or subnets exempt from IP rate limits (e.g. "127.0.0.1", "::1", "localhost").
+    pub ip_allowlist: Vec<String>,
+
+    /// Master toggle for per-model rate limiting (default: false, auto-enabled if model quotas configured).
+    pub model_rate_limit_enabled: bool,
+    /// Default requests per minute limit across models (default: None).
+    pub model_default_rpm: Option<u32>,
+    /// Default tokens per minute limit across models (default: None).
+    pub model_default_tpm: Option<u64>,
+    /// Model-specific RPM/TPM quota overrides partitioned by model name.
+    pub model_limits: HashMap<String, ModelLimitConfig>,
+
+    /// Auto-expiration cleanup interval in seconds (default: 30s).
+    pub cleanup_interval_secs: u64,
+    /// Maximum inactivity in seconds before idle IP/model window counters are pruned (default: 120s).
+    pub max_idle_secs: u64,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            ip_rate_limit_enabled: false,
+            ip_rpm: None,
+            ip_rps: None,
+            ip_window_secs: 60,
+            ip_allowlist: Vec::new(),
+            model_rate_limit_enabled: false,
+            model_default_rpm: None,
+            model_default_tpm: None,
+            model_limits: HashMap::new(),
+            cleanup_interval_secs: 30,
+            max_idle_secs: 120,
+        }
+    }
+}
+
+impl RateLimitConfig {
+    pub fn load() -> Self {
+        Self::load_from(|k| env::var(k).ok())
+    }
+
+    pub fn load_from<F: Fn(&str) -> Option<String>>(lookup: F) -> Self {
+        let ip_rpm = parse_opt_u32_aliases_from(&lookup, &["RATE_LIMIT_IP_RPM", "IP_RATE_LIMIT_RPM"]);
+        let ip_rps = parse_opt_u32_aliases_from(&lookup, &["RATE_LIMIT_IP_RPS", "IP_RATE_LIMIT_RPS"]);
+        let ip_window_secs = parse_u64_aliases_from(&lookup, &["RATE_LIMIT_IP_WINDOW_SECS", "IP_RATE_LIMIT_WINDOW_SECS"], 60);
+
+        let default_ip_enabled = ip_rpm.is_some() || ip_rps.is_some();
+        let ip_rate_limit_enabled = parse_bool_aliases_from(
+            &lookup,
+            &["RATE_LIMIT_IP_ENABLED", "IP_RATE_LIMIT_ENABLED"],
+            default_ip_enabled,
+        );
+
+        let ip_allowlist_raw = parse_opt_string_aliases_from(
+            &lookup,
+            &["RATE_LIMIT_IP_ALLOWLIST", "IP_RATE_LIMIT_ALLOWLIST", "RATE_LIMIT_IP_WHITELIST"],
+        );
+        let ip_allowlist = ip_allowlist_raw
+            .map(|s| {
+                s.split(',')
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let model_default_rpm = parse_opt_u32_aliases_from(
+            &lookup,
+            &["RATE_LIMIT_MODEL_DEFAULT_RPM", "MODEL_RATE_LIMIT_DEFAULT_RPM", "MODEL_DEFAULT_RPM"],
+        );
+        let model_default_tpm = parse_opt_u64_aliases_from(
+            &lookup,
+            &["RATE_LIMIT_MODEL_DEFAULT_TPM", "MODEL_RATE_LIMIT_DEFAULT_TPM", "MODEL_DEFAULT_TPM"],
+        );
+
+        let mut model_limits = HashMap::new();
+        if let Some(models_raw) = parse_opt_string_aliases_from(
+            &lookup,
+            &["RATE_LIMIT_MODELS", "MODEL_RATE_LIMITS", "RATE_LIMIT_PER_MODEL"],
+        ) {
+            let trimmed = models_raw.trim();
+            // Try parsing as JSON object: {"gpt-4o": {"rpm": 60, "tpm": 100000}}
+            if trimmed.starts_with('{') {
+                if let Ok(parsed) = serde_json::from_str::<HashMap<String, ModelLimitConfig>>(trimmed) {
+                    model_limits = parsed;
+                }
+            } else {
+                // Parse comma-separated "model:rpm:tpm" or "model:rpm"
+                for entry in trimmed.split(',') {
+                    let parts: Vec<&str> = entry.split(':').map(|s| s.trim()).collect();
+                    if parts.len() >= 2 {
+                        let model_name = parts[0].to_string();
+                        let rpm = parts[1].parse::<u32>().ok();
+                        let tpm = parts.get(2).and_then(|t| t.parse::<u64>().ok());
+                        model_limits.insert(model_name, ModelLimitConfig { rpm, tpm });
+                    }
+                }
+            }
+        }
+
+        let default_model_enabled = model_default_rpm.is_some()
+            || model_default_tpm.is_some()
+            || !model_limits.is_empty();
+        let model_rate_limit_enabled = parse_bool_aliases_from(
+            &lookup,
+            &["RATE_LIMIT_MODEL_ENABLED", "MODEL_RATE_LIMIT_ENABLED"],
+            default_model_enabled,
+        );
+
+        let cleanup_interval_secs = parse_u64_aliases_from(
+            &lookup,
+            &["RATE_LIMIT_CLEANUP_INTERVAL_SECS", "RATE_LIMIT_CLEANUP_SECS"],
+            30,
+        );
+        let max_idle_secs = parse_u64_aliases_from(
+            &lookup,
+            &["RATE_LIMIT_MAX_IDLE_SECS", "RATE_LIMIT_IDLE_SECS"],
+            120,
+        );
+
+        Self {
+            ip_rate_limit_enabled,
+            ip_rpm,
+            ip_rps,
+            ip_window_secs,
+            ip_allowlist,
+            model_rate_limit_enabled,
+            model_default_rpm,
+            model_default_tpm,
+            model_limits,
+            cleanup_interval_secs,
+            max_idle_secs,
+        }
+    }
+
+    /// Merges dynamic settings JSON from the database into the rate limit configuration.
+    pub fn merge_from_settings(&mut self, settings: &serde_json::Value) {
+        let rl = if let Some(obj) = settings.get("rateLimit") {
+            obj
+        } else if let Some(obj) = settings.get("rate_limit") {
+            obj
+        } else {
+            return;
+        };
+
+        if let Some(ip) = rl.get("ip") {
+            if let Some(enabled) = ip.get("enabled").and_then(|v| v.as_bool()) {
+                self.ip_rate_limit_enabled = enabled;
+            }
+            if let Some(rpm) = ip.get("rpm").and_then(|v| v.as_u64()) {
+                self.ip_rpm = Some(rpm as u32);
+            }
+            if let Some(rps) = ip.get("rps").and_then(|v| v.as_u64()) {
+                self.ip_rps = Some(rps as u32);
+            }
+            if let Some(window) = ip.get("windowSecs").or_else(|| ip.get("window_secs")).and_then(|v| v.as_u64()) {
+                self.ip_window_secs = window;
+            }
+            if let Some(allowlist) = ip.get("allowlist").or_else(|| ip.get("allowList")).and_then(|v| v.as_array()) {
+                self.ip_allowlist = allowlist
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+            }
+        }
+
+        if let Some(models) = rl.get("models") {
+            if let Some(enabled) = models.get("enabled").and_then(|v| v.as_bool()) {
+                self.model_rate_limit_enabled = enabled;
+            }
+            if let Some(default_rpm) = models.get("defaultRpm").or_else(|| models.get("default_rpm")).and_then(|v| v.as_u64()) {
+                self.model_default_rpm = Some(default_rpm as u32);
+            }
+            if let Some(default_tpm) = models.get("defaultTpm").or_else(|| models.get("default_tpm")).and_then(|v| v.as_u64()) {
+                self.model_default_tpm = Some(default_tpm);
+            }
+            if let Some(limits) = models.get("limits").and_then(|v| v.as_object()) {
+                for (model_name, limit_val) in limits {
+                    let rpm = limit_val.get("rpm").and_then(|v| v.as_u64()).map(|v| v as u32);
+                    let tpm = limit_val.get("tpm").and_then(|v| v.as_u64());
+                    self.model_limits.insert(model_name.clone(), ModelLimitConfig { rpm, tpm });
+                }
+            }
+        }
+
+        if let Some(cleanup) = rl.get("cleanupIntervalSecs").or_else(|| rl.get("cleanup_interval_secs")).and_then(|v| v.as_u64()) {
+            self.cleanup_interval_secs = cleanup;
+        }
+        if let Some(idle) = rl.get("maxIdleSecs").or_else(|| rl.get("max_idle_secs")).and_then(|v| v.as_u64()) {
+            self.max_idle_secs = idle;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Root Config Struct
 // ---------------------------------------------------------------------------
 
@@ -748,6 +993,7 @@ pub struct Config {
     pub streaming: StreamingConfig,
     pub observability: ObservabilityConfig,
     pub token_refresh: crate::token_refresh::TokenRefreshConfig,
+    pub rate_limit: RateLimitConfig,
 }
 
 impl Default for Config {
@@ -760,6 +1006,7 @@ impl Default for Config {
         let streaming = StreamingConfig::default();
         let observability = ObservabilityConfig::default();
         let token_refresh = crate::token_refresh::TokenRefreshConfig::default();
+        let rate_limit = RateLimitConfig::default();
 
         Self {
             data_dir: storage.data_dir.clone(),
@@ -774,6 +1021,7 @@ impl Default for Config {
             streaming,
             observability,
             token_refresh,
+            rate_limit,
         }
     }
 }
@@ -794,6 +1042,7 @@ impl Config {
         let streaming = StreamingConfig::load_from(&lookup);
         let observability = ObservabilityConfig::load_from(&lookup);
         let token_refresh = crate::token_refresh::TokenRefreshConfig::load_from(&lookup);
+        let rate_limit = RateLimitConfig::load_from(&lookup);
 
         Self {
             data_dir: storage.data_dir.clone(),
@@ -808,6 +1057,7 @@ impl Config {
             streaming,
             observability,
             token_refresh,
+            rate_limit,
         }
     }
 
@@ -1463,5 +1713,69 @@ mod tests {
         assert_eq!(cfg.routing.circuit_breaker_failure_threshold, deserialized.routing.circuit_breaker_failure_threshold);
         assert_eq!(cfg.streaming.stream_stall_timeout_ms, deserialized.streaming.stream_stall_timeout_ms);
         assert_eq!(cfg.observability.log_level, deserialized.observability.log_level);
+        assert_eq!(cfg.rate_limit.ip_window_secs, deserialized.rate_limit.ip_window_secs);
+    }
+
+    #[test]
+    fn test_rate_limit_config_parsing_and_settings_merge() {
+        let mut map = HashMap::new();
+        map.insert("RATE_LIMIT_IP_RPM", "120");
+        map.insert("RATE_LIMIT_IP_RPS", "10");
+        map.insert("RATE_LIMIT_IP_ALLOWLIST", "127.0.0.1, ::1, 10.0.0.1");
+        map.insert("RATE_LIMIT_MODEL_DEFAULT_RPM", "60");
+        map.insert("RATE_LIMIT_MODEL_DEFAULT_TPM", "100000");
+        map.insert(
+            "RATE_LIMIT_MODELS",
+            r#"{"gpt-4o":{"rpm":30,"tpm":50000},"claude-3-7-sonnet":{"rpm":20,"tpm":40000}}"#,
+        );
+        map.insert("RATE_LIMIT_CLEANUP_INTERVAL_SECS", "45");
+        map.insert("RATE_LIMIT_MAX_IDLE_SECS", "180");
+
+        let mut cfg = RateLimitConfig::load_from(mock_env(map));
+        assert!(cfg.ip_rate_limit_enabled);
+        assert_eq!(cfg.ip_rpm, Some(120));
+        assert_eq!(cfg.ip_rps, Some(10));
+        assert_eq!(cfg.ip_allowlist, vec!["127.0.0.1", "::1", "10.0.0.1"]);
+        assert!(cfg.model_rate_limit_enabled);
+        assert_eq!(cfg.model_default_rpm, Some(60));
+        assert_eq!(cfg.model_default_tpm, Some(100000));
+        assert_eq!(cfg.model_limits.get("gpt-4o").unwrap().rpm, Some(30));
+        assert_eq!(cfg.model_limits.get("gpt-4o").unwrap().tpm, Some(50000));
+        assert_eq!(cfg.cleanup_interval_secs, 45);
+        assert_eq!(cfg.max_idle_secs, 180);
+
+        // Test settings JSON dynamic override
+        let settings_json = serde_json::json!({
+            "rateLimit": {
+                "ip": {
+                    "enabled": true,
+                    "rpm": 300,
+                    "rps": 25,
+                    "windowSecs": 30,
+                    "allowlist": ["192.168.1.100"]
+                },
+                "models": {
+                    "enabled": true,
+                    "defaultRpm": 90,
+                    "defaultTpm": 200000,
+                    "limits": {
+                        "deepseek-r1": { "rpm": 15, "tpm": 30000 }
+                    }
+                },
+                "cleanupIntervalSecs": 60,
+                "maxIdleSecs": 240
+            }
+        });
+
+        cfg.merge_from_settings(&settings_json);
+        assert_eq!(cfg.ip_rpm, Some(300));
+        assert_eq!(cfg.ip_rps, Some(25));
+        assert_eq!(cfg.ip_window_secs, 30);
+        assert_eq!(cfg.ip_allowlist, vec!["192.168.1.100"]);
+        assert_eq!(cfg.model_default_rpm, Some(90));
+        assert_eq!(cfg.model_default_tpm, Some(200000));
+        assert_eq!(cfg.model_limits.get("deepseek-r1").unwrap().rpm, Some(15));
+        assert_eq!(cfg.cleanup_interval_secs, 60);
+        assert_eq!(cfg.max_idle_secs, 240);
     }
 }

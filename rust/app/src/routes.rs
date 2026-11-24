@@ -69,6 +69,7 @@ pub struct AppState {
     pub token_cache: crate::cache::TokenCache,
     pub circuit_breaker: Arc<crate::circuit_breaker::CircuitBreakerRegistry>,
     pub console_buffer: ConsoleLogBuffer,
+    pub rate_limiter: Arc<crate::ratelimit::RateLimiter>,
 }
 
 impl axum::extract::FromRef<AppState> for Arc<Database> {
@@ -111,16 +112,33 @@ pub(crate) fn authenticate(
         }
     };
 
-    if db.validate_key(&api_key).is_err() {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            [
-                (header::CONTENT_TYPE, "application/json"),
-                (header::VARY, "Accept-Encoding"),
-            ],
-            r#"{"error":"Invalid API key"}"#,
-        )
-            .into_response());
+    if let Err(err) = db.validate_key(&api_key) {
+        match err {
+            crate::db::KeyValidationError::RateLimited { limit, window_seconds } => {
+                let body = Json(serde_json::json!({
+                    "error": {
+                        "message": format!("Rate limit exceeded: max {} requests per {}s.", limit, window_seconds),
+                        "type": "rate_limit_error",
+                        "param": null,
+                        "code": StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                    }
+                }));
+                let mut res = (StatusCode::TOO_MANY_REQUESTS, body).into_response();
+                res.headers_mut().insert(header::RETRY_AFTER, "1".parse().unwrap());
+                return Err(res);
+            }
+            _ => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    [
+                        (header::CONTENT_TYPE, "application/json"),
+                        (header::VARY, "Accept-Encoding"),
+                    ],
+                    r#"{"error":"Invalid API key"}"#,
+                )
+                    .into_response());
+            }
+        }
     }
 
     Ok(api_key)
@@ -187,6 +205,9 @@ pub fn resolve_models_list_source(config: &Config, db: &Database) -> String {
 }
 
 pub async fn models_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = state.rate_limiter.check_ip_headers(&headers) {
+        return resp;
+    }
     let api_key = match authenticate(&headers, &state.db) {
         Ok(k) => k,
         Err(res) => return res,
@@ -860,6 +881,11 @@ pub fn record_completion_usage_and_details(
         );
     }
 
+    // Record consumed tokens for sliding window model TPM rate limiting
+    if total_tokens > 0 {
+        state.rate_limiter.record_model_tokens(model, total_tokens as u64);
+    }
+
     state.db.queue_usage(UsageRecord {
         timestamp: chrono::Utc::now().to_rfc3339(),
         provider: provider.map(str::to_string),
@@ -1390,11 +1416,46 @@ async fn execute_candidate_chat(
     }
 }
 
+pub(crate) fn estimate_chat_tokens(req: &crate::translator::ChatCompletionRequest) -> u64 {
+    let mut chars = 0usize;
+    for m in &req.messages {
+        chars += m.role.len();
+        if let Some(content) = &m.content {
+            match content {
+                crate::translator::MessageContent::Text(t) => chars += t.len(),
+                crate::translator::MessageContent::Parts(parts) => {
+                    for p in parts {
+                        if let Some(t) = &p.text {
+                            chars += t.len();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (chars / 4).max(10) as u64
+}
+
+pub(crate) fn estimate_claude_tokens(req: &crate::translator::ClaudeMessageRequest) -> u64 {
+    let mut chars = 0usize;
+    if let Some(sys) = &req.system {
+        chars += sys.as_text().len();
+    }
+    for m in &req.messages {
+        chars += m.role.len();
+        chars += m.content.as_text().len();
+    }
+    (chars / 4).max(10) as u64
+}
+
 pub async fn chat_completions_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    if let Err(resp) = state.rate_limiter.check_ip_headers(&headers) {
+        return resp;
+    }
     let api_key = match authenticate(&headers, &state.db) {
         Ok(k) => k,
         Err(auth_err) => return auth_err,
@@ -1407,6 +1468,9 @@ pub async fn dashboard_chat_completions_handler(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    if let Err(resp) = state.rate_limiter.check_ip_headers(&headers) {
+        return resp;
+    }
     let api_key = match authenticate(&headers, &state.db) {
         Ok(k) => k,
         Err(auth_err) => {
@@ -1458,6 +1522,12 @@ async fn handle_chat_completions_inner(
     }
 
     let (_, clean_model) = proxy::strip_provider_prefix(&req.model);
+
+    // Pre-flight model rate limiting check (RPM + estimated prompt TPM)
+    let estimated_tokens = estimate_chat_tokens(&req);
+    if let Err(resp) = state.rate_limiter.check_model_rate_limit(&clean_model, estimated_tokens) {
+        return resp;
+    }
 
     if let Err(e) = state.db.check_model_allowed(&api_key, &clean_model) {
         return (
@@ -2007,6 +2077,9 @@ pub async fn messages_handler(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    if let Err(resp) = state.rate_limiter.check_ip_headers(&headers) {
+        return resp;
+    }
     let start_time = std::time::Instant::now();
     let api_key = match authenticate(&headers, &state.db) {
         Ok(k) => k,
@@ -2036,6 +2109,12 @@ pub async fn messages_handler(
     }
 
     let (_, clean_model) = proxy::strip_provider_prefix(&req.model);
+
+    // Pre-flight model rate limiting check (RPM + estimated prompt TPM)
+    let estimated_tokens = estimate_claude_tokens(&req);
+    if let Err(resp) = state.rate_limiter.check_model_rate_limit(&clean_model, estimated_tokens) {
+        return resp;
+    }
 
     if let Err(e) = state.db.check_model_allowed(&api_key, &clean_model) {
         return (
@@ -7118,7 +7197,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config: Arc::clone(&config), db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new(), rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)) };
         let app = create_router(state);
 
         let req = Request::builder()
@@ -7151,7 +7230,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config: Arc::clone(&config), db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new(), rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)) };
         let app = create_router(state);
 
         // GET /v1/models without key
@@ -7284,7 +7363,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config: Arc::clone(&config), db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new(), rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)) };
         let app = create_router(state);
 
         let req = Request::builder()
@@ -7429,6 +7508,7 @@ mod tests {
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
         let state = AppState {
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
             config: Arc::clone(&config),
             db: Arc::clone(&db),
             proxy,
@@ -7481,7 +7561,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config: Arc::clone(&config), db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new(), rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)) };
         let app = create_router(state);
 
         // 1. Create a combo
@@ -7565,7 +7645,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config: Arc::clone(&config), db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new(), rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)) };
         let app = create_router(state);
 
         // GET / should serve embedded index.html
@@ -7609,7 +7689,7 @@ mod tests {
         let combo_tracker = crate::combo_router::ComboTracker::new();
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { config: Arc::clone(&config), db: db.clone(), proxy, original, combo_tracker, token_cache, circuit_breaker, console_buffer: ConsoleLogBuffer::new(), rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)) };
         let app = create_router(state);
 
         // Create combo with strategy: "hedged"
@@ -7692,7 +7772,7 @@ mod tests {
         );
 
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
-        let state = AppState { config, db, proxy, original, combo_tracker, token_cache: token_cache.clone(), circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
+        let state = AppState { rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)), config, db, proxy, original, combo_tracker, token_cache: token_cache.clone(), circuit_breaker, console_buffer: ConsoleLogBuffer::new() };
         let app = create_router(state);
 
         // 2. Dispatch POST /v1/chat/completions with whitespace variation: "  what   is   2+2?  \n"
@@ -7837,6 +7917,7 @@ mod tests {
         let proxy = Arc::new(ProxyService::new());
         let original = crate::original::Original::empty();
         let state = AppState {
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
             config,
             db,
             proxy,
@@ -7925,6 +8006,7 @@ mod tests {
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
 
         let state = AppState {
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
             db: Arc::clone(&db),
             config: Arc::clone(&config),
             proxy,
@@ -8110,6 +8192,7 @@ mod tests {
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
         let state = AppState {
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
             config,
             db: db.clone(),
             proxy,
@@ -8196,6 +8279,7 @@ mod tests {
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
         let state = AppState {
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
             config: Arc::clone(&config),
             db: db.clone(),
             proxy,
@@ -8357,6 +8441,7 @@ mod tests {
 
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
         let state = AppState {
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
             config: Arc::clone(&config),
             db: db.clone(),
             proxy,
@@ -8472,6 +8557,7 @@ mod tests {
 
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
         let state = AppState {
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
             config: Arc::clone(&config),
             db: db.clone(),
             proxy,
@@ -8521,6 +8607,7 @@ mod tests {
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
         let state = AppState {
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
             config,
             db: db.clone(),
             proxy,
@@ -8632,6 +8719,7 @@ mod tests {
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
         let state = AppState {
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
             config,
             db: db.clone(),
             proxy,
@@ -8825,6 +8913,314 @@ mod tests {
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         unsafe { std::env::remove_var("ADMIN_API_TOKEN"); }
+    }
+
+    // =========================================================================
+    // Rate Limiting HTTP Integration Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_routes_ip_rate_limiting_http_429() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_settings(&json!({ "requireLogin": false })).unwrap();
+
+        let mut rl_cfg = crate::config::RateLimitConfig::default();
+        rl_cfg.ip_rate_limit_enabled = true;
+        rl_cfg.ip_rpm = Some(2);
+        rl_cfg.ip_window_secs = 60;
+
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            rate_limit: rl_cfg.clone(),
+            ..Default::default()
+        });
+
+        let key = ApiKey {
+            id: "key-ip-rl".to_string(),
+            key: "sk-ip-ratelimit-key".to_string(),
+            name: Some("IP RL Key".to_string()),
+            machine_id: None,
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            rate_limit_requests: 0,
+            rate_limit_window_seconds: 60,
+            token_limit_daily: 0,
+            token_limit_monthly: 0,
+            allowed_models: "".to_string(),
+            blocked_models: "".to_string(),
+            allowed_ips: "".to_string(),
+            blocked_ips: "".to_string(),
+            expires_at: "".to_string(),
+            description: "".to_string(),
+            owner_ref: None,
+            max_concurrent_requests: 0,
+            allowed_providers: "".to_string(),
+            blocked_providers: "".to_string(),
+            force_provider: "".to_string(),
+            force_model: "".to_string(),
+            allowed_endpoints: "".to_string(),
+            blocked_endpoints: "".to_string(),
+            ..Default::default()
+        };
+        db.save_api_key(&key).unwrap();
+
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let rate_limiter = Arc::new(crate::ratelimit::RateLimiter::new(rl_cfg));
+
+        // Pre-seed cache to get fast 200 OK responses
+        let chat_req = ChatCompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![crate::translator::ChatMessage::user("ping")],
+            ..Default::default()
+        };
+        let chat_hash = token_cache.compute_chat_hash(&chat_req);
+        token_cache.set_json(
+            &chat_hash,
+            axum::body::Bytes::from_static(b"{\"id\":\"chatcmpl-rl\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"pong\"}}]}"),
+        );
+
+        let state = AppState {
+            config: Arc::clone(&config),
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+            rate_limiter: Arc::clone(&rate_limiter),
+        };
+        let app = create_router(state);
+
+        // 1. First request from 198.51.100.1 -> 200 OK
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-ip-ratelimit-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "198.51.100.1")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        // 2. Second request from 198.51.100.1 -> 200 OK
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-ip-ratelimit-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "198.51.100.1")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        let resp2 = app.clone().oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        // 3. Third request from 198.51.100.1 -> 429 TOO_MANY_REQUESTS
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-ip-ratelimit-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "198.51.100.1")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        let resp3 = app.clone().oneshot(req3).await.unwrap();
+        assert_eq!(resp3.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp3.headers().contains_key(header::RETRY_AFTER));
+
+        let body3 = axum::body::to_bytes(resp3.into_body(), usize::MAX).await.unwrap();
+        let json3: serde_json::Value = serde_json::from_slice(&body3).unwrap();
+        assert_eq!(json3["error"]["code"], 429);
+        assert_eq!(json3["error"]["type"], "rate_limit_error");
+        assert_eq!(json3["error"]["param"], "ip");
+
+        // 4. Request from different IP (198.51.100.2) -> 200 OK (isolated)
+        let req4 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-ip-ratelimit-key")
+            .header("Content-Type", "application/json")
+            .header("cf-connecting-ip", "198.51.100.2")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        let resp4 = app.clone().oneshot(req4).await.unwrap();
+        assert_eq!(resp4.status(), StatusCode::OK);
+
+        // 5. Reset IP window -> 198.51.100.1 allowed again
+        rate_limiter.reset_ip("198.51.100.1");
+        let req5 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-ip-ratelimit-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "198.51.100.1")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        let resp5 = app.clone().oneshot(req5).await.unwrap();
+        assert_eq!(resp5.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_routes_model_rate_limiting_http_429() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_settings(&json!({ "requireLogin": false })).unwrap();
+
+        let mut rl_cfg = crate::config::RateLimitConfig::default();
+        rl_cfg.model_rate_limit_enabled = true;
+        let mut model_limits = std::collections::HashMap::new();
+        model_limits.insert(
+            "gpt-4o".to_string(),
+            crate::config::ModelLimitConfig {
+                rpm: Some(2),
+                tpm: Some(100000),
+            },
+        );
+        model_limits.insert(
+            "claude-3-7-sonnet".to_string(),
+            crate::config::ModelLimitConfig {
+                rpm: Some(10),
+                tpm: Some(100000),
+            },
+        );
+        rl_cfg.model_limits = model_limits;
+
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            rate_limit: rl_cfg.clone(),
+            ..Default::default()
+        });
+
+        let key = ApiKey {
+            id: "key-model-rl".to_string(),
+            key: "sk-model-ratelimit-key".to_string(),
+            name: Some("Model RL Key".to_string()),
+            machine_id: None,
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            rate_limit_requests: 0,
+            rate_limit_window_seconds: 60,
+            token_limit_daily: 0,
+            token_limit_monthly: 0,
+            allowed_models: "".to_string(),
+            blocked_models: "".to_string(),
+            allowed_ips: "".to_string(),
+            blocked_ips: "".to_string(),
+            expires_at: "".to_string(),
+            description: "".to_string(),
+            owner_ref: None,
+            max_concurrent_requests: 0,
+            allowed_providers: "".to_string(),
+            blocked_providers: "".to_string(),
+            force_provider: "".to_string(),
+            force_model: "".to_string(),
+            allowed_endpoints: "".to_string(),
+            blocked_endpoints: "".to_string(),
+            ..Default::default()
+        };
+        db.save_api_key(&key).unwrap();
+
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let rate_limiter = Arc::new(crate::ratelimit::RateLimiter::new(rl_cfg));
+
+        // Pre-seed cache for gpt-4o and claude-3-7-sonnet
+        let gpt_req = ChatCompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![crate::translator::ChatMessage::user("hi")],
+            ..Default::default()
+        };
+        token_cache.set_json(
+            &token_cache.compute_chat_hash(&gpt_req),
+            axum::body::Bytes::from_static(b"{\"id\":\"chatcmpl-gpt\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}"),
+        );
+
+        let claude_req = ChatCompletionRequest {
+            model: "claude-3-7-sonnet".to_string(),
+            messages: vec![crate::translator::ChatMessage::user("hi")],
+            ..Default::default()
+        };
+        token_cache.set_json(
+            &token_cache.compute_chat_hash(&claude_req),
+            axum::body::Bytes::from_static(b"{\"id\":\"chatcmpl-claude\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}"),
+        );
+
+        let state = AppState {
+            config: Arc::clone(&config),
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+            rate_limiter: Arc::clone(&rate_limiter),
+        };
+        let app = create_router(state);
+
+        // 1. gpt-4o request 1 -> 200 OK
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-model-ratelimit-key")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#))
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        // 2. gpt-4o request 2 -> 200 OK
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-model-ratelimit-key")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#))
+            .unwrap();
+        let resp2 = app.clone().oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        // 3. gpt-4o request 3 -> 429 TOO_MANY_REQUESTS
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-model-ratelimit-key")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#))
+            .unwrap();
+        let resp3 = app.clone().oneshot(req3).await.unwrap();
+        assert_eq!(resp3.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp3.headers().contains_key(header::RETRY_AFTER));
+
+        let body3 = axum::body::to_bytes(resp3.into_body(), usize::MAX).await.unwrap();
+        let json3: serde_json::Value = serde_json::from_slice(&body3).unwrap();
+        assert_eq!(json3["error"]["code"], 429);
+        assert_eq!(json3["error"]["type"], "rate_limit_error");
+        assert_eq!(json3["error"]["param"], "model");
+
+        // 4. claude-3-7-sonnet is NOT throttled (isolated partition)
+        let req4 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-model-ratelimit-key")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"model":"claude-3-7-sonnet","messages":[{"role":"user","content":"hi"}]}"#))
+            .unwrap();
+        let resp4 = app.clone().oneshot(req4).await.unwrap();
+        assert_eq!(resp4.status(), StatusCode::OK);
     }
 }
 

@@ -1631,7 +1631,7 @@ mod tests {
         let token_cache = crate::cache::TokenCache::default();
         let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
         let state = AppState {
-            config,
+            config: Arc::clone(&config),
             db: db.clone(),
             proxy,
             original,
@@ -1639,6 +1639,7 @@ mod tests {
             token_cache,
             circuit_breaker,
             console_buffer: ConsoleLogBuffer::new(),
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
         };
         (state, db)
     }
