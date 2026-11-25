@@ -10,14 +10,14 @@ Run 9Router in a container. Published image: [`mihir0209/9router`](https://hub.d
 
 ```bash
 docker run -d \
-  -p 20128:20128 \
+  -p 20127:20127 \
   -v "$HOME/.9router:/app/data" \
   -e DATA_DIR=/app/data \
   --name 9router \
   mihir0209/9router:latest
 ```
 
-App listens on port `20128`. Open: http://localhost:20128
+App listens on port `20127` by default (override via `-e PORT=20128` if needed). Open: http://localhost:20127
 
 ## Manage container
 
@@ -146,22 +146,30 @@ docker pull mihir0209/9router:v0.6.0
 
 ## Build image locally (test)
 
-```bash
-docker build -t 9router .
+Both `Dockerfile` and `Dockerfile.distroless` perform a self-contained multi-stage static musl Rust build packaged into `gcr.io/distroless/static-debian12:nonroot` (UID/GID `65532`, `<25 MB`):
 
-docker run --rm -p 20128:20128 \
+```bash
+docker build -f Dockerfile.distroless -t 9router:distroless-test .
+
+docker run --rm -p 20127:20127 \
   -v "$HOME/.9router:/app/data" \
   -e DATA_DIR=/app/data \
-  9router
+  9router:distroless-test
 ```
 
-The Dockerfile uses the official Alpine and npm registries by default. Regional mirrors can be supplied when needed:
+To run automated image inspection, cold-boot timing, memory usage, and HTTP latency benchmarks against Docker Compose:
+
+```bash
+node scripts/benchmark-docker.mjs --profile sqlite
+```
+
+The Dockerfile uses the official Alpine mirror by default for UPX compression in the prep stage. A regional mirror can be supplied when needed:
 
 ```bash
 docker build \
   --build-arg ALPINE_MIRROR=mirrors.aliyun.com \
-  --build-arg NPM_REGISTRY=https://registry.npmmirror.com/ \
-  -t 9router .
+  -f Dockerfile.distroless \
+  -t 9router:distroless-test .
 ```
 
 ## Publish (automatic via CI)
@@ -203,7 +211,7 @@ Numbered image tags are mutable because a republish can replace their manifest. 
 docker pull mihir0209/9router@sha256:<verified-digest>
 ```
 
-The release workflow runs `/api/health` on each native `amd64` and `arm64` platform image before it uploads the digest artifact or assembles the multi-platform manifest. It then runs a second health check against the resolved version manifest before any requested `latest` promotion.
+The release workflow builds `Dockerfile.distroless` for `linux/amd64` and `linux/arm64` on native runners, verifies non-root UID `65532` and the `<25 MB` image budget, and probes `/health` and `/api/health` on port `20127` on each platform image before assembling the multi-platform manifest. It then runs a second health check against the resolved version manifest before any requested `latest` promotion.
 
 During recovery, the selected tag remains the application source while the Dockerfile from the workflow revision is used, so an older tag can be rebuilt with the current publishing fixes.
 
@@ -216,6 +224,6 @@ The upstream repository needs these repository secrets for Docker Hub publishing
 
 GHCR publishing uses the workflow's `GITHUB_TOKEN` with package write permission. Docker Hub publication publishes directly to `mihir0209/9router`.
 
-The optional repository variables `ALPINE_MIRROR` and `NPM_REGISTRY` can override the default package mirrors used by the CI Docker build.
+The optional repository variable `ALPINE_MIRROR` can override the default Alpine mirror used during the UPX prep stage of the CI Docker build.
 
 Workflow: `.github/workflows/docker-publish.yml`
