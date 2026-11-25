@@ -6604,6 +6604,23 @@ pub async fn body_limit_middleware(
     resp
 }
 
+/// Enforces dashboard/admin internal auth on merged router groups that do not check it per-handler.
+async fn internal_auth_middleware(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if req.method() == axum::http::Method::OPTIONS {
+        return next.run(req).await;
+    }
+    if let Err(resp) =
+        crate::auth::verify_internal_auth(req.headers(), &state.config.jwt_secret, &state.db)
+    {
+        return resp;
+    }
+    next.run(req).await
+}
+
 pub fn create_router(state: AppState) -> Router {
     if let Ok(saved_settings) = state.db.load_settings() {
         state.rate_limiter.update_from_settings(&saved_settings);
@@ -7270,6 +7287,15 @@ pub fn create_router(state: AppState) -> Router {
             "/api/tunnel/tailscale-install",
             axum::routing::post(crate::tunnel::tailscale_install_handler).options(options_handler),
         )
+        // Wave 1 native parity routers
+        .merge(crate::oauth_api::oauth_router())
+        .merge(
+            crate::cli_tools_api::cli_tools_router().route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), internal_auth_middleware),
+            ),
+        )
+        .merge(crate::sidecars_api::sidecars_router())
+        .merge(crate::sso_misc_api::sso_misc_router())
         // Reverse proxy fallback to original Next.js for UI, static assets, and full dashboard APIs
         .fallback(crate::original::proxy)
         // Shared state
@@ -9821,6 +9847,102 @@ mod tests {
                 resp.status(),
                 StatusCode::UNAUTHORIZED,
                 "route {} should accept valid API key",
+                uri
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wave1_merged_routers_and_cli_tools_auth_guard() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_settings(&serde_json::json!({ "requireLogin": true }))
+            .unwrap();
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test-wave1.sqlite"),
+            port: 20127,
+            jwt_secret: "wave1-secret".to_string(),
+            ..Default::default()
+        });
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let rate_limiter = Arc::new(crate::ratelimit::RateLimiter::from_config(&config));
+        let app = create_router(AppState {
+            config,
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+            rate_limiter,
+        });
+
+        // 1. Public misc route (/api/init) works even with requireLogin: true
+        let init_resp = app
+            .clone()
+            .oneshot(Request::get("/api/init").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(init_resp.status(), StatusCode::OK);
+
+        // 2. Protected Wave 1 routes require auth when requireLogin: true
+        for uri in [
+            "/api/cli-tools/devin-settings",
+            "/api/oauth/cursor/import",
+            "/api/headroom/status",
+            "/api/tags",
+        ] {
+            let unauth = app
+                .clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                unauth.status(),
+                StatusCode::UNAUTHORIZED,
+                "expected 401 for unauthenticated {} when requireLogin=true",
+                uri
+            );
+        }
+
+        // 3. OPTIONS preflight on cli-tools still succeeds when requireLogin: true
+        let opts = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/cli-tools/devin-settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(opts.status().is_success());
+
+        // 4. With requireLogin: false, Wave 1 routes respond natively (not 404/502 from fallback)
+        db.save_settings(&serde_json::json!({ "requireLogin": false }))
+            .unwrap();
+        for uri in [
+            "/api/cli-tools/devin-settings",
+            "/api/oauth/cursor/import",
+            "/api/headroom/status",
+            "/api/pxpipe/status",
+            "/api/tags",
+        ] {
+            let ok_resp = app
+                .clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                ok_resp.status(),
+                StatusCode::OK,
+                "expected 200 for {} when requireLogin=false",
                 uri
             );
         }

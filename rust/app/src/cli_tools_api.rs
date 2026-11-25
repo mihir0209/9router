@@ -264,7 +264,8 @@ fn xdg_config_home() -> PathBuf {
 
 fn find_in_path(bin: &str) -> Option<PathBuf> {
     #[allow(unused_mut)]
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+    let mut dirs: Vec<PathBuf> = std::env::var_os("NINEROUTER_TEST_CLI_PATH")
+        .or_else(|| std::env::var_os("PATH"))
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
 
@@ -7908,13 +7909,13 @@ mod tests {
             let prev_home = std::env::var("HOME").ok();
             let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
             let prev_data = std::env::var("DATA_DIR").ok();
-            let prev_path = std::env::var("PATH").ok();
+            let prev_path = std::env::var("NINEROUTER_TEST_CLI_PATH").ok();
 
             unsafe {
                 std::env::set_var("HOME", &home);
                 std::env::set_var("XDG_CONFIG_HOME", &xdg);
                 std::env::set_var("DATA_DIR", &data);
-                std::env::set_var("PATH", root.join("empty_bin"));
+                std::env::set_var("NINEROUTER_TEST_CLI_PATH", root.join("empty_bin"));
             }
 
             Self {
@@ -7947,8 +7948,8 @@ mod tests {
                     None => std::env::remove_var("DATA_DIR"),
                 }
                 match &self.prev_path {
-                    Some(v) => std::env::set_var("PATH", v),
-                    None => std::env::remove_var("PATH"),
+                    Some(v) => std::env::set_var("NINEROUTER_TEST_CLI_PATH", v),
+                    None => std::env::remove_var("NINEROUTER_TEST_CLI_PATH"),
                 }
             }
             let _ = std::fs::remove_dir_all(&self.root);
