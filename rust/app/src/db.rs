@@ -912,6 +912,12 @@ impl Database {
         self.pg.as_ref()
     }
 
+    /// Subscribes to live settings updates when backed by Postgres LISTEN/NOTIFY.
+    /// Returns `None` for SQLite-backed databases.
+    pub fn subscribe_settings(&self) -> Option<tokio::sync::watch::Receiver<Option<serde_json::Value>>> {
+        self.pg.as_ref().map(|pg| pg.subscribe_settings())
+    }
+
     /// Flushes any queued write-behind records (usageHistory / requestDetails) in Postgres mode.
     pub fn flush_write_behind(&self) -> anyhow::Result<()> {
         if let Some(ref pg) = self.pg {

@@ -635,3 +635,177 @@ async fn bench_live_postgres_vs_sqlite_wal() {
     let _ = std::fs::remove_file(sqlite_path.with_extension("db-wal"));
     let _ = std::fs::remove_file(sqlite_path.with_extension("db-shm"));
 }
+
+#[tokio::test]
+async fn test_pg_listen_notify_rate_limit_hot_reload_across_replicas() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use ninerouter::auth::create_dashboard_jwt;
+    use ninerouter::cache::TokenCache;
+    use ninerouter::combo_router::ComboTracker;
+    use ninerouter::original::Original;
+    use ninerouter::proxy::ProxyService;
+    use ninerouter::ratelimit::RateLimiter;
+    use ninerouter::routes::{create_router, AppState, ConsoleLogBuffer};
+    use ninerouter::translator::{ChatCompletionRequest, ChatMessage};
+    use tower::ServiceExt;
+
+    let Some(url) = live_pg_url() else {
+        eprintln!(
+            "[SKIP] TEST_DATABASE_URL / DATABASE_URL unset; skipping live Postgres LISTEN/NOTIFY rateLimit sync test"
+        );
+        return;
+    };
+
+    let nonce = Utc::now().timestamp_micros();
+    let shared_dir = format!("/tmp/nr_pg_rl_sync_{}_{}", std::process::id(), nonce);
+    let mut cfg = pg_config_for(&url, &shared_dir);
+    cfg.jwt_secret = format!("test-jwt-secret-{}", nonce);
+    let cfg = Arc::new(cfg);
+
+    let db_a = Database::open(&cfg).expect("open Postgres replica A");
+    let key = make_api_key("rl-sync-key", &format!("sk-rl-sync-{}", nonce), None);
+    db_a.save_api_key(&key).expect("save shared API key");
+
+    // Open replica B against the same DATA_DIR (shared Postgres schema & LISTEN/NOTIFY channel)
+    let db_b = Database::open(&cfg).expect("open Postgres replica B");
+
+    let make_state = |db: Arc<Database>| -> (AppState, Arc<RateLimiter>) {
+        let combo_tracker = ComboTracker::new();
+        let token_cache = TokenCache::default();
+        let chat_req = ChatCompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![ChatMessage::user("ping")],
+            ..Default::default()
+        };
+        token_cache.set_json(
+            &token_cache.compute_chat_hash(&chat_req),
+            axum::body::Bytes::from_static(
+                b"{\"id\":\"chatcmpl-pg-sync\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"pong\"}}]}",
+            ),
+        );
+        let rate_limiter = Arc::new(RateLimiter::from_config(&cfg));
+        let state = AppState {
+            config: Arc::clone(&cfg),
+            db,
+            proxy: Arc::new(ProxyService::new()),
+            original: Original::empty(),
+            combo_tracker: Arc::clone(&combo_tracker),
+            token_cache,
+            circuit_breaker: Arc::clone(&combo_tracker.circuit_breakers),
+            console_buffer: ConsoleLogBuffer::new(),
+            rate_limiter: Arc::clone(&rate_limiter),
+        };
+        (state, rate_limiter)
+    };
+
+    let (state_a, _rl_a) = make_state(Arc::clone(&db_a));
+    let (state_b, rl_b) = make_state(Arc::clone(&db_b));
+
+    let app_a = create_router(state_a);
+    let app_b = create_router(state_b);
+
+    // Give replica B's background LISTEN connection a brief moment to complete `LISTEN`.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 1. Before update: replica B has rate limiting disabled -> 3 requests from same IP succeed.
+    for _ in 0..3 {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", key.key))
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "203.0.113.88")
+            .body(Body::from(
+                r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#,
+            ))
+            .unwrap();
+        let resp = app_b.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // 2. Instance A updates rateLimit settings via PATCH /api/settings.
+    let jwt = create_dashboard_jwt(&cfg.jwt_secret);
+    let auth_cookie = format!("auth_token={}", jwt);
+    let t_patch = Instant::now();
+    let patch_req = Request::builder()
+        .method("PATCH")
+        .uri("/api/settings")
+        .header("Cookie", &auth_cookie)
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&json!({
+                "rateLimit": {
+                    "ip": {
+                        "enabled": true,
+                        "rpm": 1,
+                        "rps": null,
+                        "windowSecs": 60,
+                        "allowlist": []
+                    }
+                }
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let patch_resp = app_a.clone().oneshot(patch_req).await.unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    // 3. Wait for LISTEN/NOTIFY -> Instance B settings resync -> RateLimiter hot-reload.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut synced = false;
+    while Instant::now() < deadline {
+        let rl_json = rl_b.to_settings_json();
+        if rl_json["ip"]["enabled"] == json!(true) && rl_json["ip"]["rpm"] == json!(1) {
+            synced = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let sync_latency = t_patch.elapsed();
+    assert!(
+        synced,
+        "Replica B RateLimiter did not hot-reload via LISTEN/NOTIFY within 5s: {:?}",
+        rl_b.to_settings_json()
+    );
+    println!(
+        "[PG LISTEN/NOTIFY] rateLimit hot-reload sync latency (Instance A PATCH -> Instance B RateLimiter): {:.2}ms",
+        sync_latency.as_secs_f64() * 1000.0
+    );
+
+    // 4. Without restarting Instance B, verify HTTP 429 is enforced on a fresh IP.
+    let req_1 = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", key.key))
+        .header("Content-Type", "application/json")
+        .header("x-forwarded-for", "203.0.113.99")
+        .body(Body::from(
+            r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#,
+        ))
+        .unwrap();
+    assert_eq!(app_b.clone().oneshot(req_1).await.unwrap().status(), StatusCode::OK);
+
+    let req_2 = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", key.key))
+        .header("Content-Type", "application/json")
+        .header("x-forwarded-for", "203.0.113.99")
+        .body(Body::from(
+            r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#,
+        ))
+        .unwrap();
+    let resp_2 = app_b.clone().oneshot(req_2).await.unwrap();
+    assert_eq!(
+        resp_2.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "Replica B must enforce HTTP 429 after receiving LISTEN/NOTIFY without restart"
+    );
+
+    drop(app_a);
+    drop(app_b);
+    drop(db_a);
+    drop(db_b);
+    let _ = std::fs::remove_dir_all(&shared_dir);
+}

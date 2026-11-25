@@ -1,5 +1,11 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import {
+  resolveR2Bucket,
+  offloadRequestDetailToR2,
+  hydrateRequestDetailFromR2,
+  hydrateRequestDetailsFromR2,
+} from "../../../cloudflare/r2-details.js";
 
 const DEFAULT_MAX_RECORDS = 200;
 const DEFAULT_BATCH_SIZE = 20;
@@ -85,6 +91,56 @@ function truncateField(obj, maxSize) {
   return obj || {};
 }
 
+function buildInlineRecord(item, maxJsonSize) {
+  return {
+    id: item.id,
+    provider: item.provider || null,
+    model: item.model || null,
+    connectionId: item.connectionId || null,
+    timestamp: item.timestamp,
+    status: item.status || null,
+    latency: item.latency || {},
+    tokens: item.tokens || {},
+    request: truncateField(item.request, maxJsonSize),
+    providerRequest: truncateField(item.providerRequest, maxJsonSize),
+    providerResponse: truncateField(item.providerResponse, maxJsonSize),
+    response: truncateField(item.response, maxJsonSize),
+    pxpipe: item.pxpipe || undefined,
+  };
+}
+
+async function prepareRecordForStorage(item, config, r2Bucket) {
+  if (!item.id) item.id = generateDetailId(item.model);
+  if (!item.timestamp) item.timestamp = new Date().toISOString();
+  if (item.request?.headers) item.request.headers = sanitizeHeaders(item.request.headers);
+
+  if (r2Bucket) {
+    const fullRecord = {
+      id: item.id,
+      provider: item.provider || null,
+      model: item.model || null,
+      connectionId: item.connectionId || null,
+      timestamp: item.timestamp,
+      status: item.status || null,
+      latency: item.latency || {},
+      tokens: item.tokens || {},
+      request: item.request || {},
+      providerRequest: item.providerRequest || {},
+      providerResponse: item.providerResponse || {},
+      response: item.response || {},
+      pxpipe: item.pxpipe || undefined,
+    };
+    try {
+      const res = await offloadRequestDetailToR2(fullRecord, { bucket: r2Bucket });
+      if (res.offloaded) return res.record;
+    } catch (err) {
+      console.warn("[requestDetailsRepo] R2 offload failed, falling back to inline D1:", err?.message || err);
+    }
+  }
+
+  return buildInlineRecord(item, config.maxJsonSize);
+}
+
 async function flushToDatabase() {
   if (isFlushing) return;
   if (writeBuffer.length === 0) return;
@@ -95,29 +151,13 @@ async function flushToDatabase() {
       const items = writeBuffer.splice(0, writeBuffer.length);
       const db = await getAdapter();
       const config = await getObservabilityConfig();
+      const r2Bucket = await resolveR2Bucket();
+      const records = await Promise.all(
+        items.map((item) => prepareRecordForStorage(item, config, r2Bucket))
+      );
 
       db.transaction(() => {
-        for (const item of items) {
-          if (!item.id) item.id = generateDetailId(item.model);
-          if (!item.timestamp) item.timestamp = new Date().toISOString();
-          if (item.request?.headers) item.request.headers = sanitizeHeaders(item.request.headers);
-
-          const record = {
-            id: item.id,
-            provider: item.provider || null,
-            model: item.model || null,
-            connectionId: item.connectionId || null,
-            timestamp: item.timestamp,
-            status: item.status || null,
-            latency: item.latency || {},
-            tokens: item.tokens || {},
-            request: truncateField(item.request, config.maxJsonSize),
-            providerRequest: truncateField(item.providerRequest, config.maxJsonSize),
-            providerResponse: truncateField(item.providerResponse, config.maxJsonSize),
-            response: truncateField(item.response, config.maxJsonSize),
-            pxpipe: item.pxpipe || undefined,
-          };
-
+        for (const record of records) {
           db.run(
             `INSERT INTO requestDetails(id, timestamp, provider, model, connectionId, status, data) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET timestamp = excluded.timestamp, provider = excluded.provider, model = excluded.model, connectionId = excluded.connectionId, status = excluded.status, data = excluded.data`,
             [record.id, record.timestamp, record.provider, record.model, record.connectionId, record.status, stringifyJson(record)]
@@ -198,7 +238,8 @@ export async function getRequestDetails(filter = {}) {
     `SELECT data FROM requestDetails ${where} ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
     [...params, pageSize, offset]
   );
-  const details = rows.map((r) => parseJson(r.data, {}));
+  const parsed = rows.map((r) => parseJson(r.data, {}));
+  const details = await hydrateRequestDetailsFromR2(parsed);
 
   return {
     details,
@@ -220,7 +261,8 @@ export async function getRequestDetailById(id) {
   const db = await getAdapter();
   await db.ensureTables?.(["requestDetails"]);
   const row = db.get(`SELECT data FROM requestDetails WHERE id = ?`, [id]);
-  return row ? parseJson(row.data, null) : null;
+  const parsed = row ? parseJson(row.data, null) : null;
+  return parsed ? await hydrateRequestDetailFromR2(parsed) : null;
 }
 
 export async function flushRequestDetailsBuffer() {

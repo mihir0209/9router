@@ -78,3 +78,9 @@ database_id = "3fd32503-00aa-4de3-9118-50169a43476f"
 # [[r2_buckets]]
 # binding = "NEXT_INC_CACHE_R2_BUCKET"
 # bucket_name = "9router-next-cache"
+
+# Optional R2 bucket for offloading heavy requestDetails payloads (reduces D1 row size).
+# Create with `npx wrangler r2 bucket create mihir-router-request-details` then uncomment:
+# [[r2_buckets]]
+# binding = "REQUEST_DETAILS_BUCKET"
+# bucket_name = "mihir-router-request-details"
