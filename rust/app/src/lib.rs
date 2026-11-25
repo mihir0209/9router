@@ -18,6 +18,7 @@ pub mod proxy_pools;
 pub mod ratelimit;
 pub mod responses;
 pub mod routes;
+pub mod sidecars_api;
 pub mod sse;
 pub mod token_refresh;
 pub mod token_saver;
