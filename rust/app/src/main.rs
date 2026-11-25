@@ -12,6 +12,7 @@ pub mod gemini;
 pub mod media;
 pub mod mitm;
 pub mod original;
+pub mod providers_extra_api;
 pub mod proxy;
 pub mod proxy_pools;
 pub mod ratelimit;

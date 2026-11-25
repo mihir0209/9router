@@ -3307,6 +3307,18 @@ impl PgBackend {
         Ok(())
     }
 
+    pub fn delete_provider_connection(&self, id: &str) -> anyhow::Result<bool> {
+        let affected = self.pool.execute(
+            r#"DELETE FROM "providerConnections" WHERE "id" = $1"#.to_string(),
+            vec![PgParam::from(id)],
+        )?;
+        if affected > 0 {
+            self.hydrate_table("providerConnections")?;
+            self.notify_table_changed("providerConnections");
+        }
+        Ok(affected > 0)
+    }
+
     // ========================================================================
     // Settings Operations
     // ========================================================================
@@ -3362,7 +3374,7 @@ impl PgBackend {
     // KV Operations (Custom Models, Display Names, Disabled Models, Aliases)
     // ========================================================================
 
-    fn kv_scope_map(&self, scope: &str) -> anyhow::Result<HashMap<String, String>> {
+    pub fn kv_scope_map(&self, scope: &str) -> anyhow::Result<HashMap<String, String>> {
         self.ensure_fresh("kv")?;
         let guard = self
             .kv_cache
@@ -3374,7 +3386,7 @@ impl PgBackend {
             .unwrap_or_default())
     }
 
-    fn kv_upsert(&self, scope: &str, key: &str, value: &str) -> anyhow::Result<()> {
+    pub fn kv_upsert(&self, scope: &str, key: &str, value: &str) -> anyhow::Result<()> {
         self.pool.execute(
             r#"
             INSERT INTO "kv"("scope", "key", "value") VALUES ($1, $2, $3)
@@ -3392,10 +3404,20 @@ impl PgBackend {
         Ok(())
     }
 
-    fn kv_delete(&self, scope: &str, key: &str) -> anyhow::Result<()> {
+    pub fn kv_delete(&self, scope: &str, key: &str) -> anyhow::Result<()> {
         self.pool.execute(
             r#"DELETE FROM "kv" WHERE "scope" = $1 AND "key" = $2"#.to_string(),
             vec![PgParam::from(scope), PgParam::from(key)],
+        )?;
+        self.hydrate_table("kv")?;
+        self.notify_table_changed("kv");
+        Ok(())
+    }
+
+    pub fn kv_clear_scope(&self, scope: &str) -> anyhow::Result<()> {
+        self.pool.execute(
+            r#"DELETE FROM "kv" WHERE "scope" = $1"#.to_string(),
+            vec![PgParam::from(scope)],
         )?;
         self.hydrate_table("kv")?;
         self.notify_table_changed("kv");
