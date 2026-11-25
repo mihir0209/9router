@@ -19,6 +19,7 @@ pub mod responses;
 pub mod routes;
 pub mod sidecars_api;
 pub mod sse;
+pub mod sso_misc_api;
 pub mod token_refresh;
 pub mod token_saver;
 pub mod translator;
