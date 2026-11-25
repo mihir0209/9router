@@ -94,6 +94,40 @@ export default function ProfilePage() {
   const [proxyLoading, setProxyLoading] = useState(false);
   const [proxyTestLoading, setProxyTestLoading] = useState(false);
 
+  const [rateLimitForm, setRateLimitForm] = useState({
+    ipEnabled: false,
+    ipRpm: "",
+    ipRps: "",
+    ipWindowSecs: "60",
+    ipAllowlistText: "",
+    modelsEnabled: false,
+    modelDefaultRpm: "",
+    modelDefaultTpm: "",
+    modelLimitsJson: "{}",
+  });
+  const [modelOverrideDraft, setModelOverrideDraft] = useState({ model: "", rpm: "", tpm: "" });
+  const [rateLimitStatus, setRateLimitStatus] = useState({ type: "", message: "" });
+  const [rateLimitLoading, setRateLimitLoading] = useState(false);
+
+  const syncRateLimitForm = (data) => {
+    const rl = data?.rateLimit || data?.rate_limit || {};
+    const ip = rl?.ip || {};
+    const models = rl?.models || {};
+    const allowlist = ip?.allowlist || ip?.allowList || [];
+    const limits = models?.limits && typeof models.limits === "object" && !Array.isArray(models.limits) ? models.limits : {};
+    setRateLimitForm({
+      ipEnabled: ip?.enabled === true,
+      ipRpm: ip?.rpm != null ? String(ip.rpm) : "",
+      ipRps: ip?.rps != null ? String(ip.rps) : "",
+      ipWindowSecs: (ip?.windowSecs ?? ip?.window_secs) != null ? String(ip.windowSecs ?? ip.window_secs) : "60",
+      ipAllowlistText: Array.isArray(allowlist) ? allowlist.join(", ") : "",
+      modelsEnabled: models?.enabled === true,
+      modelDefaultRpm: (models?.defaultRpm ?? models?.default_rpm) != null ? String(models.defaultRpm ?? models.default_rpm) : "",
+      modelDefaultTpm: (models?.defaultTpm ?? models?.default_tpm) != null ? String(models.defaultTpm ?? models.default_tpm) : "",
+      modelLimitsJson: JSON.stringify(limits, null, 2),
+    });
+  };
+
   const [isRemoteHost, setIsRemoteHost] = useState(false);
   useEffect(() => {
     if (typeof window !== "undefined")
@@ -135,6 +169,7 @@ export default function ProfilePage() {
           outboundProxyUrl: data?.outboundProxyUrl || "",
           outboundNoProxy: data?.outboundNoProxy || "",
         });
+        syncRateLimitForm(data);
         setLoading(false);
       })
       .catch((err) => {
@@ -732,8 +767,175 @@ export default function ProfilePage() {
       if (!res.ok) return;
       const data = await res.json();
       setSettings(data);
+      syncRateLimitForm(data);
     } catch (err) {
       console.error("Failed to reload settings:", err);
+    }
+  };
+
+  const parseOptionalPositiveInt = (raw, fieldLabel) => {
+    const trimmed = String(raw ?? "").trim();
+    if (!trimmed) return { ok: true, value: null };
+    const parsed = Number(trimmed);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      return { ok: false, error: `${fieldLabel} must be a positive whole number` };
+    }
+    return { ok: true, value: parsed };
+  };
+
+  const parsedModelOverrides = (() => {
+    try {
+      const parsed = JSON.parse(rateLimitForm.modelLimitsJson.trim() || "{}");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return { valid: true, entries: Object.entries(parsed), obj: parsed };
+      }
+    } catch {
+      // handled below
+    }
+    return { valid: false, entries: [], obj: null };
+  })();
+
+  const addModelOverride = () => {
+    const modelName = modelOverrideDraft.model.trim();
+    if (!modelName) {
+      setRateLimitStatus({ type: "error", message: "Model name is required to add an override" });
+      return;
+    }
+    const rpmRes = parseOptionalPositiveInt(modelOverrideDraft.rpm, "Model RPM");
+    if (!rpmRes.ok) {
+      setRateLimitStatus({ type: "error", message: rpmRes.error });
+      return;
+    }
+    const tpmRes = parseOptionalPositiveInt(modelOverrideDraft.tpm, "Model TPM");
+    if (!tpmRes.ok) {
+      setRateLimitStatus({ type: "error", message: tpmRes.error });
+      return;
+    }
+    if (rpmRes.value === null && tpmRes.value === null) {
+      setRateLimitStatus({ type: "error", message: "Specify at least RPM or TPM for the model override" });
+      return;
+    }
+    const baseObj = parsedModelOverrides.valid ? { ...parsedModelOverrides.obj } : {};
+    baseObj[modelName] = {
+      ...(rpmRes.value !== null ? { rpm: rpmRes.value } : {}),
+      ...(tpmRes.value !== null ? { tpm: tpmRes.value } : {}),
+    };
+    setRateLimitForm((prev) => ({ ...prev, modelLimitsJson: JSON.stringify(baseObj, null, 2) }));
+    setModelOverrideDraft({ model: "", rpm: "", tpm: "" });
+    setRateLimitStatus({ type: "", message: "" });
+  };
+
+  const removeModelOverride = (modelName) => {
+    if (!parsedModelOverrides.valid) return;
+    const nextObj = { ...parsedModelOverrides.obj };
+    delete nextObj[modelName];
+    setRateLimitForm((prev) => ({ ...prev, modelLimitsJson: JSON.stringify(nextObj, null, 2) }));
+  };
+
+  const persistRateLimitSettings = async (formOverride = null) => {
+    const form = formOverride || rateLimitForm;
+    const ipRpmRes = parseOptionalPositiveInt(form.ipRpm, "IP RPM");
+    if (!ipRpmRes.ok) {
+      setRateLimitStatus({ type: "error", message: ipRpmRes.error });
+      return;
+    }
+    const ipRpsRes = parseOptionalPositiveInt(form.ipRps, "IP RPS");
+    if (!ipRpsRes.ok) {
+      setRateLimitStatus({ type: "error", message: ipRpsRes.error });
+      return;
+    }
+    const ipWindowRes = parseOptionalPositiveInt(form.ipWindowSecs || "60", "Window Secs");
+    if (!ipWindowRes.ok) {
+      setRateLimitStatus({ type: "error", message: ipWindowRes.error });
+      return;
+    }
+    const defaultRpmRes = parseOptionalPositiveInt(form.modelDefaultRpm, "Default Model RPM");
+    if (!defaultRpmRes.ok) {
+      setRateLimitStatus({ type: "error", message: defaultRpmRes.error });
+      return;
+    }
+    const defaultTpmRes = parseOptionalPositiveInt(form.modelDefaultTpm, "Default Model TPM");
+    if (!defaultTpmRes.ok) {
+      setRateLimitStatus({ type: "error", message: defaultTpmRes.error });
+      return;
+    }
+
+    let normalizedLimits = {};
+    try {
+      const rawLimits = JSON.parse((form.modelLimitsJson || "{}").trim() || "{}");
+      if (!rawLimits || typeof rawLimits !== "object" || Array.isArray(rawLimits)) {
+        setRateLimitStatus({ type: "error", message: "Per-Model Overrides must be a valid JSON object" });
+        return;
+      }
+      for (const [modelName, quota] of Object.entries(rawLimits)) {
+        const cleanName = modelName.trim();
+        if (!cleanName || !quota || typeof quota !== "object" || Array.isArray(quota)) {
+          setRateLimitStatus({ type: "error", message: `Invalid quota object for model "${modelName}"` });
+          return;
+        }
+        const mRpm = quota.rpm != null && quota.rpm !== "" ? Number(quota.rpm) : null;
+        const mTpm = quota.tpm != null && quota.tpm !== "" ? Number(quota.tpm) : null;
+        if (mRpm !== null && (!Number.isInteger(mRpm) || mRpm < 1)) {
+          setRateLimitStatus({ type: "error", message: `Model "${cleanName}" RPM must be a positive integer` });
+          return;
+        }
+        if (mTpm !== null && (!Number.isInteger(mTpm) || mTpm < 1)) {
+          setRateLimitStatus({ type: "error", message: `Model "${cleanName}" TPM must be a positive integer` });
+          return;
+        }
+        normalizedLimits[cleanName] = {
+          ...(mRpm !== null ? { rpm: mRpm } : {}),
+          ...(mTpm !== null ? { tpm: mTpm } : {}),
+        };
+      }
+    } catch {
+      setRateLimitStatus({ type: "error", message: "Per-Model Overrides contains invalid JSON" });
+      return;
+    }
+
+    const allowlist = String(form.ipAllowlistText || "")
+      .split(/[,\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const payload = {
+      rateLimit: {
+        ip: {
+          enabled: form.ipEnabled === true,
+          rpm: ipRpmRes.value,
+          rps: ipRpsRes.value,
+          windowSecs: ipWindowRes.value ?? 60,
+          allowlist,
+        },
+        models: {
+          enabled: form.modelsEnabled === true,
+          defaultRpm: defaultRpmRes.value,
+          defaultTpm: defaultTpmRes.value,
+          limits: normalizedLimits,
+        },
+      },
+    };
+
+    setRateLimitLoading(true);
+    setRateLimitStatus({ type: "", message: "" });
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setSettings((prev) => ({ ...prev, ...data }));
+        syncRateLimitForm(data?.rateLimit ? data : { rateLimit: payload.rateLimit });
+        setRateLimitStatus({ type: "success", message: "Rate limits applied live (no restart required)" });
+      } else {
+        setRateLimitStatus({ type: "error", message: data.error || "Failed to save rate limit settings" });
+      }
+    } catch {
+      setRateLimitStatus({ type: "error", message: "An error occurred while saving rate limits" });
+    } finally {
+      setRateLimitLoading(false);
     }
   };
 
@@ -1866,6 +2068,250 @@ export default function ProfilePage() {
               </p>
             )}
           </div>
+        </Card>
+
+        {/* Rate Limiting & Quotas */}
+        <Card>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-500 shrink-0">
+              <span className="material-symbols-outlined text-[20px]">speed</span>
+            </div>
+            <div>
+              <h3 className="text-base sm:text-lg font-semibold">Rate Limiting &amp; Quotas</h3>
+              <p className="text-xs text-text-muted">
+                Live sliding-window limits per client IP and per model (takes effect immediately)
+              </p>
+            </div>
+          </div>
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              persistRateLimitSettings();
+            }}
+            className="flex flex-col gap-5"
+          >
+            {/* Per-IP Rate Limiting */}
+            <div className="flex flex-col gap-3">
+              <div className="flex items-start sm:items-center justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm sm:text-base">Per-IP Rate Limiting</p>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    Throttle incoming client IPs across sliding RPM and 1-second RPS windows
+                  </p>
+                </div>
+                <Toggle
+                  checked={rateLimitForm.ipEnabled}
+                  onChange={(next) => {
+                    const updated = { ...rateLimitForm, ipEnabled: next };
+                    setRateLimitForm(updated);
+                    persistRateLimitSettings(updated);
+                  }}
+                  disabled={loading || rateLimitLoading}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                <Input
+                  label="RPM Limit"
+                  type="number"
+                  min="1"
+                  placeholder="e.g. 120"
+                  value={rateLimitForm.ipRpm}
+                  onChange={(e) => setRateLimitForm((prev) => ({ ...prev, ipRpm: e.target.value }))}
+                  disabled={loading || rateLimitLoading}
+                  hint="Requests per window"
+                />
+                <Input
+                  label="RPS Burst Limit"
+                  type="number"
+                  min="1"
+                  placeholder="e.g. 10"
+                  value={rateLimitForm.ipRps}
+                  onChange={(e) => setRateLimitForm((prev) => ({ ...prev, ipRps: e.target.value }))}
+                  disabled={loading || rateLimitLoading}
+                  hint="Requests per second"
+                />
+                <Input
+                  label="Window Secs"
+                  type="number"
+                  min="1"
+                  placeholder="60"
+                  value={rateLimitForm.ipWindowSecs}
+                  onChange={(e) => setRateLimitForm((prev) => ({ ...prev, ipWindowSecs: e.target.value }))}
+                  disabled={loading || rateLimitLoading}
+                  hint="Default: 60s"
+                />
+              </div>
+
+              <Input
+                label="IP Allowlist"
+                placeholder="127.0.0.1, ::1, 10.0.0.1"
+                value={rateLimitForm.ipAllowlistText}
+                onChange={(e) => setRateLimitForm((prev) => ({ ...prev, ipAllowlistText: e.target.value }))}
+                disabled={loading || rateLimitLoading}
+                hint="Comma-separated IPs (or localhost) exempt from IP throttling"
+              />
+            </div>
+
+            {/* Per-Model Quotas */}
+            <div className="flex flex-col gap-3 pt-4 border-t border-border/50">
+              <div className="flex items-start sm:items-center justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm sm:text-base">Per-Model Quotas</p>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    Enforce default and per-model RPM / TPM (tokens per minute) limits
+                  </p>
+                </div>
+                <Toggle
+                  checked={rateLimitForm.modelsEnabled}
+                  onChange={(next) => {
+                    const updated = { ...rateLimitForm, modelsEnabled: next };
+                    setRateLimitForm(updated);
+                    persistRateLimitSettings(updated);
+                  }}
+                  disabled={loading || rateLimitLoading}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                <Input
+                  label="Default Model RPM"
+                  type="number"
+                  min="1"
+                  placeholder="e.g. 60"
+                  value={rateLimitForm.modelDefaultRpm}
+                  onChange={(e) => setRateLimitForm((prev) => ({ ...prev, modelDefaultRpm: e.target.value }))}
+                  disabled={loading || rateLimitLoading}
+                  hint="Fallback requests/min for unlisted models"
+                />
+                <Input
+                  label="Default Model TPM"
+                  type="number"
+                  min="1"
+                  placeholder="e.g. 100000"
+                  value={rateLimitForm.modelDefaultTpm}
+                  onChange={(e) => setRateLimitForm((prev) => ({ ...prev, modelDefaultTpm: e.target.value }))}
+                  disabled={loading || rateLimitLoading}
+                  hint="Fallback tokens/min for unlisted models"
+                />
+              </div>
+
+              {/* Quick Add Model Override */}
+              <div className="flex flex-col gap-2 pt-2">
+                <label className="text-sm font-medium text-text-main">Per-Model Overrides</label>
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-end">
+                  <div className="sm:col-span-5">
+                    <Input
+                      placeholder="Model (e.g. gpt-4o)"
+                      value={modelOverrideDraft.model}
+                      onChange={(e) => setModelOverrideDraft((prev) => ({ ...prev, model: e.target.value }))}
+                      disabled={loading || rateLimitLoading}
+                    />
+                  </div>
+                  <div className="sm:col-span-3">
+                    <Input
+                      type="number"
+                      min="1"
+                      placeholder="RPM"
+                      value={modelOverrideDraft.rpm}
+                      onChange={(e) => setModelOverrideDraft((prev) => ({ ...prev, rpm: e.target.value }))}
+                      disabled={loading || rateLimitLoading}
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <Input
+                      type="number"
+                      min="1"
+                      placeholder="TPM"
+                      value={modelOverrideDraft.tpm}
+                      onChange={(e) => setModelOverrideDraft((prev) => ({ ...prev, tpm: e.target.value }))}
+                      disabled={loading || rateLimitLoading}
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={addModelOverride}
+                      disabled={loading || rateLimitLoading}
+                      className="w-full"
+                    >
+                      Add
+                    </Button>
+                  </div>
+                </div>
+
+                {parsedModelOverrides.valid && parsedModelOverrides.entries.length > 0 && (
+                  <div className="flex flex-col gap-1.5 mt-1">
+                    {parsedModelOverrides.entries.map(([modelName, quota]) => (
+                      <div
+                        key={modelName}
+                        className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-bg border border-border text-xs sm:text-sm"
+                      >
+                        <div className="flex flex-wrap items-center gap-2 min-w-0">
+                          <span className="font-mono font-medium text-text-main truncate">{modelName}</span>
+                          {quota?.rpm != null && (
+                            <span className="px-1.5 py-0.5 rounded bg-primary/10 text-primary text-xs">
+                              {quota.rpm} RPM
+                            </span>
+                          )}
+                          {quota?.tpm != null && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-500 text-xs">
+                              {quota.tpm} TPM
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeModelOverride(modelName)}
+                          disabled={loading || rateLimitLoading}
+                          aria-label={`Remove ${modelName}`}
+                          className="text-text-muted hover:text-red-500 transition-colors p-1"
+                        >
+                          <span className="material-symbols-outlined text-[18px]">delete</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex flex-col gap-1.5 mt-1">
+                  <label className="text-xs font-medium text-text-muted">Per-Model JSON Overrides</label>
+                  <textarea
+                    rows={4}
+                    spellCheck={false}
+                    placeholder={'{\n  "gpt-4o": { "rpm": 30, "tpm": 50000 }\n}'}
+                    value={rateLimitForm.modelLimitsJson}
+                    onChange={(e) => setRateLimitForm((prev) => ({ ...prev, modelLimitsJson: e.target.value }))}
+                    disabled={loading || rateLimitLoading}
+                    className="w-full p-2.5 rounded-lg border border-border bg-bg text-xs font-mono text-text-main focus:outline-none focus:border-primary"
+                  />
+                  {!parsedModelOverrides.valid && (
+                    <p className="text-xs text-red-500">Invalid JSON syntax in Per-Model Overrides</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {rateLimitStatus.message && (
+              <p className={`text-xs sm:text-sm ${rateLimitStatus.type === "error" ? "text-red-500" : "text-green-500"}`}>
+                {rateLimitStatus.message}
+              </p>
+            )}
+
+            <div className="pt-2 border-t border-border/50 flex flex-col sm:flex-row gap-2">
+              <Button
+                type="submit"
+                variant="primary"
+                loading={rateLimitLoading}
+                disabled={loading}
+                className="w-full sm:w-auto"
+              >
+                Save Rate Limits
+              </Button>
+            </div>
+          </form>
         </Card>
 
         {/* Request Privacy */}

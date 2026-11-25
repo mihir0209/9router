@@ -1,6 +1,3 @@
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-
 /**
  * High-performance WebAssembly binding for 9Router on Cloudflare Workers edge.
  * Wraps GatewayCoordinator, CoordinatorCoalescer, and fast-path route resolution.
@@ -12,49 +9,87 @@ export class EdgeWasm {
     this.memory = this.exports.memory;
     this.textEncoder = new TextEncoder();
     this.textDecoder = new TextDecoder();
+    this._encodedMethods = new Map();
     this.exports.edge_wasm_init();
   }
 
   /**
+   * Synchronously instantiates EdgeWasm from a pre-compiled WebAssembly.Module
+   * (e.g. a Cloudflare Workers CompiledWasm ES module import) with zero FS access.
+   * @param {WebAssembly.Module} wasmModule
+   * @returns {EdgeWasm}
+   */
+  static fromModule(wasmModule) {
+    if (!(wasmModule instanceof WebAssembly.Module)) {
+      throw new TypeError("EdgeWasm.fromModule expects a WebAssembly.Module");
+    }
+    const instance = new WebAssembly.Instance(wasmModule, {});
+    return new EdgeWasm(instance);
+  }
+
+  /**
    * Loads and instantiates the Edge WebAssembly module.
+   * Zero-FS when passed a WebAssembly.Module, Uint8Array, or ArrayBuffer.
+   * Dynamically imports node:fs/node:path only when loading from disk in Node.
    * @param {string|Uint8Array|ArrayBuffer|WebAssembly.Module} [source]
    */
   static async load(source) {
-    let wasmBytes;
     if (source instanceof WebAssembly.Module) {
-      const instance = new WebAssembly.Instance(source, {});
-      return new EdgeWasm(instance);
+      return EdgeWasm.fromModule(source);
     }
+
+    let wasmBytes;
     if (source instanceof Uint8Array || source instanceof ArrayBuffer) {
       wasmBytes = source;
-    } else if (typeof source === "string" && existsSync(source)) {
-      wasmBytes = readFileSync(source);
     } else {
-      // Auto-discover binary from standard locations
-      const candidatePaths = [
-        join(process.cwd(), "rust", "edge-wasm", "target", "wasm32-unknown-unknown", "release", "ninerouter_edge_wasm.wasm"),
-        join(process.cwd(), "rust", "wasm", "target", "wasm32-unknown-unknown", "release", "ninerouter_edge_wasm.wasm"),
-        join(process.cwd(), ".open-next", "assets", "ninerouter_edge_wasm.wasm"),
-        join(process.cwd(), "src", "cloudflare", "ninerouter_edge_wasm.wasm"),
-      ];
-      const found = candidatePaths.find((p) => existsSync(p));
-      if (!found) {
-        throw new Error(`Edge WASM binary not found in candidate paths: ${candidatePaths.join(", ")}`);
+      const [{ readFileSync, existsSync }, { join, dirname }, { fileURLToPath }] = await Promise.all([
+        import("node:fs"),
+        import("node:path"),
+        import("node:url"),
+      ]);
+      if (typeof source === "string" && existsSync(source)) {
+        wasmBytes = readFileSync(source);
+      } else {
+        const selfDir = dirname(fileURLToPath(import.meta.url));
+        const candidatePaths = [
+          join(selfDir, "ninerouter_edge_wasm.wasm"),
+          join(process.cwd(), "src", "cloudflare", "ninerouter_edge_wasm.wasm"),
+          join(process.cwd(), "rust", "edge-wasm", "target", "wasm32-unknown-unknown", "release", "ninerouter_edge_wasm.wasm"),
+          join(process.cwd(), "rust", "wasm", "target", "wasm32-unknown-unknown", "release", "ninerouter_edge_wasm.wasm"),
+          join(process.cwd(), ".open-next", "ninerouter_edge_wasm.wasm"),
+          join(process.cwd(), ".open-next", "assets", "ninerouter_edge_wasm.wasm"),
+        ];
+        const found = candidatePaths.find((p) => existsSync(p));
+        if (!found) {
+          throw new Error(`Edge WASM binary not found in candidate paths: ${candidatePaths.join(", ")}`);
+        }
+        wasmBytes = readFileSync(found);
       }
-      wasmBytes = readFileSync(found);
     }
 
     const module = await WebAssembly.compile(wasmBytes);
-    const instance = await WebAssembly.instantiate(module, {});
-    return new EdgeWasm(instance);
+    return EdgeWasm.fromModule(module);
+  }
+
+  _allocBytes(bytes) {
+    if (!bytes || !bytes.length) return { ptr: 0, len: 0 };
+    const ptr = this.exports.wasm_alloc(bytes.length);
+    new Uint8Array(this.memory.buffer, ptr, bytes.length).set(bytes);
+    return { ptr, len: bytes.length };
   }
 
   _allocString(str) {
     if (!str) return { ptr: 0, len: 0 };
-    const bytes = this.textEncoder.encode(str);
-    const ptr = this.exports.wasm_alloc(bytes.length);
-    new Uint8Array(this.memory.buffer, ptr, bytes.length).set(bytes);
-    return { ptr, len: bytes.length };
+    return this._allocBytes(this.textEncoder.encode(str));
+  }
+
+  _allocMethod(method) {
+    let bytes = this._encodedMethods.get(method);
+    if (!bytes) {
+      bytes = this.textEncoder.encode(method);
+      this._encodedMethods.set(method, bytes);
+    }
+    return this._allocBytes(bytes);
   }
 
   _readResult() {
@@ -67,7 +102,7 @@ export class EdgeWasm {
   }
 
   call(serviceId, method, payload = {}) {
-    const methodAlloc = this._allocString(method);
+    const methodAlloc = this._allocMethod(method);
     const payloadAlloc = this._allocString(JSON.stringify(payload));
     try {
       this.exports.edge_wasm_rpc(
@@ -253,6 +288,28 @@ export class EdgeWasm {
     } finally {
       if (keyAlloc.ptr) this.exports.wasm_dealloc(keyAlloc.ptr, keyAlloc.len);
       if (leaseAlloc.ptr) this.exports.wasm_dealloc(leaseAlloc.ptr, leaseAlloc.len);
+    }
+  }
+
+  fastClearLock(provider, connectionId, model = "", expectedGeneration = -1) {
+    const provAlloc = this._allocString(provider);
+    const connAlloc = this._allocString(connectionId);
+    const modelAlloc = this._allocString(model || "");
+    try {
+      const exp = expectedGeneration == null ? -1n : BigInt(expectedGeneration);
+      return this.exports.edge_fast_clear_lock(
+        provAlloc.ptr,
+        provAlloc.len,
+        connAlloc.ptr,
+        connAlloc.len,
+        modelAlloc.ptr,
+        modelAlloc.len,
+        exp
+      ) === 1;
+    } finally {
+      if (provAlloc.ptr) this.exports.wasm_dealloc(provAlloc.ptr, provAlloc.len);
+      if (connAlloc.ptr) this.exports.wasm_dealloc(connAlloc.ptr, connAlloc.len);
+      if (modelAlloc.ptr) this.exports.wasm_dealloc(modelAlloc.ptr, modelAlloc.len);
     }
   }
 }

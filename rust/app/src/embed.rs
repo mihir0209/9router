@@ -301,13 +301,26 @@ mod tests {
         assert_eq!(resp.headers().get("content-type").unwrap(), "text/x-component");
 
         // 9. Percent-encoded chunk lookup for bracketed routes
-        let resp = static_handler(
-            "/_next/static/chunks/app/(dashboard)/dashboard/providers/%5Bid%5D/page-99f7f03729939283.js"
-                .parse()
-                .unwrap(),
-        )
-        .await;
+        let bracketed_chunk = Assets::iter()
+            .find(|f| {
+                f.starts_with("_next/static/chunks/app/(dashboard)/dashboard/providers/[id]/page-")
+                    && f.ends_with(".js")
+            })
+            .expect("embedded provider [id] chunk should exist");
+        let encoded_chunk_url = format!(
+            "/{}",
+            bracketed_chunk
+                .as_ref()
+                .replace('[', "%5B")
+                .replace(']', "%5D")
+        );
+        let resp = static_handler(encoded_chunk_url.parse().unwrap()).await;
         assert_eq!(resp.status(), StatusCode::OK);
+
+        // 9b. Profile page contains Rate Limiting & Quotas controls
+        let resp = static_handler("/dashboard/profile".parse().unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "text/html; charset=utf-8");
 
         // 10. Deployment ID header injection
         let resp = static_handler("/dashboard".parse().unwrap()).await;

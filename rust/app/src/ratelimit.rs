@@ -237,9 +237,11 @@ impl Default for ModelWindowState {
 /// In-memory sliding window rate limiter for per-client-IP and per-model quotas.
 ///
 /// Thread-safe and lock-free across distinct keys using sharded DashMaps.
-/// Sub-microsecond overhead (<100ns typical latency) under high multi-threaded concurrency.
+/// Uses a short-lived RwLock read guard (released prior to DashMap access)
+/// so live configuration hot-reloads preserve sub-microsecond hot-path latency.
 pub struct RateLimiter {
     pub config: RwLock<RateLimitConfig>,
+    base_config: RwLock<RateLimitConfig>,
     ip_windows: DashMap<String, IpWindowState>,
     model_windows: DashMap<String, ModelWindowState>,
 }
@@ -254,6 +256,7 @@ impl RateLimiter {
     /// Creates a new RateLimiter with the specified configuration.
     pub fn new(config: RateLimitConfig) -> Self {
         Self {
+            base_config: RwLock::new(config.clone()),
             config: RwLock::new(config),
             ip_windows: DashMap::new(),
             model_windows: DashMap::new(),
@@ -265,16 +268,122 @@ impl RateLimiter {
         Self::new(config.rate_limit.clone())
     }
 
+    /// Returns a snapshot clone of the active rate limit configuration.
+    pub fn current_config(&self) -> RateLimitConfig {
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Serializes the active rate limit configuration into the Settings JSON `rateLimit` shape.
+    pub fn to_settings_json(&self) -> serde_json::Value {
+        let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+        serde_json::json!({
+            "ip": {
+                "enabled": cfg.ip_rate_limit_enabled,
+                "rpm": cfg.ip_rpm,
+                "rps": cfg.ip_rps,
+                "windowSecs": cfg.ip_window_secs,
+                "allowlist": cfg.ip_allowlist,
+            },
+            "models": {
+                "enabled": cfg.model_rate_limit_enabled,
+                "defaultRpm": cfg.model_default_rpm,
+                "defaultTpm": cfg.model_default_tpm,
+                "limits": cfg.model_limits,
+            },
+            "cleanupIntervalSecs": cfg.cleanup_interval_secs,
+            "maxIdleSecs": cfg.max_idle_secs,
+        })
+    }
+
     /// Updates the running configuration in-place.
     pub fn update_config(&self, new_config: RateLimitConfig) {
-        let mut cfg = self.config.write().unwrap();
+        {
+            let mut base = self.base_config.write().unwrap_or_else(|e| e.into_inner());
+            *base = new_config.clone();
+        }
+        let mut cfg = self.config.write().unwrap_or_else(|e| e.into_inner());
         *cfg = new_config;
     }
 
-    /// Merges dynamic settings JSON from the database into the rate limiter configuration.
+    /// Hot-reloads dynamic `rateLimit` settings JSON from the database into the active rate limiter.
+    ///
+    /// Supports both partial updates and explicit `null` field clears (e.g. clearing `rpm` or `rps`),
+    /// as well as full replacement of `models.limits` when an object map is provided.
+    pub fn update_from_settings(&self, settings: &serde_json::Value) {
+        let rl = match settings.get("rateLimit").or_else(|| settings.get("rate_limit")) {
+            Some(v) => v,
+            None => return,
+        };
+
+        if rl.is_null() {
+            let base = self
+                .base_config
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let mut cfg = self.config.write().unwrap_or_else(|e| e.into_inner());
+            *cfg = base;
+            return;
+        }
+
+        let mut next = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        next.merge_from_settings(settings);
+
+        // Handle explicit `null` field clearing and full `models.limits` map updates
+        if let Some(ip) = rl.get("ip") {
+            if ip.get("rpm").is_some_and(|v| v.is_null()) {
+                next.ip_rpm = None;
+            }
+            if ip.get("rps").is_some_and(|v| v.is_null()) {
+                next.ip_rps = None;
+            }
+        }
+        if let Some(models) = rl.get("models") {
+            if models
+                .get("defaultRpm")
+                .or_else(|| models.get("default_rpm"))
+                .is_some_and(|v| v.is_null())
+            {
+                next.model_default_rpm = None;
+            }
+            if models
+                .get("defaultTpm")
+                .or_else(|| models.get("default_tpm"))
+                .is_some_and(|v| v.is_null())
+            {
+                next.model_default_tpm = None;
+            }
+            if let Some(limits_obj) = models.get("limits").and_then(|v| v.as_object()) {
+                let mut replaced = std::collections::HashMap::with_capacity(limits_obj.len());
+                for (model_name, limit_val) in limits_obj {
+                    let rpm = limit_val
+                        .get("rpm")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32);
+                    let tpm = limit_val.get("tpm").and_then(|v| v.as_u64());
+                    replaced.insert(
+                        model_name.clone(),
+                        crate::config::ModelLimitConfig { rpm, tpm },
+                    );
+                }
+                next.model_limits = replaced;
+            }
+        }
+
+        let mut cfg = self.config.write().unwrap_or_else(|e| e.into_inner());
+        *cfg = next;
+    }
+
+    /// Alias for [`RateLimiter::update_from_settings`].
     pub fn reload_from_settings(&self, settings: &serde_json::Value) {
-        let mut cfg = self.config.write().unwrap();
-        cfg.merge_from_settings(settings);
+        self.update_from_settings(settings);
     }
 
     /// Evaluates per-client-IP sliding window limits.
@@ -283,28 +392,30 @@ impl RateLimiter {
     /// If within limits, registers the request and returns `Ok(())`.
     /// If limits are exceeded, returns `Err(RateLimitError::IpRateLimited)`.
     pub fn check_ip(&self, ip: &str) -> Result<(), RateLimitError> {
-        let cfg = self.config.read().unwrap();
-        if !cfg.ip_rate_limit_enabled || (cfg.ip_rpm.is_none() && cfg.ip_rps.is_none()) {
-            return Ok(());
-        }
-
         let trimmed_ip = ip.trim();
-
-        // Check allowlist
-        if !cfg.ip_allowlist.is_empty() {
-            let norm_ip = normalize_ip(trimmed_ip);
-            let norm_ref = norm_ip.as_ref();
-            if cfg.ip_allowlist.iter().any(|allowed| {
-                let allowed_norm = normalize_ip(allowed);
-                allowed_norm.as_ref() == norm_ref
-                    || (allowed == "localhost" && (norm_ref == "127.0.0.1" || norm_ref == "::1"))
-            }) {
+        let (ip_rpm, ip_rps, window_secs) = {
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+            if !cfg.ip_rate_limit_enabled || (cfg.ip_rpm.is_none() && cfg.ip_rps.is_none()) {
                 return Ok(());
             }
-        }
+
+            // Check allowlist while holding short-lived read guard
+            if !cfg.ip_allowlist.is_empty() {
+                let norm_ip = normalize_ip(trimmed_ip);
+                let norm_ref = norm_ip.as_ref();
+                if cfg.ip_allowlist.iter().any(|allowed| {
+                    let allowed_norm = normalize_ip(allowed);
+                    allowed_norm.as_ref() == norm_ref
+                        || (allowed == "localhost" && (norm_ref == "127.0.0.1" || norm_ref == "::1"))
+                }) {
+                    return Ok(());
+                }
+            }
+
+            (cfg.ip_rpm, cfg.ip_rps, cfg.ip_window_secs.max(1))
+        };
 
         let now = Instant::now();
-        let window_secs = cfg.ip_window_secs.max(1);
         let rpm_window = Duration::from_secs(window_secs);
         let rps_window = Duration::from_secs(1);
         let max_window = rpm_window.max(rps_window);
@@ -324,7 +435,7 @@ impl RateLimiter {
             }
 
             // 1. Check RPS limit (last 1 second) via binary search partition
-            if let Some(rps) = cfg.ip_rps {
+            if let Some(rps) = ip_rps {
                 let rps_cutoff = now.checked_sub(rps_window).unwrap_or(now);
                 let rps_start = state.timestamps.partition_point(|&t| t < rps_cutoff);
                 let rps_count = state.timestamps.len() - rps_start;
@@ -343,7 +454,7 @@ impl RateLimiter {
             }
 
             // 2. Check RPM limit (configured window duration, default 60s)
-            if let Some(rpm) = cfg.ip_rpm {
+            if let Some(rpm) = ip_rpm {
                 let rpm_cutoff = now.checked_sub(rpm_window).unwrap_or(now);
                 let rpm_start = state.timestamps.partition_point(|&t| t < rpm_cutoff);
                 let rpm_count = state.timestamps.len() - rpm_start;
@@ -381,7 +492,7 @@ impl RateLimiter {
                     }
                 }
 
-                if let Some(rps) = cfg.ip_rps {
+                if let Some(rps) = ip_rps {
                     let rps_cutoff = now.checked_sub(rps_window).unwrap_or(now);
                     let rps_start = state.timestamps.partition_point(|&t| t < rps_cutoff);
                     let rps_count = state.timestamps.len() - rps_start;
@@ -399,7 +510,7 @@ impl RateLimiter {
                     }
                 }
 
-                if let Some(rpm) = cfg.ip_rpm {
+                if let Some(rpm) = ip_rpm {
                     let rpm_cutoff = now.checked_sub(rpm_window).unwrap_or(now);
                     let rpm_start = state.timestamps.partition_point(|&t| t < rpm_cutoff);
                     let rpm_count = state.timestamps.len() - rpm_start;
@@ -441,11 +552,6 @@ impl RateLimiter {
     /// `estimated_tokens` represents the pre-flight prompt token estimate.
     /// If within limits, increments RPM counter and returns `Ok(())`.
     pub fn check_model(&self, raw_model: &str, estimated_tokens: u64) -> Result<(), RateLimitError> {
-        let cfg = self.config.read().unwrap();
-        if !cfg.model_rate_limit_enabled {
-            return Ok(());
-        }
-
         // Normalize model identifier (e.g., "openai/gpt-4o" -> "gpt-4o")
         let clean_model = if let Some((_, stripped)) = raw_model.split_once('/') {
             stripped
@@ -453,22 +559,30 @@ impl RateLimiter {
             raw_model
         };
 
-        // Resolve model limits: exact raw -> stripped clean -> default model quotas
-        let model_limits = cfg
-            .model_limits
-            .get(raw_model)
-            .or_else(|| cfg.model_limits.get(clean_model));
+        let (effective_rpm, effective_tpm) = {
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+            if !cfg.model_rate_limit_enabled {
+                return Ok(());
+            }
 
-        let effective_rpm = model_limits
-            .and_then(|l| l.rpm)
-            .or(cfg.model_default_rpm);
-        let effective_tpm = model_limits
-            .and_then(|l| l.tpm)
-            .or(cfg.model_default_tpm);
+            // Resolve model limits: exact raw -> stripped clean -> default model quotas
+            let model_limits = cfg
+                .model_limits
+                .get(raw_model)
+                .or_else(|| cfg.model_limits.get(clean_model));
 
-        if effective_rpm.is_none() && effective_tpm.is_none() {
-            return Ok(());
-        }
+            let effective_rpm = model_limits
+                .and_then(|l| l.rpm)
+                .or(cfg.model_default_rpm);
+            let effective_tpm = model_limits
+                .and_then(|l| l.tpm)
+                .or(cfg.model_default_tpm);
+
+            if effective_rpm.is_none() && effective_tpm.is_none() {
+                return Ok(());
+            }
+            (effective_rpm, effective_tpm)
+        };
 
         let now = Instant::now();
         let window_secs = 60u64;
@@ -669,5 +783,132 @@ impl RateLimiter {
     /// Returns the current number of tracked model windows.
     pub fn tracked_models_count(&self) -> usize {
         self.model_windows.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_hot_reload_update_from_settings_and_clear_fields() {
+        let limiter = RateLimiter::default();
+        assert!(!limiter.current_config().ip_rate_limit_enabled);
+        assert!(!limiter.current_config().model_rate_limit_enabled);
+
+        // 1. Hot-reload IP and Model limits from settings JSON
+        limiter.update_from_settings(&json!({
+            "rateLimit": {
+                "ip": {
+                    "enabled": true,
+                    "rpm": 2,
+                    "rps": 10,
+                    "windowSecs": 60,
+                    "allowlist": ["10.0.0.1"]
+                },
+                "models": {
+                    "enabled": true,
+                    "defaultRpm": 5,
+                    "defaultTpm": 1000,
+                    "limits": {
+                        "gpt-4o": { "rpm": 1, "tpm": 500 },
+                        "claude-3-7-sonnet": { "rpm": 3 }
+                    }
+                }
+            }
+        }));
+
+        // Allowlist bypasses
+        for _ in 0..5 {
+            assert!(limiter.check_ip("10.0.0.1").is_ok());
+        }
+        // Non-allowlisted IP hits 2 RPM
+        assert!(limiter.check_ip("203.0.113.10").is_ok());
+        assert!(limiter.check_ip("203.0.113.10").is_ok());
+        assert!(limiter.check_ip("203.0.113.10").is_err());
+
+        // Model override hits 1 RPM for gpt-4o
+        assert!(limiter.check_model("gpt-4o", 10).is_ok());
+        assert!(limiter.check_model("gpt-4o", 10).is_err());
+
+        // 2. Hot-reload to raise IP RPM and remove gpt-4o override + clear ip.rps
+        limiter.update_from_settings(&json!({
+            "rateLimit": {
+                "ip": {
+                    "enabled": true,
+                    "rpm": 5,
+                    "rps": null,
+                    "windowSecs": 60,
+                    "allowlist": []
+                },
+                "models": {
+                    "enabled": true,
+                    "defaultRpm": 5,
+                    "defaultTpm": null,
+                    "limits": {
+                        "claude-3-7-sonnet": { "rpm": 3 }
+                    }
+                }
+            }
+        }));
+
+        let cfg = limiter.current_config();
+        assert_eq!(cfg.ip_rpm, Some(5));
+        assert_eq!(cfg.ip_rps, None);
+        assert!(cfg.ip_allowlist.is_empty());
+        assert_eq!(cfg.model_default_tpm, None);
+        assert!(!cfg.model_limits.contains_key("gpt-4o"));
+        assert_eq!(cfg.model_limits.get("claude-3-7-sonnet").unwrap().rpm, Some(3));
+
+        // Previously throttled IP (2 requests recorded) now succeeds up to 5
+        assert!(limiter.check_ip("203.0.113.10").is_ok());
+        // gpt-4o now falls back to defaultRpm=5 (1 request recorded previously)
+        assert!(limiter.check_model("gpt-4o", 10).is_ok());
+
+        // 3. Hot-reload disable IP rate limiting
+        limiter.update_from_settings(&json!({
+            "rateLimit": {
+                "ip": { "enabled": false }
+            }
+        }));
+        for _ in 0..10 {
+            assert!(limiter.check_ip("203.0.113.10").is_ok());
+        }
+    }
+
+    #[test]
+    fn test_hot_reload_concurrent_reads_and_writes() {
+        let limiter = Arc::new(RateLimiter::default());
+        let mut handles = Vec::new();
+
+        for t in 0..8 {
+            let lim = Arc::clone(&limiter);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..500 {
+                    let _ = lim.check_ip(&format!("192.0.2.{}", (t * 16 + i) % 64));
+                    let _ = lim.check_model("gpt-4o", 10);
+                }
+            }));
+        }
+
+        let writer = {
+            let lim = Arc::clone(&limiter);
+            std::thread::spawn(move || {
+                for i in 0..50 {
+                    lim.update_from_settings(&json!({
+                        "rateLimit": {
+                            "ip": { "enabled": i % 2 == 0, "rpm": 100000 },
+                            "models": { "enabled": i % 2 == 1, "defaultRpm": 100000 }
+                        }
+                    }));
+                }
+            })
+        };
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        writer.join().unwrap();
     }
 }

@@ -159,6 +159,7 @@ jobs:
           path: workflow
           sparse-checkout: |
             Dockerfile
+            Dockerfile.distroless
           fetch-depth: 1
 
       - name: Set up Docker Buildx
@@ -176,13 +177,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: source
-          file: workflow/Dockerfile
+          file: workflow/Dockerfile.distroless
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           build-args: |
             APP_VERSION=${{ needs.prepare.outputs.version }}
             ALPINE_MIRROR=${{ vars.ALPINE_MIRROR || 'dl-cdn.alpinelinux.org' }}
-            NPM_REGISTRY=${{ vars.NPM_REGISTRY || 'https://registry.npmjs.org/' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ needs.prepare.outputs.commit }}
@@ -207,11 +207,25 @@ jobs:
           docker run --detach \
             --name "$container" \
             --platform "$PLATFORM" \
-            --publish 20128:20128 \
+            --publish 20127:20127 \
             "${GHCR_IMAGE}@${IMAGE_DIGEST}"
 
+          image_user="$(docker image inspect --format '{{.Config.User}}' "${GHCR_IMAGE}@${IMAGE_DIGEST}")"
+          if [[ "$image_user" != "65532:65532" && "$image_user" != "65532" ]]; then
+            echo "Expected non-root UID 65532, got: ${image_user}" >&2
+            exit 1
+          fi
+
+          image_bytes="$(docker image inspect --format '{{.Size}}' "${GHCR_IMAGE}@${IMAGE_DIGEST}")"
+          echo "${PLATFORM} distroless image size: ${image_bytes} bytes, user: ${image_user}"
+          if (( image_bytes >= 26214400 )); then
+            echo "Image size ${image_bytes} bytes exceeds 25 MiB distroless budget" >&2
+            exit 1
+          fi
+
           for attempt in {1..45}; do
-            if curl --fail --silent --show-error http://127.0.0.1:20128/api/health; then
+            if curl --fail --silent --show-error http://127.0.0.1:20127/health \
+              && curl --fail --silent --show-error http://127.0.0.1:20127/api/health; then
               echo "${PLATFORM} health check passed"
               exit 0
             fi
@@ -323,11 +337,12 @@ jobs:
           docker run --detach \
             --name "$container" \
             --platform linux/amd64 \
-            --publish 20128:20128 \
+            --publish 20127:20127 \
             "${GHCR_IMAGE}:${VERSION}"
 
           for attempt in {1..30}; do
-            if curl --fail --silent --show-error http://127.0.0.1:20128/api/health; then
+            if curl --fail --silent --show-error http://127.0.0.1:20127/health \
+              && curl --fail --silent --show-error http://127.0.0.1:20127/api/health; then
               echo "Resolved version manifest health check passed"
               exit 0
             fi

@@ -15,7 +15,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mihir0209/9router:latest
+    image: ${NINEROUTER_IMAGE:-mihir0209/9router:latest}
     container_name: 9router-sqlite
     restart: unless-stopped
     profiles:
@@ -74,7 +74,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mihir0209/9router:latest
+    image: ${NINEROUTER_IMAGE:-mihir0209/9router:latest}
     container_name: 9router-pg-primary
     restart: unless-stopped
     profiles:
@@ -105,7 +105,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mihir0209/9router:latest
+    image: ${NINEROUTER_IMAGE:-mihir0209/9router:latest}
     container_name: 9router-pg-replica
     restart: unless-stopped
     profiles:
