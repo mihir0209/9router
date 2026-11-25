@@ -23,4 +23,5 @@ pub mod token_refresh;
 pub mod token_saver;
 pub mod translator;
 pub mod tunnel;
+pub mod usage_extra_api;
 pub mod v1beta;
