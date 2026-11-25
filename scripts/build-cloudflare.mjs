@@ -460,11 +460,30 @@ async function __9ROUTER_SCHEDULED__(event, env, ctx) {
 }
 `;
 
+  const openNextDir = join(root, ".open-next");
+  const edgeWasmJsSrc = join(root, "src", "cloudflare", "edge-wasm.js");
+  const edgeWasmBinSrc = join(root, "src", "cloudflare", "ninerouter_edge_wasm.wasm");
+  if (existsSync(edgeWasmJsSrc)) {
+    copyFileSync(edgeWasmJsSrc, join(openNextDir, "edge-wasm.js"));
+  }
+  const hasCompiledWasm = existsSync(edgeWasmBinSrc);
+  if (hasCompiledWasm) {
+    copyFileSync(edgeWasmBinSrc, join(openNextDir, "ninerouter_edge_wasm.wasm"));
+  }
+
   const coordinatorPath = join(root, "src", "cloudflare", "gateway-coordinator.js");
   const coordinatorSource = readFileSync(coordinatorPath, "utf8")
-    .replace(/^import[^\n]+\n/, "")
+    .replace(/^(?:import[^\n]+\n)+/, "")
     .trim();
-  const coordinatorRuntime = `import { DurableObject } from "cloudflare:workers";\n${coordinatorSource}\n`;
+  const coordinatorImports = [
+    'import { DurableObject } from "cloudflare:workers";',
+    'import { EdgeWasm } from "./edge-wasm.js";',
+    ...(hasCompiledWasm ? ['import __9routerEdgeWasmModule from "./ninerouter_edge_wasm.wasm";'] : []),
+  ].join("\n");
+  const coordinatorWasmInit = hasCompiledWasm
+    ? "\nsetEdgeWasmModule(__9routerEdgeWasmModule);\n"
+    : "\n";
+  const coordinatorRuntime = `${coordinatorImports}\n${coordinatorSource}${coordinatorWasmInit}`;
 
     // OpenNext's fetch handler reads the incoming request through the parameter name `request`
     // everywhere (middleware, Next handler, request.signal). The guard renames the parameter,
