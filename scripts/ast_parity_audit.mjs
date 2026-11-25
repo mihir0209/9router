@@ -786,14 +786,34 @@ function splitTopLevelComma(expr) {
 
 function extractMethodsFromAxumExpr(expr) {
   const methods = [];
-  const methodRegex = /(?:axum::routing::|\.)\b(get|post|put|patch|delete|options|head|any)\s*\(/g;
-  let m;
-  while ((m = methodRegex.exec(expr)) !== null) {
-    const verb = m[1].toUpperCase();
-    const openIdx = m.index + m[0].length - 1;
+  const VERBS = new Set(["get", "post", "put", "patch", "delete", "options", "head", "any"]);
+  let i = skipWsAndComments(expr, 0);
+  while (i < expr.length) {
+    if (methods.length === 0 && expr.startsWith("axum::routing::", i)) {
+      i += "axum::routing::".length;
+      i = skipWsAndComments(expr, i);
+    } else if (expr[i] === ".") {
+      i++;
+      i = skipWsAndComments(expr, i);
+      if (expr.startsWith("axum::routing::", i)) {
+        i += "axum::routing::".length;
+        i = skipWsAndComments(expr, i);
+      }
+    } else if (methods.length > 0) {
+      break;
+    }
+
+    const identMatch = expr.slice(i).match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/);
+    if (!identMatch) break;
+    const fnName = identMatch[1];
+    const openIdx = expr.indexOf("(", i);
     const closeIdx = readBalancedParen(expr, openIdx);
-    const handler = closeIdx !== -1 ? expr.slice(openIdx + 1, closeIdx).trim() : "";
-    methods.push({ method: verb, handler });
+    if (closeIdx === -1) break;
+    if (VERBS.has(fnName)) {
+      const handler = expr.slice(openIdx + 1, closeIdx).trim();
+      methods.push({ method: fnName.toUpperCase(), handler });
+    }
+    i = skipWsAndComments(expr, closeIdx + 1);
   }
   return methods;
 }
@@ -955,7 +975,10 @@ function main() {
 
     if (rustEntry) {
       missingMethods = nodeMethods.filter(
-        (m) => !rustEntry.methods.has(m) && !rustEntry.methods.has("ANY")
+        (m) =>
+          !rustEntry.methods.has(m) &&
+          !rustEntry.methods.has("ANY") &&
+          !(m === "HEAD" && rustEntry.methods.has("GET"))
       );
       extraRustMethods = rustMethods.filter((m) => !nodeMethods.includes(m));
       if (!exactRust && aliasRustMatches.length > 0) {

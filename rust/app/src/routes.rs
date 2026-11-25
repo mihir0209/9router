@@ -6893,7 +6893,9 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/provider-nodes/{id}",
-            axum::routing::delete(delete_provider_node_handler).options(options_handler),
+            axum::routing::put(crate::providers_extra_api::provider_node_put_handler)
+                .delete(delete_provider_node_handler)
+                .options(options_handler),
         )
         // Combos (CRUD, Auto-group, Bulk-delete)
         .route(
@@ -7013,11 +7015,16 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/models",
-            axum::routing::get(dashboard_models_handler).options(options_handler),
+            axum::routing::get(dashboard_models_handler)
+                .put(crate::providers_extra_api::models_put_handler)
+                .options(options_handler),
         )
         .route(
             "/api/pricing",
-            axum::routing::get(get_pricing_handler).options(options_handler),
+            axum::routing::get(get_pricing_handler)
+                .patch(crate::providers_extra_api::pricing_patch_handler)
+                .delete(crate::providers_extra_api::pricing_delete_handler)
+                .options(options_handler),
         )
         .route(
             "/api/version",
@@ -7296,6 +7303,9 @@ pub fn create_router(state: AppState) -> Router {
         )
         .merge(crate::sidecars_api::sidecars_router())
         .merge(crate::sso_misc_api::sso_misc_router())
+        // Wave 2 native parity routers
+        .merge(crate::providers_extra_api::providers_extra_router())
+        .merge(crate::usage_extra_api::usage_extra_router())
         // Reverse proxy fallback to original Next.js for UI, static assets, and full dashboard APIs
         .fallback(crate::original::proxy)
         // Shared state
@@ -9946,6 +9956,175 @@ mod tests {
                 uri
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_wave2_merged_routers_and_partial_methods() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_settings(&serde_json::json!({ "requireLogin": false }))
+            .unwrap();
+        let api_key = crate::db::ApiKey {
+            id: "wave2-key-id".to_string(),
+            name: Some("wave2-test-key".to_string()),
+            key: "sk-wave2-integration-test".to_string(),
+            machine_id: Some("test-machine".to_string()),
+            is_active: true,
+            created_at: "2026-11-25T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        db.save_api_key(&api_key).unwrap();
+        db.save_provider_node(&crate::db::ProviderNode {
+            id: "wave2-node-1".to_string(),
+            node_type: Some("openai-compatible".to_string()),
+            name: Some("Wave2 Node".to_string()),
+            prefix: "w2".to_string(),
+            api_type: Some("chat".to_string()),
+            base_url: "https://api.example.com/v1".to_string(),
+            data: serde_json::json!({}),
+            created_at: "2026-11-25T00:00:00Z".to_string(),
+            updated_at: "2026-11-25T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test-wave2.sqlite"),
+            port: 20127,
+            jwt_secret: "wave2-secret".to_string(),
+            ..Default::default()
+        });
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let rate_limiter = Arc::new(crate::ratelimit::RateLimiter::from_config(&config));
+        let app = create_router(AppState {
+            config,
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+            rate_limiter,
+        });
+
+        // 1. PARTIAL_METHODS fixed: PUT /api/models
+        let put_models = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/models")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"alias":"w2-alias","model":"openai/gpt-4o"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_models.status(), StatusCode::OK);
+
+        // 2. PARTIAL_METHODS fixed: PATCH + DELETE /api/pricing
+        let patch_pricing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/pricing")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"openai":{"gpt-4o":{"input":2.5,"output":10.0}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(patch_pricing.status(), StatusCode::OK);
+
+        let del_pricing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/pricing?provider=openai&model=gpt-4o")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_pricing.status(), StatusCode::OK);
+
+        // 3. PARTIAL_METHODS fixed: PUT /api/provider-nodes/{id}
+        let put_node = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/provider-nodes/wave2-node-1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"name":"Wave2 Updated Node","prefix":"w2","apiType":"chat","baseUrl":"https://api.example.com/v1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_node.status(), StatusCode::OK);
+
+        // 4. Wave 2 Part A (providers_extra_router) endpoints
+        for uri in [
+            "/api/models/availability",
+            "/api/models/refresh",
+            "/api/providers/client",
+            "/api/combos/presets?source=cursor",
+            "/api/proxy-pools/health",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "expected 200 for {}", uri);
+        }
+
+        // 5. Wave 2 Part B (usage_extra_router) endpoints
+        for uri in ["/api/usage/history", "/api/usage/api-keys/wave2-key-id"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "expected 200 for {}", uri);
+        }
+
+        let model_info = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/models/info?id=openai/gpt-4o")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(model_info.status(), StatusCode::OK);
+
+        let models_kind = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/models/image")
+                    .header("authorization", "Bearer sk-wave2-integration-test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(models_kind.status(), StatusCode::OK);
     }
 }
 
