@@ -2,6 +2,7 @@ pub mod auth;
 pub mod cache;
 pub mod circuit_breaker;
 pub mod cli;
+pub mod cli_tools_api;
 pub mod combo_router;
 pub mod config;
 pub mod custom_adapter;

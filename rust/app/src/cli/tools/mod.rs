@@ -31,8 +31,12 @@ pub trait CliTool: Send + Sync {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn home_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+pub fn home_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".into()),
+    )
 }
 
 pub fn mask_key(key: &str) -> String {
@@ -46,7 +50,7 @@ pub fn mask_key(key: &str) -> String {
     }
 }
 
-fn v1_url(base: &str) -> String {
+pub fn v1_url(base: &str) -> String {
     let clean = base.trim().trim_end_matches('/');
     if clean.ends_with("/v1") {
         clean.to_string()
@@ -55,7 +59,7 @@ fn v1_url(base: &str) -> String {
     }
 }
 
-fn write_file_with_backup(path: &Path, content: &str) -> anyhow::Result<()> {
+pub fn write_file_with_backup(path: &Path, content: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -78,7 +82,7 @@ fn write_file_with_backup(path: &Path, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn rewrite_file(path: &Path, content: &str) -> anyhow::Result<()> {
+pub fn rewrite_file(path: &Path, content: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -91,9 +95,60 @@ fn rewrite_file(path: &Path, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_json_value(path: &Path) -> Option<serde_json::Value> {
+/// Strip trailing commas before `}` or `]` outside JSON string literals (JSONC tolerance).
+pub fn strip_jsonc_trailing_commas(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let mut in_str = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            let ch = input[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        if b == b'"' {
+            in_str = true;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if b == b',' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b'}' || bytes[j] == b']') {
+                i += 1;
+                continue;
+            }
+        }
+        let ch = input[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+pub fn read_json_value(path: &Path) -> Option<serde_json::Value> {
     let s = fs::read_to_string(path).ok()?;
     serde_json::from_str(&s).ok()
+}
+
+pub fn read_jsonc_value(path: &Path) -> Option<serde_json::Value> {
+    let s = fs::read_to_string(path).ok()?;
+    let stripped = strip_jsonc_trailing_commas(&s);
+    serde_json::from_str(&stripped).ok()
 }
 
 // ── Claude Code ─────────────────────────────────────────────────────────────
