@@ -143,7 +143,11 @@ pub async fn run_bench(args: &[String]) -> anyhow::Result<()> {
             eprintln!("  Run '9r status' to check daemon status");
             eprintln!("  Run '9r start -d' to start in background");
             eprintln!("  Run '9r' to run in foreground");
-            return Ok(());
+            return Err(anyhow::anyhow!(
+                "Could not reach gateway at {}: {}",
+                base_url,
+                e
+            ));
         }
     };
 
@@ -152,7 +156,10 @@ pub async fn run_bench(args: &[String]) -> anyhow::Result<()> {
             "\x1b[31m✗ Health probe failed:\x1b[0m HTTP status {}",
             warmup_resp.status()
         );
-        return Ok(());
+        return Err(anyhow::anyhow!(
+            "Health probe failed with HTTP status {}",
+            warmup_resp.status()
+        ));
     }
 
     let mut health_rtts = Vec::with_capacity(count);
@@ -161,9 +168,23 @@ pub async fn run_bench(args: &[String]) -> anyhow::Result<()> {
         let resp = client.get(&health_url).send().await;
         let elapsed = start.elapsed();
         if let Ok(r) = resp {
-            let _ = r.bytes().await;
-            health_rtts.push(elapsed.as_secs_f64() * 1000.0);
+            if r.status().is_success() {
+                let _ = r.bytes().await;
+                health_rtts.push(elapsed.as_secs_f64() * 1000.0);
+            }
         }
+    }
+
+    if health_rtts.is_empty() {
+        eprintln!(
+            "\x1b[31m✗ Error:\x1b[0m All {} health probe requests to {} failed",
+            count, health_url
+        );
+        return Err(anyhow::anyhow!(
+            "All {} health probe requests to {} failed",
+            count,
+            health_url
+        ));
     }
 
     let health_stats = calculate_stats("/api/health", &health_rtts);
@@ -282,5 +303,44 @@ mod tests {
         assert_eq!(stats.samples, 0);
         assert_eq!(stats.min_ms, 0.0);
         assert_eq!(stats.avg_ms, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_run_bench_unreachable_port_returns_err() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let args = vec![
+            "-u".to_string(),
+            format!("http://127.0.0.1:{}", port),
+            "-n".to_string(),
+            "1".to_string(),
+        ];
+        let res = run_bench(&args).await;
+        assert!(res.is_err(), "expected Err for unreachable port, got Ok");
+    }
+
+    #[tokio::test]
+    async fn test_run_bench_reachable_health_returns_ok() {
+        use axum::{http::StatusCode, routing::get, Router};
+
+        let app = Router::new().route("/api/health", get(|| async { StatusCode::OK }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let args = vec![
+            "-u".to_string(),
+            format!("http://127.0.0.1:{}", addr.port()),
+            "-n".to_string(),
+            "1".to_string(),
+        ];
+        let res = run_bench(&args).await;
+        server.abort();
+        assert!(res.is_ok(), "expected Ok for reachable /api/health, got {:?}", res);
     }
 }
