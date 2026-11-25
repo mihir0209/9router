@@ -4917,6 +4917,7 @@ pub async fn get_settings_handler(
         obj.insert("enableTranslator".to_string(), json!(enable_translator));
         obj.insert("vertexCarbonFallback".to_string(), json!(true));
         obj.insert("maxRetries".to_string(), json!(3));
+        obj.insert("rateLimit".to_string(), state.rate_limiter.to_settings_json());
     }
 
     (
@@ -4925,6 +4926,52 @@ pub async fn get_settings_handler(
         Json(base),
     )
         .into_response()
+}
+
+fn merge_rate_limit_settings(
+    cur_obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    incoming: &serde_json::Value,
+) {
+    if key == "rate_limit" {
+        cur_obj.remove("rate_limit");
+    }
+    if incoming.is_null() {
+        cur_obj.insert("rateLimit".to_string(), serde_json::Value::Null);
+        return;
+    }
+
+    let Some(in_obj) = incoming.as_object() else {
+        cur_obj.insert("rateLimit".to_string(), incoming.clone());
+        return;
+    };
+
+    let mut merged = cur_obj
+        .get("rateLimit")
+        .or_else(|| cur_obj.get("rate_limit"))
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    for (sub_k, sub_v) in in_obj {
+        if (sub_k == "ip" || sub_k == "models") && sub_v.is_object() {
+            let mut section = merged
+                .get(sub_k)
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            if let Some(sub_obj) = sub_v.as_object() {
+                for (inner_k, inner_v) in sub_obj {
+                    section.insert(inner_k.clone(), inner_v.clone());
+                }
+            }
+            merged.insert(sub_k.clone(), serde_json::Value::Object(section));
+        } else {
+            merged.insert(sub_k.clone(), sub_v.clone());
+        }
+    }
+
+    cur_obj.insert("rateLimit".to_string(), serde_json::Value::Object(merged));
 }
 
 pub async fn patch_settings_handler(
@@ -4991,12 +5038,17 @@ pub async fn patch_settings_handler(
 
     if let (Some(cur_obj), Some(new_obj)) = (current.as_object_mut(), payload.as_object()) {
         for (k, v) in new_obj {
-            cur_obj.insert(k.clone(), v.clone());
+            if k == "rateLimit" || k == "rate_limit" {
+                merge_rate_limit_settings(cur_obj, k, v);
+            } else {
+                cur_obj.insert(k.clone(), v.clone());
+            }
         }
     }
 
     match state.db.save_settings(&current) {
         Ok(()) => {
+            state.rate_limiter.update_from_settings(&current);
             let has_password = current
                 .get("password")
                 .and_then(|v| v.as_str())
@@ -5014,6 +5066,7 @@ pub async fn patch_settings_handler(
                 obj.remove("mitmSudoEncrypted");
                 obj.insert("hasPassword".to_string(), json!(has_password));
                 obj.insert("oidcConfigured".to_string(), json!(oidc_configured));
+                obj.insert("rateLimit".to_string(), state.rate_limiter.to_settings_json());
             }
 
             (
@@ -5159,19 +5212,24 @@ pub async fn import_database_handler(
 
     let started_at = std::time::Instant::now();
     match state.db.import_database(&payload) {
-        Ok(counts) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "application/json"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            Json(json!({
-                "success": true,
-                "counts": counts,
-                "durationMs": started_at.elapsed().as_millis() as u64
-            })),
-        )
-            .into_response(),
+        Ok(counts) => {
+            if let Ok(imported_settings) = state.db.load_settings() {
+                state.rate_limiter.update_from_settings(&imported_settings);
+            }
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                Json(json!({
+                    "success": true,
+                    "counts": counts,
+                    "durationMs": started_at.elapsed().as_millis() as u64
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("Failed to import database: {}", e)})),
@@ -6547,6 +6605,10 @@ pub async fn body_limit_middleware(
 }
 
 pub fn create_router(state: AppState) -> Router {
+    if let Ok(saved_settings) = state.db.load_settings() {
+        state.rate_limiter.update_from_settings(&saved_settings);
+    }
+
     let body_limit = resolve_max_body_limit(&state.config);
 
     let mut router = Router::new()
@@ -9225,6 +9287,326 @@ mod tests {
             .unwrap();
         let resp4 = app.clone().oneshot(req4).await.unwrap();
         assert_eq!(resp4.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_routes_rate_limit_startup_load_from_db() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_settings(&json!({
+            "requireLogin": false,
+            "rateLimit": {
+                "ip": {
+                    "enabled": true,
+                    "rpm": 2,
+                    "windowSecs": 60,
+                    "allowlist": ["10.0.0.5"]
+                },
+                "models": {
+                    "enabled": true,
+                    "limits": {
+                        "gpt-4o": { "rpm": 1, "tpm": 100000 }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            ..Default::default()
+        });
+
+        let key = ApiKey {
+            id: "key-startup-rl".to_string(),
+            key: "sk-startup-rl-key".to_string(),
+            name: Some("Startup RL Key".to_string()),
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            ..Default::default()
+        };
+        db.save_api_key(&key).unwrap();
+
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        // Default rate_limiter (disabled) — create_router must load saved settings from DB
+        let rate_limiter = Arc::new(crate::ratelimit::RateLimiter::from_config(&config));
+
+        for model in ["gpt-4o", "claude-3-7-sonnet"] {
+            let chat_req = ChatCompletionRequest {
+                model: model.to_string(),
+                messages: vec![crate::translator::ChatMessage::user("ping")],
+                ..Default::default()
+            };
+            token_cache.set_json(
+                &token_cache.compute_chat_hash(&chat_req),
+                axum::body::Bytes::from_static(b"{\"id\":\"chatcmpl-startup\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"pong\"}}]}"),
+            );
+        }
+
+        let state = AppState {
+            config: Arc::clone(&config),
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+            rate_limiter: Arc::clone(&rate_limiter),
+        };
+        let app = create_router(state);
+
+        // Allowlisted IP bypasses IP limit even across 3 requests (using claude-3-7-sonnet)
+        for _ in 0..3 {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("Authorization", "Bearer sk-startup-rl-key")
+                .header("Content-Type", "application/json")
+                .header("x-forwarded-for", "10.0.0.5")
+                .body(Body::from(r#"{"model":"claude-3-7-sonnet","messages":[{"role":"user","content":"ping"}]}"#))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // Model limit from DB: gpt-4o rpm=1 -> 1st OK, 2nd 429
+        let req_m1 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-startup-rl-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "10.0.0.5")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req_m1).await.unwrap().status(), StatusCode::OK);
+
+        let req_m2 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-startup-rl-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "10.0.0.5")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        let resp_m2 = app.clone().oneshot(req_m2).await.unwrap();
+        assert_eq!(resp_m2.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Non-allowlisted IP limit from DB: rpm=2 -> 3rd 429
+        for expected in [StatusCode::OK, StatusCode::OK, StatusCode::TOO_MANY_REQUESTS] {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("Authorization", "Bearer sk-startup-rl-key")
+                .header("Content-Type", "application/json")
+                .header("x-forwarded-for", "198.51.100.42")
+                .body(Body::from(r#"{"model":"claude-3-7-sonnet","messages":[{"role":"user","content":"ping"}]}"#))
+                .unwrap();
+            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_routes_rate_limit_live_hot_reload_via_patch_and_put() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_settings(&json!({ "requireLogin": false })).unwrap();
+
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test.sqlite"),
+            port: 20127,
+            jwt_secret: "secret-hotreload".to_string(),
+            ..Default::default()
+        });
+
+        let key = ApiKey {
+            id: "key-hotreload-rl".to_string(),
+            key: "sk-hotreload-rl-key".to_string(),
+            name: Some("HotReload RL Key".to_string()),
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            ..Default::default()
+        };
+        db.save_api_key(&key).unwrap();
+
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let rate_limiter = Arc::new(crate::ratelimit::RateLimiter::from_config(&config));
+
+        for model in ["gpt-4o", "claude-3-7-sonnet"] {
+            let chat_req = ChatCompletionRequest {
+                model: model.to_string(),
+                messages: vec![crate::translator::ChatMessage::user("ping")],
+                ..Default::default()
+            };
+            token_cache.set_json(
+                &token_cache.compute_chat_hash(&chat_req),
+                axum::body::Bytes::from_static(b"{\"id\":\"chatcmpl-hot\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"pong\"}}]}"),
+            );
+        }
+
+        let state = AppState {
+            config: Arc::clone(&config),
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+            rate_limiter: Arc::clone(&rate_limiter),
+        };
+        let app = create_router(state);
+
+        let jwt = crate::auth::create_dashboard_jwt(&config.jwt_secret);
+        let auth_cookie = format!("auth_token={}", jwt);
+
+        // 1. Initially disabled -> 3 requests from same IP succeed
+        for _ in 0..3 {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("Authorization", "Bearer sk-hotreload-rl-key")
+                .header("Content-Type", "application/json")
+                .header("x-forwarded-for", "203.0.113.77")
+                .body(Body::from(r#"{"model":"claude-3-7-sonnet","messages":[{"role":"user","content":"ping"}]}"#))
+                .unwrap();
+            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+        }
+
+        // 2. PATCH /api/settings to enable IP RPM=1 and gpt-4o RPM=1
+        let patch_req = Request::builder()
+            .method("PATCH")
+            .uri("/api/settings")
+            .header("Cookie", &auth_cookie)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({
+                "rateLimit": {
+                    "ip": {
+                        "enabled": true,
+                        "rpm": 1,
+                        "rps": null,
+                        "windowSecs": 60,
+                        "allowlist": ["10.9.9.9"]
+                    },
+                    "models": {
+                        "enabled": true,
+                        "defaultRpm": null,
+                        "defaultTpm": null,
+                        "limits": {
+                            "gpt-4o": { "rpm": 1, "tpm": 100000 }
+                        }
+                    }
+                }
+            })).unwrap()))
+            .unwrap();
+        let patch_resp = app.clone().oneshot(patch_req).await.unwrap();
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+
+        // 1st request from 203.0.113.77 after enabling -> OK, 2nd -> 429 (hot-reloaded immediately)
+        let req_4 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-hotreload-rl-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "203.0.113.77")
+            .body(Body::from(r#"{"model":"claude-3-7-sonnet","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req_4).await.unwrap().status(), StatusCode::OK);
+
+        let req_5 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-hotreload-rl-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "203.0.113.77")
+            .body(Body::from(r#"{"model":"claude-3-7-sonnet","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req_5).await.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Model gpt-4o (rpm=1) from allowlisted IP 10.9.9.9 -> 1st OK, 2nd 429
+        let req_g1 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-hotreload-rl-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "10.9.9.9")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req_g1).await.unwrap().status(), StatusCode::OK);
+
+        let req_g2 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-hotreload-rl-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "10.9.9.9")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req_g2).await.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // 3. PUT /api/settings to raise IP RPM=10 and disable model rate limits
+        let put_req = Request::builder()
+            .method("PUT")
+            .uri("/api/settings")
+            .header("Cookie", &auth_cookie)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({
+                "rateLimit": {
+                    "ip": { "rpm": 10 },
+                    "models": { "enabled": false, "limits": {} }
+                }
+            })).unwrap()))
+            .unwrap();
+        let put_resp = app.clone().oneshot(put_req).await.unwrap();
+        assert_eq!(put_resp.status(), StatusCode::OK);
+
+        // Both IP 203.0.113.77 and model gpt-4o immediately succeed again
+        let req_after_ip = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-hotreload-rl-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "203.0.113.77")
+            .body(Body::from(r#"{"model":"claude-3-7-sonnet","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req_after_ip).await.unwrap().status(), StatusCode::OK);
+
+        let req_after_model = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", "Bearer sk-hotreload-rl-key")
+            .header("Content-Type", "application/json")
+            .header("x-forwarded-for", "10.9.9.9")
+            .body(Body::from(r#"{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}"#))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req_after_model).await.unwrap().status(), StatusCode::OK);
+
+        // 4. GET /api/settings reflects merged rateLimit state
+        let get_req = Request::builder()
+            .method("GET")
+            .uri("/api/settings")
+            .header("Cookie", &auth_cookie)
+            .body(Body::empty())
+            .unwrap();
+        let get_resp = app.clone().oneshot(get_req).await.unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX).await.unwrap();
+        let settings_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(settings_json["rateLimit"]["ip"]["enabled"], true);
+        assert_eq!(settings_json["rateLimit"]["ip"]["rpm"], 10);
+        assert_eq!(settings_json["rateLimit"]["ip"]["allowlist"], json!(["10.9.9.9"]));
+        assert_eq!(settings_json["rateLimit"]["models"]["enabled"], false);
+        assert_eq!(settings_json["rateLimit"]["models"]["limits"], json!({}));
     }
 }
 
