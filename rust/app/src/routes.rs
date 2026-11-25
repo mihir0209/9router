@@ -6670,6 +6670,55 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/messages",
             axum::routing::post(messages_handler).options(options_handler),
         )
+        // Claude token counting
+        .route(
+            "/v1/messages/count_tokens",
+            axum::routing::post(crate::v1beta::count_tokens_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/messages/count_tokens",
+            axum::routing::post(crate::v1beta::count_tokens_handler).options(options_handler),
+        )
+        // OpenAI Responses API
+        .route(
+            "/v1/responses",
+            axum::routing::post(crate::responses::responses_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1/responses",
+            axum::routing::post(crate::responses::responses_handler).options(options_handler),
+        )
+        .route(
+            "/v1/responses/compact",
+            axum::routing::post(crate::responses::responses_compact_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/v1/responses/compact",
+            axum::routing::post(crate::responses::responses_compact_handler)
+                .options(options_handler),
+        )
+        // Native Gemini REST API (v1beta)
+        .route(
+            "/v1beta/models",
+            axum::routing::get(crate::v1beta::v1beta_models_list_handler).options(options_handler),
+        )
+        .route(
+            "/api/v1beta/models",
+            axum::routing::get(crate::v1beta::v1beta_models_list_handler).options(options_handler),
+        )
+        .route(
+            "/v1beta/models/{*path}",
+            axum::routing::get(crate::v1beta::v1beta_model_get_handler)
+                .post(crate::v1beta::v1beta_models_action_handler)
+                .options(options_handler),
+        )
+        .route(
+            "/api/v1beta/models/{*path}",
+            axum::routing::get(crate::v1beta::v1beta_model_get_handler)
+                .post(crate::v1beta::v1beta_models_action_handler)
+                .options(options_handler),
+        )
         // Embeddings
         .route(
             "/v1/embeddings",
@@ -7191,17 +7240,6 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/dashboard/chat/completions",
             axum::routing::post(dashboard_chat_completions_handler).options(options_handler),
-        )
-        // Gemini API v1beta compatibility
-        .route(
-            "/v1beta/models",
-            axum::routing::get(crate::gemini::gemini_models_handler).options(options_handler),
-        )
-        .route(
-            "/v1beta/models/{*path}",
-            axum::routing::get(crate::gemini::gemini_model_get_handler)
-                .post(crate::gemini::gemini_action_handler)
-                .options(options_handler),
         )
         // Tunnel Service
         .route(
@@ -9621,6 +9659,171 @@ mod tests {
         assert_eq!(settings_json["rateLimit"]["ip"]["allowlist"], json!(["10.9.9.9"]));
         assert_eq!(settings_json["rateLimit"]["models"]["enabled"], false);
         assert_eq!(settings_json["rateLimit"]["models"]["limits"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn test_responses_count_tokens_and_v1beta_router_integration() {
+        let db = Database::open_in_memory().unwrap();
+        let config = Arc::new(Config {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/test-v1beta-responses.sqlite"),
+            port: 20127,
+            jwt_secret: "secret".to_string(),
+            ..Default::default()
+        });
+        let proxy = Arc::new(ProxyService::new());
+        let original = crate::original::Original::empty();
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let token_cache = crate::cache::TokenCache::default();
+        let circuit_breaker = Arc::clone(&combo_tracker.circuit_breakers);
+        let state = AppState {
+            config: Arc::clone(&config),
+            db: db.clone(),
+            proxy,
+            original,
+            combo_tracker,
+            token_cache,
+            circuit_breaker,
+            console_buffer: ConsoleLogBuffer::new(),
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
+        };
+        let app = create_router(state);
+
+        // 1. Auth enforcement (401 without API key) across all newly wired endpoints
+        for (method, uri, body) in [
+            ("POST", "/v1/responses", r#"{"model":"gpt-4o","input":"hi"}"#),
+            (
+                "POST",
+                "/v1/responses/compact",
+                r#"{"model":"gpt-4o","input":"hi"}"#,
+            ),
+            (
+                "POST",
+                "/v1/messages/count_tokens",
+                r#"{"model":"claude-3-7-sonnet-20250219","messages":[{"role":"user","content":"hello"}]}"#,
+            ),
+            ("GET", "/v1beta/models", ""),
+            (
+                "POST",
+                "/v1beta/models/gemini-2.5-flash:generateContent",
+                r#"{"contents":[{"parts":[{"text":"hi"}]}]}"#,
+            ),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(if body.is_empty() {
+                    Body::empty()
+                } else {
+                    Body::from(body)
+                })
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "expected 401 for unauthenticated {} {}",
+                method,
+                uri
+            );
+        }
+
+        // Create a valid API key in DB
+        let key = ApiKey {
+            id: "key-router-integration-test".to_string(),
+            key: "sk-router-integration-test".to_string(),
+            name: Some("test-v1beta-responses".to_string()),
+            is_active: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            ..Default::default()
+        };
+        db.save_api_key(&key).unwrap();
+
+        // 2. POST /v1/messages/count_tokens -> 200 JSON with input_tokens > 0
+        for uri in ["/v1/messages/count_tokens", "/api/v1/messages/count_tokens"] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("x-api-key", "sk-router-integration-test")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"model":"claude-3-7-sonnet-20250219","system":"You are helpful.","messages":[{"role":"user","content":"Hello world, please count my tokens!"}]}"#,
+                ))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "expected 200 for {}", uri);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                payload["input_tokens"].as_u64().unwrap_or(0) > 0,
+                "expected positive input_tokens for {}, got {}",
+                uri,
+                payload
+            );
+        }
+
+        // 3. GET /v1beta/models and /api/v1beta/models -> 200 JSON with models array
+        for (uri, auth_header, auth_val) in [
+            ("/v1beta/models", "x-goog-api-key", "sk-router-integration-test"),
+            (
+                "/api/v1beta/models",
+                "authorization",
+                "Bearer sk-router-integration-test",
+            ),
+        ] {
+            let req = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(auth_header, auth_val)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "expected 200 for {}", uri);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                payload["models"].is_array(),
+                "expected models array for {}, got {}",
+                uri,
+                payload
+            );
+        }
+
+        // 4. POST /v1/responses & /v1/responses/compact routing (authenticated, no active provider -> non-404/non-401)
+        for uri in [
+            "/v1/responses",
+            "/api/v1/responses",
+            "/v1/responses/compact",
+            "/api/v1/responses/compact",
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("authorization", "Bearer sk-router-integration-test")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-4o","input":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_ne!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "route {} should be registered",
+                uri
+            );
+            assert_ne!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "route {} should accept valid API key",
+                uri
+            );
+        }
     }
 }
 
