@@ -6,6 +6,7 @@ pub mod combo_router;
 pub mod config;
 pub mod custom_adapter;
 pub mod db;
+pub mod db_pg;
 pub mod embed;
 pub mod gemini;
 pub mod media;

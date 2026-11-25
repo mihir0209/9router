@@ -13,12 +13,24 @@
 //   - SQLite to Postgres query translation
 
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use tokio::sync::{mpsc, Notify, Semaphore};
+use tokio_postgres::types::{private::BytesMut, IsNull, ToSql, Type};
+use tokio_postgres::{AsyncMessage, Client, Config as TokioPgConfig, NoTls, Row};
+use tracing::{error, warn};
+
+use crate::db::{
+    ApiKey, Combo, ConnectionData, Plan, ProviderConnection, ProviderNode, ProxyPool,
+    RequestDetail, UsageRecord,
+};
 
 /// Schema version matching schema.js
 pub const SCHEMA_VERSION: u32 = 4;
@@ -155,7 +167,7 @@ pub static ALL_TABLE_DEFS: &[TableDef] = &[
             ("description", "TEXT DEFAULT ''"),
             ("ownerRef", "TEXT"),
             ("budgetUsd", "REAL"),
-            ("budgetResetHours", "INTEGER"),
+            ("budgetResetHours", "REAL"),
             ("budgetWindowStartedAt", "TEXT"),
             ("billingMode", "TEXT DEFAULT 'credits'"),
             ("byokProvider", "TEXT"),
@@ -983,39 +995,87 @@ impl PgMemoryAdapter {
             || lower.contains("syntax error")
     }
 
+    /// Rebuild primary-key and apiKey indexes for a given table.
+    fn rebuild_table_indexes_locked(
+        table: &str,
+        list: &[HashMap<String, Value>],
+        pk_guard: &mut HashMap<String, HashMap<String, usize>>,
+        ak_guard: &mut HashMap<String, usize>,
+    ) {
+        let table_pks = pk_guard.entry(table.to_string()).or_default();
+        table_pks.clear();
+        if table == "apiKeys" {
+            ak_guard.clear();
+        }
+        for (idx, row) in list.iter().enumerate() {
+            let pk = primary_key_for_row(table, row);
+            table_pks.insert(pk, idx);
+            if table == "apiKeys" {
+                if let Some(key_val) = row.get("key").and_then(|v| v.as_str()) {
+                    ak_guard.insert(key_val.to_string(), idx);
+                }
+            }
+        }
+    }
+
+    /// Update in-memory cache for a single row without enqueueing a write-behind item.
+    pub fn upsert_cached_row(&self, table: &str, row: HashMap<String, Value>) -> Result<(), String> {
+        let pk_key = primary_key_for_row(table, &row);
+        let mut tables = self.tables.write().map_err(|e| e.to_string())?;
+        let list = tables.entry(table.to_string()).or_default();
+        let mut pk_guard = self.pk_index.write().map_err(|e| e.to_string())?;
+        let mut ak_guard = self.api_key_index.write().map_err(|e| e.to_string())?;
+        let table_pks = pk_guard.entry(table.to_string()).or_default();
+
+        if let Some(&idx) = table_pks.get(&pk_key) {
+            if idx < list.len() {
+                if table == "apiKeys" {
+                    if let Some(old_key) = list[idx].get("key").and_then(|v| v.as_str()) {
+                        ak_guard.remove(old_key);
+                    }
+                }
+                for (k, v) in &row {
+                    list[idx].insert(k.clone(), v.clone());
+                }
+                if table == "apiKeys" {
+                    if let Some(key_val) = list[idx].get("key").and_then(|v| v.as_str()) {
+                        ak_guard.insert(key_val.to_string(), idx);
+                    }
+                }
+            }
+        } else {
+            let idx = list.len();
+            if table == "apiKeys" {
+                if let Some(key_val) = row.get("key").and_then(|v| v.as_str()) {
+                    ak_guard.insert(key_val.to_string(), idx);
+                }
+            }
+            list.push(row);
+            table_pks.insert(pk_key, idx);
+        }
+        Ok(())
+    }
+
+    /// Delete a row from in-memory cache without enqueueing a write-behind item.
+    pub fn delete_cached_row(&self, table: &str, keys: &HashMap<String, Value>) -> Result<(), String> {
+        let pk_key = primary_key_for_row(table, keys);
+        let mut tables = self.tables.write().map_err(|e| e.to_string())?;
+        let mut pk_guard = self.pk_index.write().map_err(|e| e.to_string())?;
+        let mut ak_guard = self.api_key_index.write().map_err(|e| e.to_string())?;
+        if let Some(list) = tables.get_mut(table) {
+            list.retain(|r| primary_key_for_row(table, r) != pk_key);
+            Self::rebuild_table_indexes_locked(table, list, &mut pk_guard, &mut ak_guard);
+        }
+        Ok(())
+    }
+
     /// Insert or update a row in memory and queue for write-behind persistence.
     pub fn insert_row(&self, table: &str, row: HashMap<String, Value>) -> Result<bool, String> {
         let pk_key = primary_key_for_row(table, &row);
         let queue_key = format!("{}|{}", table, pk_key);
 
         // Update in-memory state with O(1) PK index
-        {
-            let mut tables = self.tables.write().map_err(|e| e.to_string())?;
-            let list = tables.entry(table.to_string()).or_default();
-            let mut pk_guard = self.pk_index.write().map_err(|e| e.to_string())?;
-            let table_pks = pk_guard.entry(table.to_string()).or_default();
-
-            if let Some(&idx) = table_pks.get(&pk_key) {
-                if idx < list.len() {
-                    for (k, v) in &row {
-                        list[idx].insert(k.clone(), v.clone());
-                    }
-                }
-            } else {
-                let idx = list.len();
-                list.push(row.clone());
-                table_pks.insert(pk_key.clone(), idx);
-            }
-
-            if table == "apiKeys" {
-                if let Some(key_val) = row.get("key").and_then(|v| v.as_str()) {
-                    let idx = *table_pks.get(&pk_key).unwrap_or(&0);
-                    if let Ok(mut ak_idx) = self.api_key_index.write() {
-                        ak_idx.insert(key_val.to_string(), idx);
-                    }
-                }
-            }
-        }
+        self.upsert_cached_row(table, row.clone())?;
 
         // Mark table dirty
         if let Ok(mut dirty) = self.dirty_tables.write() {
@@ -1046,18 +1106,8 @@ impl PgMemoryAdapter {
         let pk_key = primary_key_for_row(table, &keys);
         let queue_key = format!("{}|{}", table, pk_key);
 
-        // Remove from in-memory state
-        {
-            let mut tables = self.tables.write().map_err(|e| e.to_string())?;
-            if let Some(list) = tables.get_mut(table) {
-                list.retain(|r| primary_key_for_row(table, r) != pk_key);
-            }
-            if let Ok(mut pk_guard) = self.pk_index.write() {
-                if let Some(table_pks) = pk_guard.get_mut(table) {
-                    table_pks.remove(&pk_key);
-                }
-            }
-        }
+        // Remove from in-memory state and rebuild indices
+        self.delete_cached_row(table, &keys)?;
 
         // Mark table dirty
         if let Ok(mut dirty) = self.dirty_tables.write() {
@@ -1215,9 +1265,3749 @@ impl PgMemoryAdapter {
         }
 
         *current_list = merged;
+        if let (Ok(mut pk_guard), Ok(mut ak_guard)) = (self.pk_index.write(), self.api_key_index.write()) {
+            Self::rebuild_table_indexes_locked(table, current_list, &mut pk_guard, &mut ak_guard);
+        }
         if let Ok(mut dirty) = self.dirty_tables.write() {
             dirty.remove(table);
         }
+    }
+}
+
+// ============================================================================
+// Live Async Postgres TCP Wire Driver & Connection Pool
+// ============================================================================
+
+/// Dynamic parameter binding wrapper for tokio-postgres Extended Query Protocol.
+/// Adapts Rust values to the exact column type reported by Postgres Describe metadata.
+#[derive(Debug, Clone)]
+pub enum PgParam {
+    Null,
+    Text(Option<String>),
+    Int(Option<i64>),
+    Float(Option<f64>),
+    Bool(Option<bool>),
+}
+
+impl From<&str> for PgParam {
+    fn from(s: &str) -> Self {
+        Self::Text(Some(s.to_string()))
+    }
+}
+
+impl From<String> for PgParam {
+    fn from(s: String) -> Self {
+        Self::Text(Some(s))
+    }
+}
+
+impl From<Option<String>> for PgParam {
+    fn from(s: Option<String>) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<Option<&str>> for PgParam {
+    fn from(s: Option<&str>) -> Self {
+        Self::Text(s.map(|v| v.to_string()))
+    }
+}
+
+impl From<i32> for PgParam {
+    fn from(v: i32) -> Self {
+        Self::Int(Some(v as i64))
+    }
+}
+
+impl From<i64> for PgParam {
+    fn from(v: i64) -> Self {
+        Self::Int(Some(v))
+    }
+}
+
+impl From<Option<i64>> for PgParam {
+    fn from(v: Option<i64>) -> Self {
+        Self::Int(v)
+    }
+}
+
+impl From<f64> for PgParam {
+    fn from(v: f64) -> Self {
+        Self::Float(Some(v))
+    }
+}
+
+impl From<Option<f64>> for PgParam {
+    fn from(v: Option<f64>) -> Self {
+        Self::Float(v)
+    }
+}
+
+impl From<bool> for PgParam {
+    fn from(b: bool) -> Self {
+        Self::Bool(Some(b))
+    }
+}
+
+impl ToSql for PgParam {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match self {
+            PgParam::Null => Ok(IsNull::Yes),
+            PgParam::Text(None) => Ok(IsNull::Yes),
+            PgParam::Text(Some(s)) => s.to_sql(ty, out),
+            PgParam::Int(None) => Ok(IsNull::Yes),
+            PgParam::Int(Some(v)) => match *ty {
+                Type::INT2 => (*v as i16).to_sql(ty, out),
+                Type::INT4 => (*v as i32).to_sql(ty, out),
+                Type::INT8 => (*v).to_sql(ty, out),
+                Type::FLOAT4 => (*v as f32).to_sql(ty, out),
+                Type::FLOAT8 => (*v as f64).to_sql(ty, out),
+                Type::BOOL => (*v != 0).to_sql(ty, out),
+                Type::TEXT | Type::VARCHAR | Type::BPCHAR => v.to_string().to_sql(ty, out),
+                _ => (*v).to_sql(ty, out),
+            },
+            PgParam::Float(None) => Ok(IsNull::Yes),
+            PgParam::Float(Some(v)) => match *ty {
+                Type::FLOAT4 => (*v as f32).to_sql(ty, out),
+                Type::FLOAT8 => (*v).to_sql(ty, out),
+                Type::INT4 => (*v as i32).to_sql(ty, out),
+                Type::INT8 => (*v as i64).to_sql(ty, out),
+                Type::TEXT | Type::VARCHAR | Type::BPCHAR => v.to_string().to_sql(ty, out),
+                _ => (*v).to_sql(ty, out),
+            },
+            PgParam::Bool(None) => Ok(IsNull::Yes),
+            PgParam::Bool(Some(b)) => match *ty {
+                Type::INT2 => (if *b { 1i16 } else { 0i16 }).to_sql(ty, out),
+                Type::INT4 => (if *b { 1i32 } else { 0i32 }).to_sql(ty, out),
+                Type::INT8 => (if *b { 1i64 } else { 0i64 }).to_sql(ty, out),
+                _ => b.to_sql(ty, out),
+            },
+        }
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(
+            *ty,
+            Type::TEXT
+                | Type::VARCHAR
+                | Type::BPCHAR
+                | Type::NAME
+                | Type::INT2
+                | Type::INT4
+                | Type::INT8
+                | Type::FLOAT4
+                | Type::FLOAT8
+                | Type::BOOL
+                | Type::UNKNOWN
+        )
+    }
+
+    tokio_postgres::types::to_sql_checked!();
+}
+
+fn pg_col_opt_str(row: &Row, idx: usize) -> Option<String> {
+    row.try_get::<_, Option<String>>(idx).ok().flatten()
+}
+
+fn pg_col_str(row: &Row, idx: usize) -> String {
+    pg_col_opt_str(row, idx).unwrap_or_default()
+}
+
+fn pg_col_opt_i64(row: &Row, idx: usize) -> Option<i64> {
+    let ty = row.columns()[idx].type_();
+    if *ty == Type::INT8 {
+        row.try_get::<_, Option<i64>>(idx).ok().flatten()
+    } else if *ty == Type::INT4 {
+        row.try_get::<_, Option<i32>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v as i64)
+    } else if *ty == Type::INT2 {
+        row.try_get::<_, Option<i16>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v as i64)
+    } else if *ty == Type::FLOAT8 {
+        row.try_get::<_, Option<f64>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v as i64)
+    } else if *ty == Type::BOOL {
+        row.try_get::<_, Option<bool>>(idx)
+            .ok()
+            .flatten()
+            .map(|b| if b { 1 } else { 0 })
+    } else {
+        row.try_get::<_, Option<i64>>(idx).ok().flatten()
+    }
+}
+
+fn pg_col_i64(row: &Row, idx: usize) -> i64 {
+    pg_col_opt_i64(row, idx).unwrap_or(0)
+}
+
+fn pg_col_opt_f64(row: &Row, idx: usize) -> Option<f64> {
+    let ty = row.columns()[idx].type_();
+    if *ty == Type::FLOAT8 {
+        row.try_get::<_, Option<f64>>(idx).ok().flatten()
+    } else if *ty == Type::FLOAT4 {
+        row.try_get::<_, Option<f32>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v as f64)
+    } else if *ty == Type::INT8 {
+        row.try_get::<_, Option<i64>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v as f64)
+    } else if *ty == Type::INT4 {
+        row.try_get::<_, Option<i32>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v as f64)
+    } else {
+        row.try_get::<_, Option<f64>>(idx).ok().flatten()
+    }
+}
+
+fn pg_col_f64(row: &Row, idx: usize) -> f64 {
+    pg_col_opt_f64(row, idx).unwrap_or(0.0)
+}
+
+/// Guards a dedicated Tokio runtime so dropping it inside another Tokio runtime never panics.
+struct PgRuntimeGuard(Option<tokio::runtime::Runtime>);
+
+impl Drop for PgRuntimeGuard {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                std::thread::spawn(move || drop(rt));
+            } else {
+                drop(rt);
+            }
+        }
+    }
+}
+
+/// Builds a shared rustls ClientConfig using webpki-roots + ring crypto provider.
+fn build_rustls_client_config() -> anyhow::Result<rustls::ClientConfig> {
+    let root_store = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| anyhow::anyhow!("Failed to configure TLS protocol versions: {}", e))?
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+    Ok(cfg)
+}
+
+/// Parses PgConfig into tokio_postgres::Config, applying timeout and SSL mode.
+fn build_tokio_pg_config(cfg: &PgConfig) -> anyhow::Result<(TokioPgConfig, bool)> {
+    let mut pg_cfg = TokioPgConfig::from_str(&cfg.connection_string)
+        .map_err(|e| anyhow::anyhow!("Invalid Postgres connection string: {}", e))?;
+    pg_cfg.connect_timeout(cfg.connection_timeout);
+
+    let lower = cfg.connection_string.to_ascii_lowercase();
+    let explicit_disable = lower.contains("sslmode=disable");
+    let explicit_require = lower.contains("sslmode=require")
+        || lower.contains("sslmode=verify-ca")
+        || lower.contains("sslmode=verify-full");
+
+    let use_tls = if cfg.force_ssl || explicit_require {
+        if cfg.force_ssl && !explicit_require {
+            pg_cfg.ssl_mode(tokio_postgres::config::SslMode::Require);
+        }
+        true
+    } else if explicit_disable {
+        false
+    } else {
+        // Default: allow TLS when server requests or fallback to plaintext
+        false
+    };
+
+    Ok((pg_cfg, use_tls))
+}
+
+/// Opens a raw tokio-postgres Client and spawns its connection driver on the current runtime.
+async fn connect_raw_client(cfg: &PgConfig, apply_search_path: bool) -> anyhow::Result<Client> {
+    let (pg_cfg, use_tls) = build_tokio_pg_config(cfg)?;
+    let client = if use_tls {
+        let tls_cfg = build_rustls_client_config()?;
+        let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls_cfg);
+        let (client, connection) = pg_cfg
+            .connect(connector)
+            .await
+            .map_err(|e| anyhow::anyhow!("Postgres TLS connect failed: {}", e))?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("Postgres TLS connection closed: {}", e);
+            }
+        });
+        client
+    } else {
+        let (client, connection) = pg_cfg
+            .connect(NoTls)
+            .await
+            .map_err(|e| anyhow::anyhow!("Postgres TCP connect failed: {}", e))?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("Postgres TCP connection closed: {}", e);
+            }
+        });
+        client
+    };
+
+    if apply_search_path {
+        if let Some(ref schema) = cfg.schema {
+            if !schema.trim().is_empty() {
+                client
+                    .batch_execute(&format!("SET search_path TO {}", pg_ident(schema)))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to set search_path to {}: {}", schema, e))?;
+            }
+        }
+    }
+
+    Ok(client)
+}
+
+/// RAII handle for a pooled tokio-postgres Client.
+pub struct PgPooledClient {
+    client: Option<Client>,
+    idle: Arc<Mutex<Vec<Client>>>,
+    broken: bool,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl PgPooledClient {
+    pub fn client(&self) -> &Client {
+        self.client.as_ref().expect("pooled client already taken")
+    }
+
+    pub fn client_mut(&mut self) -> &mut Client {
+        self.client.as_mut().expect("pooled client already taken")
+    }
+
+    pub fn mark_broken(&mut self) {
+        self.broken = true;
+    }
+}
+
+impl Drop for PgPooledClient {
+    fn drop(&mut self) {
+        if let Some(c) = self.client.take() {
+            if !self.broken && !c.is_closed() {
+                if let Ok(mut guard) = self.idle.lock() {
+                    guard.push(c);
+                }
+            }
+        }
+    }
+}
+
+/// Lightweight async Postgres connection pool backed by a dedicated multi-threaded Tokio runtime.
+pub struct PgLivePool {
+    config: PgConfig,
+    manager: PgConnectionManager,
+    runtime: PgRuntimeGuard,
+    idle: Arc<Mutex<Vec<Client>>>,
+    semaphore: Arc<Semaphore>,
+}
+
+impl PgLivePool {
+    pub fn new(config: PgConfig) -> anyhow::Result<Arc<Self>> {
+        let max_conns = config.max_connections.max(2) as usize;
+        let worker_threads = max_conns.clamp(2, 4);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(worker_threads)
+            .thread_name("9r-pg-pool")
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build Postgres Tokio runtime: {}", e))?;
+
+        let manager = PgConnectionManager::new(config.clone());
+
+        Ok(Arc::new(Self {
+            config,
+            manager,
+            runtime: PgRuntimeGuard(Some(rt)),
+            idle: Arc::new(Mutex::new(Vec::with_capacity(max_conns))),
+            semaphore: Arc::new(Semaphore::new(max_conns)),
+        }))
+    }
+
+    pub fn config(&self) -> &PgConfig {
+        &self.config
+    }
+
+    pub fn manager(&self) -> &PgConnectionManager {
+        &self.manager
+    }
+
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime
+            .0
+            .as_ref()
+            .expect("Postgres runtime dropped")
+            .handle()
+            .clone()
+    }
+
+    /// Runs an async future on the dedicated Postgres Tokio runtime and waits synchronously.
+    /// Safe to call from any thread, including single-threaded `#[tokio::test]` runtimes.
+    pub fn run_blocking<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.runtime_handle().spawn(async move {
+            let res = f().await;
+            let _ = tx.send(res);
+        });
+        rx.recv()
+            .map_err(|e| anyhow::anyhow!("Postgres runtime task aborted: {}", e))?
+    }
+
+    /// Acquires a pooled connection from idle cache or opens a fresh one.
+    pub async fn acquire(&self) -> anyhow::Result<PgPooledClient> {
+        let permit = tokio::time::timeout(
+            self.config.connection_timeout,
+            Arc::clone(&self.semaphore).acquire_owned(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Timed out waiting for Postgres connection pool permit"))?
+        .map_err(|e| anyhow::anyhow!("Postgres pool semaphore closed: {}", e))?;
+
+        let existing = {
+            let mut guard = self.idle.lock().unwrap_or_else(|p| p.into_inner());
+            let mut found = None;
+            while let Some(c) = guard.pop() {
+                if !c.is_closed() {
+                    found = Some(c);
+                    break;
+                }
+            }
+            found
+        };
+
+        let client = match existing {
+            Some(c) => c,
+            None => connect_raw_client(&self.config, true).await?,
+        };
+
+        Ok(PgPooledClient {
+            client: Some(client),
+            idle: Arc::clone(&self.idle),
+            broken: false,
+            _permit: permit,
+        })
+    }
+
+    pub async fn query_async(&self, sql: &str, params: &[PgParam]) -> anyhow::Result<Vec<Row>> {
+        let mut conn = self.acquire().await?;
+        let param_refs: Vec<&(dyn ToSql + Sync)> =
+            params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        match conn.client().query(sql, &param_refs).await {
+            Ok(rows) => {
+                self.manager.record_query_success();
+                Ok(rows)
+            }
+            Err(e) => {
+                if e.is_closed() {
+                    conn.mark_broken();
+                }
+                self.manager.record_query_failure();
+                Err(anyhow::anyhow!("Postgres query failed: {} | SQL: {}", e, sql))
+            }
+        }
+    }
+
+    pub async fn query_opt_async(
+        &self,
+        sql: &str,
+        params: &[PgParam],
+    ) -> anyhow::Result<Option<Row>> {
+        let mut conn = self.acquire().await?;
+        let param_refs: Vec<&(dyn ToSql + Sync)> =
+            params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        match conn.client().query_opt(sql, &param_refs).await {
+            Ok(row) => {
+                self.manager.record_query_success();
+                Ok(row)
+            }
+            Err(e) => {
+                if e.is_closed() {
+                    conn.mark_broken();
+                }
+                self.manager.record_query_failure();
+                Err(anyhow::anyhow!("Postgres query_opt failed: {} | SQL: {}", e, sql))
+            }
+        }
+    }
+
+    pub async fn execute_async(&self, sql: &str, params: &[PgParam]) -> anyhow::Result<u64> {
+        let mut conn = self.acquire().await?;
+        let param_refs: Vec<&(dyn ToSql + Sync)> =
+            params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        match conn.client().execute(sql, &param_refs).await {
+            Ok(affected) => {
+                self.manager.record_query_success();
+                Ok(affected)
+            }
+            Err(e) => {
+                if e.is_closed() {
+                    conn.mark_broken();
+                }
+                self.manager.record_query_failure();
+                Err(anyhow::anyhow!("Postgres execute failed: {} | SQL: {}", e, sql))
+            }
+        }
+    }
+
+    pub fn query(&self, sql: String, params: Vec<PgParam>) -> anyhow::Result<Vec<Row>> {
+        let pool_ref = self.clone_handle();
+        self.run_blocking(move || async move { pool_ref.query_async(&sql, &params).await })
+    }
+
+    pub fn query_opt(&self, sql: String, params: Vec<PgParam>) -> anyhow::Result<Option<Row>> {
+        let pool_ref = self.clone_handle();
+        self.run_blocking(move || async move { pool_ref.query_opt_async(&sql, &params).await })
+    }
+
+    pub fn execute(&self, sql: String, params: Vec<PgParam>) -> anyhow::Result<u64> {
+        let pool_ref = self.clone_handle();
+        self.run_blocking(move || async move { pool_ref.execute_async(&sql, &params).await })
+    }
+
+    fn clone_handle(&self) -> PgPoolHandle {
+        PgPoolHandle {
+            config: self.config.clone(),
+            manager_total: Arc::clone(&self.manager.total_queries),
+            manager_failed: Arc::clone(&self.manager.failed_queries),
+            idle: Arc::clone(&self.idle),
+            semaphore: Arc::clone(&self.semaphore),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PgPoolHandle {
+    config: PgConfig,
+    manager_total: Arc<Mutex<u64>>,
+    manager_failed: Arc<Mutex<u64>>,
+    idle: Arc<Mutex<Vec<Client>>>,
+    semaphore: Arc<Semaphore>,
+}
+
+impl PgPoolHandle {
+    fn record_success(&self) {
+        if let Ok(mut g) = self.manager_total.lock() {
+            *g += 1;
+        }
+    }
+
+    fn record_failure(&self) {
+        if let Ok(mut g) = self.manager_total.lock() {
+            *g += 1;
+        }
+        if let Ok(mut g) = self.manager_failed.lock() {
+            *g += 1;
+        }
+    }
+
+    async fn acquire(&self) -> anyhow::Result<PgPooledClient> {
+        let permit = tokio::time::timeout(
+            self.config.connection_timeout,
+            Arc::clone(&self.semaphore).acquire_owned(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Timed out waiting for Postgres connection pool permit"))?
+        .map_err(|e| anyhow::anyhow!("Postgres pool semaphore closed: {}", e))?;
+
+        let existing = {
+            let mut guard = self.idle.lock().unwrap_or_else(|p| p.into_inner());
+            let mut found = None;
+            while let Some(c) = guard.pop() {
+                if !c.is_closed() {
+                    found = Some(c);
+                    break;
+                }
+            }
+            found
+        };
+
+        let client = match existing {
+            Some(c) => c,
+            None => connect_raw_client(&self.config, true).await?,
+        };
+
+        Ok(PgPooledClient {
+            client: Some(client),
+            idle: Arc::clone(&self.idle),
+            broken: false,
+            _permit: permit,
+        })
+    }
+
+    async fn query_async(&self, sql: &str, params: &[PgParam]) -> anyhow::Result<Vec<Row>> {
+        let mut conn = self.acquire().await?;
+        let param_refs: Vec<&(dyn ToSql + Sync)> =
+            params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        match conn.client().query(sql, &param_refs).await {
+            Ok(rows) => {
+                self.record_success();
+                Ok(rows)
+            }
+            Err(e) => {
+                if e.is_closed() {
+                    conn.mark_broken();
+                }
+                self.record_failure();
+                Err(anyhow::anyhow!("Postgres query failed: {} | SQL: {}", e, sql))
+            }
+        }
+    }
+
+    async fn query_opt_async(&self, sql: &str, params: &[PgParam]) -> anyhow::Result<Option<Row>> {
+        let mut conn = self.acquire().await?;
+        let param_refs: Vec<&(dyn ToSql + Sync)> =
+            params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        match conn.client().query_opt(sql, &param_refs).await {
+            Ok(row) => {
+                self.record_success();
+                Ok(row)
+            }
+            Err(e) => {
+                if e.is_closed() {
+                    conn.mark_broken();
+                }
+                self.record_failure();
+                Err(anyhow::anyhow!("Postgres query_opt failed: {} | SQL: {}", e, sql))
+            }
+        }
+    }
+
+    async fn execute_async(&self, sql: &str, params: &[PgParam]) -> anyhow::Result<u64> {
+        let mut conn = self.acquire().await?;
+        let param_refs: Vec<&(dyn ToSql + Sync)> =
+            params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        match conn.client().execute(sql, &param_refs).await {
+            Ok(affected) => {
+                self.record_success();
+                Ok(affected)
+            }
+            Err(e) => {
+                if e.is_closed() {
+                    conn.mark_broken();
+                }
+                self.record_failure();
+                Err(anyhow::anyhow!("Postgres execute failed: {} | SQL: {}", e, sql))
+            }
+        }
+    }
+}
+
+enum PgUsageMsg {
+    Record(UsageRecord),
+    Flush(std::sync::mpsc::SyncSender<anyhow::Result<()>>),
+}
+
+enum PgDetailMsg {
+    Record(RequestDetail),
+    Flush(std::sync::mpsc::SyncSender<anyhow::Result<()>>),
+}
+
+/// Live Postgres backend combining pooled TCP/TLS execution, in-memory L1 caches,
+/// LISTEN/NOTIFY cross-instance invalidation, and write-behind batch flushing.
+pub struct PgBackend {
+    pool: Arc<PgLivePool>,
+    memory: PgMemoryAdapter,
+    notify_channel: String,
+    started_at: Instant,
+    stale_mask: Arc<AtomicU64>,
+    loaded_mask: AtomicU64,
+    last_sync_ms: [AtomicU64; 8],
+    cache_ttl_ms: u64,
+    shutdown: Arc<Notify>,
+    // Typed L1 caches synchronized with PgMemoryAdapter
+    api_keys_by_key: Arc<RwLock<HashMap<String, ApiKey>>>,
+    api_keys_by_id: Arc<RwLock<HashMap<String, ApiKey>>>,
+    provider_connections: Arc<RwLock<Option<Vec<ProviderConnection>>>>,
+    provider_nodes: Arc<RwLock<Vec<ProviderNode>>>,
+    proxy_pools: Arc<RwLock<Vec<ProxyPool>>>,
+    combos_by_name: Arc<RwLock<HashMap<String, Combo>>>,
+    combos_by_id: Arc<RwLock<HashMap<String, Combo>>>,
+    combos_list: Arc<RwLock<Vec<Combo>>>,
+    combo_name_misses: Arc<RwLock<HashSet<String>>>,
+    settings_cache: Arc<RwLock<Option<Value>>>,
+    kv_cache: Arc<RwLock<Option<HashMap<String, HashMap<String, String>>>>>,
+    // Write-behind channels
+    usage_tx: mpsc::Sender<PgUsageMsg>,
+    detail_tx: mpsc::Sender<PgDetailMsg>,
+}
+
+fn table_slot(table: &str) -> Option<usize> {
+    match table {
+        "settings" => Some(0),
+        "apiKeys" => Some(1),
+        "providerConnections" => Some(2),
+        "providerNodes" => Some(3),
+        "proxyPools" => Some(4),
+        "combos" => Some(5),
+        "kv" => Some(6),
+        "_meta" => Some(7),
+        _ => None,
+    }
+}
+
+impl Drop for PgBackend {
+    fn drop(&mut self) {
+        self.shutdown.notify_waiters();
+    }
+}
+
+impl PgBackend {
+    /// Connects to live Postgres, bootstraps schema/tables/indexes/migrations idempotently,
+    /// hydrates critical tables, and starts write-behind + LISTEN/NOTIFY workers.
+    pub fn connect(config: PgConfig) -> anyhow::Result<Arc<Self>> {
+        let pool = PgLivePool::new(config.clone())?;
+        let memory = PgMemoryAdapter::new(config.clone());
+        let schema_label = config
+            .schema
+            .as_deref()
+            .unwrap_or("public")
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .collect::<String>();
+        let notify_channel = format!("nr_inv_{}", schema_label);
+
+        let cache_ttl_ms = std::env::var("PG_CACHE_TTL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(2000);
+
+        // 1. Bootstrap schema, tables, declarative indexes, and additive migrations idempotently
+        let bootstrap_cfg = config.clone();
+        pool.run_blocking(move || async move {
+            let client = connect_raw_client(&bootstrap_cfg, false).await?;
+            let mut stmts = build_bootstrap_schema_sql(bootstrap_cfg.schema.as_deref());
+            stmts.push(
+                r#"CREATE INDEX IF NOT EXISTS idx_pc_provider_priority ON "providerConnections" ("provider", "isActive", "priority" DESC)"#
+                    .to_string(),
+            );
+            stmts.push(
+                r#"CREATE INDEX IF NOT EXISTS idx_rd_key_ts ON "requestDetails" ("connectionId", "timestamp" DESC)"#
+                    .to_string(),
+            );
+            stmts.push(
+                r#"CREATE INDEX IF NOT EXISTS idx_audit_owner_time ON "auditLog" ("ownerRef", "timestamp" DESC)"#
+                    .to_string(),
+            );
+
+            // Execute inside batch_execute; schema creation & SET search_path happen first.
+            let batch_sql = stmts.join(";\n");
+            client
+                .batch_execute(&batch_sql)
+                .await
+                .map_err(|e| anyhow::anyhow!("Postgres bootstrap DDL failed: {}", e))?;
+            Ok(())
+        })?;
+
+        let (usage_tx, usage_rx) = mpsc::channel(10_000);
+        let (detail_tx, detail_rx) = mpsc::channel(10_000);
+
+        let backend = Arc::new(Self {
+            pool: Arc::clone(&pool),
+            memory,
+            notify_channel,
+            started_at: Instant::now(),
+            stale_mask: Arc::new(AtomicU64::new(0)),
+            loaded_mask: AtomicU64::new(0),
+            last_sync_ms: std::array::from_fn(|_| AtomicU64::new(0)),
+            cache_ttl_ms,
+            shutdown: Arc::new(Notify::new()),
+            api_keys_by_key: Arc::new(RwLock::new(HashMap::new())),
+            api_keys_by_id: Arc::new(RwLock::new(HashMap::new())),
+            provider_connections: Arc::new(RwLock::new(None)),
+            provider_nodes: Arc::new(RwLock::new(Vec::new())),
+            proxy_pools: Arc::new(RwLock::new(Vec::new())),
+            combos_by_name: Arc::new(RwLock::new(HashMap::new())),
+            combos_by_id: Arc::new(RwLock::new(HashMap::new())),
+            combos_list: Arc::new(RwLock::new(Vec::new())),
+            combo_name_misses: Arc::new(RwLock::new(HashSet::new())),
+            settings_cache: Arc::new(RwLock::new(None)),
+            kv_cache: Arc::new(RwLock::new(None)),
+            usage_tx,
+            detail_tx,
+        });
+
+        // 2. Hydrate critical non-lazy tables at boot
+        backend.hydrate_table("settings")?;
+        backend.hydrate_table("apiKeys")?;
+        backend.hydrate_table("providerNodes")?;
+        backend.hydrate_table("proxyPools")?;
+        backend.hydrate_table("combos")?;
+        backend.hydrate_table("_meta")?;
+
+        // 3. Start background workers on the Postgres Tokio runtime
+        Self::spawn_usage_worker(&backend.pool, usage_rx);
+        Self::spawn_request_details_worker(&backend.pool, detail_rx);
+        Self::spawn_listener_worker(Arc::clone(&backend));
+
+        Ok(backend)
+    }
+
+    pub fn config(&self) -> &PgConfig {
+        self.pool.config()
+    }
+
+    pub fn stats(&self) -> (u64, u64) {
+        self.pool.manager().stats()
+    }
+
+    pub fn memory_adapter(&self) -> &PgMemoryAdapter {
+        &self.memory
+    }
+
+    pub fn refresh_all_caches(&self) -> anyhow::Result<()> {
+        for table in &[
+            "settings",
+            "apiKeys",
+            "providerConnections",
+            "providerNodes",
+            "proxyPools",
+            "combos",
+            "kv",
+        ] {
+            self.hydrate_table(table)?;
+        }
+        Ok(())
+    }
+
+    fn spawn_listener_worker(backend: Arc<Self>) {
+        let rt = backend.pool.runtime_handle();
+        let cfg = backend.pool.config().clone();
+        let channel = backend.notify_channel.clone();
+        let stale = Arc::clone(&backend.stale_mask);
+        let shutdown = Arc::clone(&backend.shutdown);
+
+        rt.spawn(async move {
+            let mut backoff_ms = 100u64;
+            loop {
+                tokio::select! {
+                    _ = shutdown.notified() => break,
+                    res = Self::run_listen_session(&cfg, &channel, &stale, &shutdown) => {
+                        match res {
+                            Ok(()) => break,
+                            Err(e) => {
+                                warn!("Postgres LISTEN session ended ({}), reconnecting in {}ms", e, backoff_ms);
+                                // Mark cached tables stale on disconnect so next read refreshes
+                                stale.fetch_or(0xFF, Ordering::Release);
+                                tokio::select! {
+                                    _ = shutdown.notified() => break,
+                                    _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                                }
+                                backoff_ms = (backoff_ms * 2).min(5000);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    async fn run_listen_session(
+        cfg: &PgConfig,
+        channel: &str,
+        stale: &Arc<AtomicU64>,
+        shutdown: &Arc<Notify>,
+    ) -> anyhow::Result<()> {
+        let (pg_cfg, use_tls) = build_tokio_pg_config(cfg)?;
+        let listen_sql = format!("LISTEN {}", pg_ident(channel));
+
+        if use_tls {
+            let tls_cfg = build_rustls_client_config()?;
+            let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls_cfg);
+            let (client, connection) = pg_cfg.connect(connector).await?;
+            let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+            let driver = tokio::spawn(async move {
+                let mut conn_pin = std::pin::pin!(connection);
+                loop {
+                    match futures_util::future::poll_fn(|cx| conn_pin.as_mut().poll_message(cx)).await {
+                        Some(Ok(AsyncMessage::Notification(n))) => {
+                            let _ = tx.send(n.payload().to_string());
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => return Err(e),
+                        None => return Ok(()),
+                    }
+                }
+            });
+            client.batch_execute(&listen_sql).await?;
+            loop {
+                tokio::select! {
+                    _ = shutdown.notified() => {
+                        driver.abort();
+                        return Ok(());
+                    }
+                    msg = rx.recv() => {
+                        match msg {
+                            Some(payload) => Self::mark_table_stale_from_notify(stale, &payload),
+                            None => {
+                                let _ = driver.await?;
+                                anyhow::bail!("LISTEN stream closed");
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            let (client, connection) = pg_cfg.connect(NoTls).await?;
+            let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+            let driver = tokio::spawn(async move {
+                let mut conn_pin = std::pin::pin!(connection);
+                loop {
+                    match futures_util::future::poll_fn(|cx| conn_pin.as_mut().poll_message(cx)).await {
+                        Some(Ok(AsyncMessage::Notification(n))) => {
+                            let _ = tx.send(n.payload().to_string());
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => return Err(e),
+                        None => return Ok(()),
+                    }
+                }
+            });
+            client.batch_execute(&listen_sql).await?;
+            loop {
+                tokio::select! {
+                    _ = shutdown.notified() => {
+                        driver.abort();
+                        return Ok(());
+                    }
+                    msg = rx.recv() => {
+                        match msg {
+                            Some(payload) => Self::mark_table_stale_from_notify(stale, &payload),
+                            None => {
+                                let _ = driver.await?;
+                                anyhow::bail!("LISTEN stream closed");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn mark_table_stale_from_notify(stale: &Arc<AtomicU64>, payload: &str) {
+        if payload == "*" {
+            stale.fetch_or(0xFF, Ordering::Release);
+        } else if let Some(slot) = table_slot(payload) {
+            stale.fetch_or(1u64 << slot, Ordering::Release);
+        }
+    }
+
+    fn notify_table_changed(&self, table: &str) {
+        let channel = self.notify_channel.clone();
+        let payload = table.to_string();
+        let handle = self.pool.clone_handle();
+        self.pool.runtime_handle().spawn(async move {
+            let _ = handle
+                .execute_async(
+                    "SELECT pg_notify($1, $2)",
+                    &[PgParam::from(channel), PgParam::from(payload)],
+                )
+                .await;
+        });
+    }
+
+    fn spawn_usage_worker(pool: &Arc<PgLivePool>, mut rx: mpsc::Receiver<PgUsageMsg>) {
+        let handle = pool.clone_handle();
+        pool.runtime_handle().spawn(async move {
+            let mut batch: Vec<UsageRecord> = Vec::with_capacity(64);
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+
+            loop {
+                tokio::select! {
+                    maybe_msg = rx.recv() => {
+                        match maybe_msg {
+                            Some(PgUsageMsg::Record(rec)) => {
+                                batch.push(rec);
+                                if batch.len() >= 50 {
+                                    let _ = Self::flush_usage_batch_async(&handle, &mut batch).await;
+                                }
+                            }
+                            Some(PgUsageMsg::Flush(ack)) => {
+                                while let Ok(next) = rx.try_recv() {
+                                    match next {
+                                        PgUsageMsg::Record(rec) => batch.push(rec),
+                                        PgUsageMsg::Flush(ack2) => {
+                                            let res = Self::flush_usage_batch_async(&handle, &mut batch).await;
+                                            let _ = ack2.send(res);
+                                        }
+                                    }
+                                }
+                                let res = Self::flush_usage_batch_async(&handle, &mut batch).await;
+                                let _ = ack.send(res);
+                            }
+                            None => {
+                                if !batch.is_empty() {
+                                    let _ = Self::flush_usage_batch_async(&handle, &mut batch).await;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ = interval.tick() => {
+                        if !batch.is_empty() {
+                            let _ = Self::flush_usage_batch_async(&handle, &mut batch).await;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    async fn flush_usage_batch_async(
+        handle: &PgPoolHandle,
+        batch: &mut Vec<UsageRecord>,
+    ) -> anyhow::Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let items: Vec<UsageRecord> = batch.drain(..).collect();
+        for chunk in items.chunks(100) {
+            let mut values_sql = Vec::with_capacity(chunk.len());
+            let mut params: Vec<PgParam> = Vec::with_capacity(chunk.len() * 14);
+            for (i, item) in chunk.iter().enumerate() {
+                let base = i * 14;
+                values_sql.push(format!(
+                    "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                    base + 1,
+                    base + 2,
+                    base + 3,
+                    base + 4,
+                    base + 5,
+                    base + 6,
+                    base + 7,
+                    base + 8,
+                    base + 9,
+                    base + 10,
+                    base + 11,
+                    base + 12,
+                    base + 13,
+                    base + 14
+                ));
+                params.push(PgParam::from(item.timestamp.clone()));
+                params.push(PgParam::from(item.provider.clone()));
+                params.push(PgParam::from(item.model.clone()));
+                params.push(PgParam::from(item.connection_id.clone()));
+                params.push(PgParam::from(item.api_key.clone()));
+                params.push(PgParam::from(item.api_key_id.clone()));
+                params.push(PgParam::from(item.endpoint.clone()));
+                params.push(PgParam::from(item.prompt_tokens));
+                params.push(PgParam::from(item.completion_tokens));
+                params.push(PgParam::from(item.cached_tokens));
+                params.push(PgParam::from(item.cost));
+                params.push(PgParam::from(item.status.clone()));
+                params.push(PgParam::from(item.tokens.clone()));
+                params.push(PgParam::from(item.meta.clone()));
+            }
+            let sql = format!(
+                r#"INSERT INTO "usageHistory" ("timestamp", "provider", "model", "connectionId", "apiKey", "apiKeyId", "endpoint", "promptTokens", "completionTokens", "cachedTokens", "cost", "status", "tokens", "meta") VALUES {}"#,
+                values_sql.join(", ")
+            );
+            if let Err(e) = handle.execute_async(&sql, &params).await {
+                error!("Failed to flush Postgres usageHistory batch: {}", e);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    fn spawn_request_details_worker(pool: &Arc<PgLivePool>, mut rx: mpsc::Receiver<PgDetailMsg>) {
+        let handle = pool.clone_handle();
+        pool.runtime_handle().spawn(async move {
+            let mut batch: Vec<RequestDetail> = Vec::with_capacity(64);
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+
+            loop {
+                tokio::select! {
+                    maybe_msg = rx.recv() => {
+                        match maybe_msg {
+                            Some(PgDetailMsg::Record(rec)) => {
+                                batch.push(rec);
+                                if batch.len() >= 50 {
+                                    let _ = Self::flush_details_batch_async(&handle, &mut batch).await;
+                                }
+                            }
+                            Some(PgDetailMsg::Flush(ack)) => {
+                                while let Ok(next) = rx.try_recv() {
+                                    match next {
+                                        PgDetailMsg::Record(rec) => batch.push(rec),
+                                        PgDetailMsg::Flush(ack2) => {
+                                            let res = Self::flush_details_batch_async(&handle, &mut batch).await;
+                                            let _ = ack2.send(res);
+                                        }
+                                    }
+                                }
+                                let res = Self::flush_details_batch_async(&handle, &mut batch).await;
+                                let _ = ack.send(res);
+                            }
+                            None => {
+                                if !batch.is_empty() {
+                                    let _ = Self::flush_details_batch_async(&handle, &mut batch).await;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ = interval.tick() => {
+                        if !batch.is_empty() {
+                            let _ = Self::flush_details_batch_async(&handle, &mut batch).await;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    async fn flush_details_batch_async(
+        handle: &PgPoolHandle,
+        batch: &mut Vec<RequestDetail>,
+    ) -> anyhow::Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        // Deduplicate by id within the batch so Postgres ON CONFLICT DO UPDATE never hits duplicate row in same statement
+        let mut dedup: HashMap<String, RequestDetail> = HashMap::with_capacity(batch.len());
+        for item in batch.drain(..) {
+            dedup.insert(item.id.clone(), item);
+        }
+        let items: Vec<RequestDetail> = dedup.into_values().collect();
+        for chunk in items.chunks(100) {
+            let mut values_sql = Vec::with_capacity(chunk.len());
+            let mut params: Vec<PgParam> = Vec::with_capacity(chunk.len() * 7);
+            for (i, item) in chunk.iter().enumerate() {
+                let base = i * 7;
+                values_sql.push(format!(
+                    "(${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                    base + 1,
+                    base + 2,
+                    base + 3,
+                    base + 4,
+                    base + 5,
+                    base + 6,
+                    base + 7
+                ));
+                let data_str = serde_json::to_string(item).unwrap_or_else(|_| "{}".to_string());
+                params.push(PgParam::from(item.id.clone()));
+                params.push(PgParam::from(item.timestamp.clone()));
+                params.push(PgParam::from(item.provider.clone()));
+                params.push(PgParam::from(item.model.clone()));
+                params.push(PgParam::from(item.connection_id.clone()));
+                params.push(PgParam::from(item.status.clone()));
+                params.push(PgParam::from(data_str));
+            }
+            let sql = format!(
+                r#"INSERT INTO "requestDetails" ("id", "timestamp", "provider", "model", "connectionId", "status", "data") VALUES {} ON CONFLICT ("id") DO UPDATE SET "timestamp" = EXCLUDED."timestamp", "provider" = EXCLUDED."provider", "model" = EXCLUDED."model", "connectionId" = EXCLUDED."connectionId", "status" = EXCLUDED."status", "data" = EXCLUDED."data""#,
+                values_sql.join(", ")
+            );
+            if let Err(e) = handle.execute_async(&sql, &params).await {
+                error!("Failed to flush Postgres requestDetails batch: {}", e);
+                return Err(e);
+            }
+        }
+
+        // Pruning retention limit (max 10,000 rows)
+        if let Ok(Some(row)) = handle
+            .query_opt_async(r#"SELECT COUNT(*) FROM "requestDetails""#, &[])
+            .await
+        {
+            let count = pg_col_i64(&row, 0);
+            if count > 10_000 {
+                let excess = count - 10_000;
+                let _ = handle
+                    .execute_async(
+                        r#"DELETE FROM "requestDetails" WHERE "id" IN (SELECT "id" FROM "requestDetails" ORDER BY "timestamp" ASC LIMIT $1)"#,
+                        &[PgParam::from(excess)],
+                    )
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn queue_usage(&self, record: UsageRecord) {
+        if let Err(e) = self.usage_tx.try_send(PgUsageMsg::Record(record)) {
+            warn!("Postgres usage write-behind queue full or closed: {}", e);
+        }
+    }
+
+    pub fn record_request_detail(&self, detail: RequestDetail) {
+        if let Err(e) = self.detail_tx.try_send(PgDetailMsg::Record(detail)) {
+            warn!("Postgres requestDetails write-behind queue full or closed: {}", e);
+        }
+    }
+
+    /// Synchronously flushes all queued write-behind usageHistory and requestDetails records to Postgres.
+    pub fn flush_write_behind(&self) -> anyhow::Result<()> {
+        let (tx_u, rx_u) = std::sync::mpsc::sync_channel(1);
+        let usage_tx = self.usage_tx.clone();
+        self.pool.runtime_handle().spawn(async move {
+            if usage_tx.send(PgUsageMsg::Flush(tx_u)).await.is_err() {
+                // Receiver dropped
+            }
+        });
+        rx_u.recv()
+            .map_err(|e| anyhow::anyhow!("Usage flush ack failed: {}", e))??;
+
+        let (tx_d, rx_d) = std::sync::mpsc::sync_channel(1);
+        let detail_tx = self.detail_tx.clone();
+        self.pool.runtime_handle().spawn(async move {
+            if detail_tx.send(PgDetailMsg::Flush(tx_d)).await.is_err() {
+                // Receiver dropped
+            }
+        });
+        rx_d.recv()
+            .map_err(|e| anyhow::anyhow!("requestDetails flush ack failed: {}", e))??;
+
+        Ok(())
+    }
+
+    fn needs_refresh(&self, table: &str) -> bool {
+        let Some(slot) = table_slot(table) else {
+            return true;
+        };
+        let bit = 1u64 << slot;
+        if (self.loaded_mask.load(Ordering::Acquire) & bit) == 0 {
+            return true;
+        }
+        if (self.stale_mask.load(Ordering::Acquire) & bit) != 0 {
+            return true;
+        }
+        let now_ms = self.started_at.elapsed().as_millis() as u64;
+        let last = self.last_sync_ms[slot].load(Ordering::Acquire);
+        now_ms.saturating_sub(last) >= self.cache_ttl_ms
+    }
+
+    fn ensure_fresh(&self, table: &str) -> anyhow::Result<()> {
+        if self.needs_refresh(table) {
+            self.hydrate_table(table)?;
+        }
+        Ok(())
+    }
+
+    fn mark_synced(&self, table: &str) {
+        if let Some(slot) = table_slot(table) {
+            let bit = 1u64 << slot;
+            self.stale_mask.fetch_and(!bit, Ordering::Release);
+            let now_ms = self.started_at.elapsed().as_millis() as u64;
+            self.last_sync_ms[slot].store(now_ms, Ordering::Release);
+            self.loaded_mask.fetch_or(bit, Ordering::Release);
+        }
+        self.memory.mark_loaded(table);
+    }
+
+    pub fn hydrate_table(&self, table: &str) -> anyhow::Result<()> {
+        match table {
+            "settings" => {
+                let row = self.pool.query_opt(
+                    r#"SELECT "data" FROM "settings" WHERE "id" = 1"#.to_string(),
+                    Vec::new(),
+                )?;
+                let parsed = row
+                    .and_then(|r| serde_json::from_str::<Value>(&pg_col_str(&r, 0)).ok());
+                if let Some(ref val) = parsed {
+                    let mut m = HashMap::new();
+                    m.insert("id".to_string(), json!(1));
+                    m.insert("data".to_string(), json!(val.to_string()));
+                    self.memory.resync_table("settings", vec![m]);
+                } else {
+                    self.memory.resync_table("settings", Vec::new());
+                }
+                if let Ok(mut g) = self.settings_cache.write() {
+                    *g = parsed;
+                }
+                self.mark_synced("settings");
+            }
+            "apiKeys" => {
+                let rows = self.pool.query(
+                    format!("{} ORDER BY \"createdAt\" ASC", Self::api_key_select_sql()),
+                    Vec::new(),
+                )?;
+                let mut keys = Vec::with_capacity(rows.len());
+                let mut by_key = HashMap::with_capacity(rows.len());
+                let mut by_id = HashMap::with_capacity(rows.len());
+                let mut mem_rows = Vec::with_capacity(rows.len());
+                for r in &rows {
+                    let ak = Self::row_to_api_key(r);
+                    mem_rows.push(Self::api_key_to_map(&ak));
+                    by_key.insert(ak.key.clone(), ak.clone());
+                    by_id.insert(ak.id.clone(), ak.clone());
+                    keys.push(ak);
+                }
+                self.memory.resync_table("apiKeys", mem_rows);
+                if let Ok(mut g) = self.api_keys_by_key.write() {
+                    *g = by_key;
+                }
+                if let Ok(mut g) = self.api_keys_by_id.write() {
+                    *g = by_id;
+                }
+                self.mark_synced("apiKeys");
+            }
+            "providerConnections" => {
+                let rows = self.pool.query(
+                    r#"SELECT "id", "provider", "authType", "name", "email", "priority", "isActive", "data", "createdAt", "updatedAt" FROM "providerConnections" ORDER BY "priority" ASC, "createdAt" ASC"#.to_string(),
+                    Vec::new(),
+                )?;
+                let mut conns = Vec::with_capacity(rows.len());
+                let mut mem_rows = Vec::with_capacity(rows.len());
+                for r in &rows {
+                    let pc = Self::row_to_provider_connection(r);
+                    mem_rows.push(Self::provider_connection_to_map(&pc));
+                    conns.push(pc);
+                }
+                self.memory.resync_table("providerConnections", mem_rows);
+                if let Ok(mut g) = self.provider_connections.write() {
+                    *g = Some(conns);
+                }
+                self.mark_synced("providerConnections");
+            }
+            "providerNodes" => {
+                let rows = self.pool.query(
+                    r#"SELECT "id", "type", "name", "data", "createdAt", "updatedAt" FROM "providerNodes" ORDER BY "createdAt" ASC"#.to_string(),
+                    Vec::new(),
+                )?;
+                let mut nodes = Vec::with_capacity(rows.len());
+                let mut mem_rows = Vec::with_capacity(rows.len());
+                for r in &rows {
+                    let pn = Self::row_to_provider_node(r);
+                    mem_rows.push(Self::provider_node_to_map(&pn));
+                    nodes.push(pn);
+                }
+                self.memory.resync_table("providerNodes", mem_rows);
+                if let Ok(mut g) = self.provider_nodes.write() {
+                    *g = nodes;
+                }
+                self.mark_synced("providerNodes");
+            }
+            "proxyPools" => {
+                let rows = self.pool.query(
+                    r#"SELECT "id", "isActive", "testStatus", "data", "createdAt", "updatedAt" FROM "proxyPools" ORDER BY "createdAt" ASC"#.to_string(),
+                    Vec::new(),
+                )?;
+                let mut pools = Vec::with_capacity(rows.len());
+                let mut mem_rows = Vec::with_capacity(rows.len());
+                for r in &rows {
+                    let pp = Self::row_to_proxy_pool(r);
+                    mem_rows.push(Self::proxy_pool_to_map(&pp));
+                    pools.push(pp);
+                }
+                self.memory.resync_table("proxyPools", mem_rows);
+                if let Ok(mut g) = self.proxy_pools.write() {
+                    *g = pools;
+                }
+                self.mark_synced("proxyPools");
+            }
+            "combos" => {
+                let rows = self.pool.query(
+                    r#"SELECT "id", "name", "kind", "models", "strategy", "matchRules", "customPrompt", "createdAt", "updatedAt" FROM "combos" ORDER BY "createdAt" ASC"#.to_string(),
+                    Vec::new(),
+                )?;
+                let mut combos = Vec::with_capacity(rows.len());
+                let mut by_name = HashMap::with_capacity(rows.len());
+                let mut by_id = HashMap::with_capacity(rows.len());
+                let mut mem_rows = Vec::with_capacity(rows.len());
+                for r in &rows {
+                    let c = Self::row_to_combo(r);
+                    mem_rows.push(Self::combo_to_map(&c));
+                    by_name.insert(c.name.clone(), c.clone());
+                    by_id.insert(c.id.clone(), c.clone());
+                    combos.push(c);
+                }
+                self.memory.resync_table("combos", mem_rows);
+                if let Ok(mut g) = self.combos_by_name.write() {
+                    *g = by_name;
+                }
+                if let Ok(mut g) = self.combos_by_id.write() {
+                    *g = by_id;
+                }
+                if let Ok(mut g) = self.combos_list.write() {
+                    *g = combos;
+                }
+                if let Ok(mut g) = self.combo_name_misses.write() {
+                    g.clear();
+                }
+                self.mark_synced("combos");
+            }
+            "kv" => {
+                let rows = self.pool.query(
+                    r#"SELECT "scope", "key", "value" FROM "kv""#.to_string(),
+                    Vec::new(),
+                )?;
+                let mut map: HashMap<String, HashMap<String, String>> = HashMap::new();
+                let mut mem_rows = Vec::with_capacity(rows.len());
+                for r in &rows {
+                    let scope = pg_col_str(r, 0);
+                    let key = pg_col_str(r, 1);
+                    let val = pg_col_str(r, 2);
+                    let mut m = HashMap::new();
+                    m.insert("scope".to_string(), json!(scope));
+                    m.insert("key".to_string(), json!(key));
+                    m.insert("value".to_string(), json!(val));
+                    mem_rows.push(m);
+                    map.entry(scope).or_default().insert(key, val);
+                }
+                self.memory.resync_table("kv", mem_rows);
+                if let Ok(mut g) = self.kv_cache.write() {
+                    *g = Some(map);
+                }
+                self.mark_synced("kv");
+            }
+            "_meta" => {
+                let rows = self.pool.query(
+                    r#"SELECT "key", "value" FROM "_meta""#.to_string(),
+                    Vec::new(),
+                )?;
+                let mut mem_rows = Vec::with_capacity(rows.len());
+                for r in &rows {
+                    let mut m = HashMap::new();
+                    m.insert("key".to_string(), json!(pg_col_str(r, 0)));
+                    m.insert("value".to_string(), json!(pg_col_str(r, 1)));
+                    mem_rows.push(m);
+                }
+                self.memory.resync_table("_meta", mem_rows);
+                self.mark_synced("_meta");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Row Mappers
+    // ========================================================================
+
+    fn api_key_select_sql() -> &'static str {
+        r#"SELECT "id", "key", "name", "machineId", "isActive", "createdAt", "rateLimitRequests", "rateLimitWindowSeconds", "tokenLimitDaily", "tokenLimitMonthly", "allowedModels", "blockedModels", "allowedIPs", "blockedIPs", "expiresAt", "description", "ownerRef", "maxConcurrentRequests", "allowedProviders", "blockedProviders", "forceProvider", "forceModel", "allowedEndpoints", "blockedEndpoints", "budgetUsd", "budgetResetHours", "budgetWindowStartedAt", "billingMode", "byokProvider", "regenerateVersion", "metadata", "updatedAt" FROM "apiKeys""#
+    }
+
+    fn row_to_api_key(row: &Row) -> ApiKey {
+        ApiKey {
+            id: pg_col_str(row, 0),
+            key: pg_col_str(row, 1),
+            name: pg_col_opt_str(row, 2),
+            machine_id: pg_col_opt_str(row, 3),
+            is_active: pg_col_i64(row, 4) == 1,
+            created_at: pg_col_str(row, 5),
+            rate_limit_requests: pg_col_i64(row, 6),
+            rate_limit_window_seconds: pg_col_i64(row, 7),
+            token_limit_daily: pg_col_i64(row, 8),
+            token_limit_monthly: pg_col_i64(row, 9),
+            allowed_models: pg_col_str(row, 10),
+            blocked_models: pg_col_str(row, 11),
+            allowed_ips: pg_col_str(row, 12),
+            blocked_ips: pg_col_str(row, 13),
+            expires_at: pg_col_str(row, 14),
+            description: pg_col_str(row, 15),
+            owner_ref: pg_col_opt_str(row, 16),
+            max_concurrent_requests: pg_col_i64(row, 17),
+            allowed_providers: pg_col_str(row, 18),
+            blocked_providers: pg_col_str(row, 19),
+            force_provider: pg_col_str(row, 20),
+            force_model: pg_col_str(row, 21),
+            allowed_endpoints: pg_col_str(row, 22),
+            blocked_endpoints: pg_col_str(row, 23),
+            budget_usd: pg_col_opt_f64(row, 24),
+            budget_reset_hours: pg_col_opt_f64(row, 25),
+            budget_window_started_at: pg_col_opt_str(row, 26),
+            billing_mode: pg_col_opt_str(row, 27).unwrap_or_else(|| "credits".to_string()),
+            byok_provider: pg_col_opt_str(row, 28),
+            regenerate_version: pg_col_opt_i64(row, 29).unwrap_or(0),
+            metadata: pg_col_opt_str(row, 30).unwrap_or_else(|| "{}".to_string()),
+            updated_at: pg_col_opt_str(row, 31),
+        }
+    }
+
+    fn api_key_to_map(k: &ApiKey) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert("id".to_string(), json!(k.id));
+        m.insert("key".to_string(), json!(k.key));
+        m.insert("name".to_string(), json!(k.name));
+        m.insert("isActive".to_string(), json!(if k.is_active { 1 } else { 0 }));
+        m.insert("createdAt".to_string(), json!(k.created_at));
+        m
+    }
+
+    fn row_to_provider_connection(row: &Row) -> ProviderConnection {
+        let data_str = pg_col_str(row, 7);
+        let parsed_data: ConnectionData = serde_json::from_str(&data_str).unwrap_or_default();
+        ProviderConnection {
+            id: pg_col_str(row, 0),
+            provider: pg_col_str(row, 1),
+            auth_type: pg_col_str(row, 2),
+            name: pg_col_opt_str(row, 3),
+            email: pg_col_opt_str(row, 4),
+            priority: pg_col_opt_i64(row, 5),
+            is_active: pg_col_i64(row, 6) == 1,
+            data: parsed_data,
+            raw_data: data_str,
+            created_at: pg_col_str(row, 8),
+            updated_at: pg_col_str(row, 9),
+        }
+    }
+
+    fn provider_connection_to_map(c: &ProviderConnection) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert("id".to_string(), json!(c.id));
+        m.insert("provider".to_string(), json!(c.provider));
+        m.insert("authType".to_string(), json!(c.auth_type));
+        m.insert("isActive".to_string(), json!(if c.is_active { 1 } else { 0 }));
+        m
+    }
+
+    fn row_to_provider_node(row: &Row) -> ProviderNode {
+        let data_str = pg_col_str(row, 3);
+        let val: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
+        let prefix = val
+            .get("prefix")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let base_url = val
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let api_type = val
+            .get("apiType")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        ProviderNode {
+            id: pg_col_str(row, 0),
+            node_type: pg_col_opt_str(row, 1),
+            name: pg_col_opt_str(row, 2),
+            prefix,
+            base_url,
+            api_type,
+            data: val,
+            created_at: pg_col_str(row, 4),
+            updated_at: pg_col_str(row, 5),
+        }
+    }
+
+    fn provider_node_to_map(n: &ProviderNode) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert("id".to_string(), json!(n.id));
+        m.insert("name".to_string(), json!(n.name));
+        m
+    }
+
+    fn row_to_proxy_pool(row: &Row) -> ProxyPool {
+        let data_str = pg_col_str(row, 3);
+        let val: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
+        ProxyPool {
+            id: pg_col_str(row, 0),
+            is_active: pg_col_i64(row, 1) == 1,
+            test_status: pg_col_opt_str(row, 2),
+            data: val,
+            created_at: pg_col_str(row, 4),
+            updated_at: pg_col_str(row, 5),
+        }
+    }
+
+    fn proxy_pool_to_map(p: &ProxyPool) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert("id".to_string(), json!(p.id));
+        m.insert("isActive".to_string(), json!(if p.is_active { 1 } else { 0 }));
+        m
+    }
+
+    fn row_to_combo(row: &Row) -> Combo {
+        let models_str = pg_col_str(row, 3);
+        let models: Vec<String> = serde_json::from_str(&models_str).unwrap_or_default();
+        Combo {
+            id: pg_col_str(row, 0),
+            name: pg_col_str(row, 1),
+            kind: pg_col_opt_str(row, 2),
+            models,
+            strategy: pg_col_opt_str(row, 4),
+            match_rules: pg_col_opt_str(row, 5),
+            custom_prompt: pg_col_opt_str(row, 6),
+            created_at: pg_col_str(row, 7),
+            updated_at: pg_col_str(row, 8),
+        }
+    }
+
+    fn combo_to_map(c: &Combo) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert("id".to_string(), json!(c.id));
+        m.insert("name".to_string(), json!(c.name));
+        m
+    }
+
+    // ========================================================================
+    // API Keys Operations
+    // ========================================================================
+
+    pub fn get_api_key_by_key(&self, key: &str) -> anyhow::Result<Option<ApiKey>> {
+        self.ensure_fresh("apiKeys")?;
+        if let Ok(guard) = self.api_keys_by_key.read() {
+            if let Some(found) = guard.get(key) {
+                return Ok(Some(found.clone()));
+            }
+        }
+        // Cache miss: query live Postgres (handles cross-instance immediate writes before NOTIFY arrives)
+        self.query_api_key_by_key_uncached(key)
+    }
+
+    /// Direct uncached Postgres TCP wire lookup for API key (also populates cache on hit).
+    pub fn query_api_key_by_key_uncached(&self, key: &str) -> anyhow::Result<Option<ApiKey>> {
+        let row = self.pool.query_opt(
+            format!("{} WHERE \"key\" = $1", Self::api_key_select_sql()),
+            vec![PgParam::from(key)],
+        )?;
+        if let Some(ref r) = row {
+            let ak = Self::row_to_api_key(r);
+            self.cache_single_api_key(&ak);
+            Ok(Some(ak))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_api_key_by_id(&self, id: &str) -> anyhow::Result<Option<ApiKey>> {
+        self.ensure_fresh("apiKeys")?;
+        if let Ok(guard) = self.api_keys_by_id.read() {
+            if let Some(found) = guard.get(id) {
+                return Ok(Some(found.clone()));
+            }
+        }
+        let row = self.pool.query_opt(
+            format!("{} WHERE \"id\" = $1", Self::api_key_select_sql()),
+            vec![PgParam::from(id)],
+        )?;
+        if let Some(ref r) = row {
+            let ak = Self::row_to_api_key(r);
+            self.cache_single_api_key(&ak);
+            Ok(Some(ak))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn cache_single_api_key(&self, ak: &ApiKey) {
+        let _ = self
+            .memory
+            .upsert_cached_row("apiKeys", Self::api_key_to_map(ak));
+        if let Ok(mut by_id) = self.api_keys_by_id.write() {
+            if let Some(prev) = by_id.insert(ak.id.clone(), ak.clone()) {
+                if prev.key != ak.key {
+                    if let Ok(mut by_key) = self.api_keys_by_key.write() {
+                        by_key.remove(&prev.key);
+                    }
+                }
+            }
+        }
+        if let Ok(mut by_key) = self.api_keys_by_key.write() {
+            by_key.insert(ak.key.clone(), ak.clone());
+        }
+    }
+
+    pub fn save_api_key(&self, key: &ApiKey) -> anyhow::Result<()> {
+        let sql = r#"
+            INSERT INTO "apiKeys"(
+                "id", "key", "name", "machineId", "isActive", "createdAt",
+                "rateLimitRequests", "rateLimitWindowSeconds", "tokenLimitDaily", "tokenLimitMonthly",
+                "allowedModels", "blockedModels", "allowedIPs", "blockedIPs", "expiresAt", "description",
+                "ownerRef", "maxConcurrentRequests", "allowedProviders", "blockedProviders",
+                "forceProvider", "forceModel", "allowedEndpoints", "blockedEndpoints",
+                "budgetUsd", "budgetResetHours", "budgetWindowStartedAt", "billingMode",
+                "byokProvider", "regenerateVersion", "metadata", "updatedAt"
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32
+            )
+            ON CONFLICT("id") DO UPDATE SET
+                "key" = EXCLUDED."key", "name" = EXCLUDED."name", "machineId" = EXCLUDED."machineId",
+                "isActive" = EXCLUDED."isActive", "rateLimitRequests" = EXCLUDED."rateLimitRequests",
+                "rateLimitWindowSeconds" = EXCLUDED."rateLimitWindowSeconds",
+                "tokenLimitDaily" = EXCLUDED."tokenLimitDaily", "tokenLimitMonthly" = EXCLUDED."tokenLimitMonthly",
+                "allowedModels" = EXCLUDED."allowedModels", "blockedModels" = EXCLUDED."blockedModels",
+                "allowedIPs" = EXCLUDED."allowedIPs", "blockedIPs" = EXCLUDED."blockedIPs",
+                "expiresAt" = EXCLUDED."expiresAt", "description" = EXCLUDED."description",
+                "ownerRef" = EXCLUDED."ownerRef", "maxConcurrentRequests" = EXCLUDED."maxConcurrentRequests",
+                "allowedProviders" = EXCLUDED."allowedProviders", "blockedProviders" = EXCLUDED."blockedProviders",
+                "forceProvider" = EXCLUDED."forceProvider", "forceModel" = EXCLUDED."forceModel",
+                "allowedEndpoints" = EXCLUDED."allowedEndpoints", "blockedEndpoints" = EXCLUDED."blockedEndpoints",
+                "budgetUsd" = EXCLUDED."budgetUsd", "budgetResetHours" = EXCLUDED."budgetResetHours",
+                "budgetWindowStartedAt" = EXCLUDED."budgetWindowStartedAt", "billingMode" = EXCLUDED."billingMode",
+                "byokProvider" = EXCLUDED."byokProvider", "regenerateVersion" = EXCLUDED."regenerateVersion",
+                "metadata" = EXCLUDED."metadata", "updatedAt" = EXCLUDED."updatedAt"
+        "#;
+
+        let params = vec![
+            PgParam::from(key.id.clone()),
+            PgParam::from(key.key.clone()),
+            PgParam::from(key.name.clone()),
+            PgParam::from(key.machine_id.clone()),
+            PgParam::from(if key.is_active { 1i64 } else { 0i64 }),
+            PgParam::from(key.created_at.clone()),
+            PgParam::from(key.rate_limit_requests),
+            PgParam::from(key.rate_limit_window_seconds),
+            PgParam::from(key.token_limit_daily),
+            PgParam::from(key.token_limit_monthly),
+            PgParam::from(key.allowed_models.clone()),
+            PgParam::from(key.blocked_models.clone()),
+            PgParam::from(key.allowed_ips.clone()),
+            PgParam::from(key.blocked_ips.clone()),
+            PgParam::from(key.expires_at.clone()),
+            PgParam::from(key.description.clone()),
+            PgParam::from(key.owner_ref.clone()),
+            PgParam::from(key.max_concurrent_requests),
+            PgParam::from(key.allowed_providers.clone()),
+            PgParam::from(key.blocked_providers.clone()),
+            PgParam::from(key.force_provider.clone()),
+            PgParam::from(key.force_model.clone()),
+            PgParam::from(key.allowed_endpoints.clone()),
+            PgParam::from(key.blocked_endpoints.clone()),
+            PgParam::from(key.budget_usd),
+            PgParam::from(key.budget_reset_hours),
+            PgParam::from(key.budget_window_started_at.clone()),
+            PgParam::from(key.billing_mode.clone()),
+            PgParam::from(key.byok_provider.clone()),
+            PgParam::from(key.regenerate_version),
+            PgParam::from(key.metadata.clone()),
+            PgParam::from(key.updated_at.clone()),
+        ];
+
+        self.pool.execute(sql.to_string(), params)?;
+        self.cache_single_api_key(key);
+        self.notify_table_changed("apiKeys");
+        Ok(())
+    }
+
+    pub fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKey>> {
+        self.hydrate_table("apiKeys")?;
+        let mut list: Vec<ApiKey> = self
+            .api_keys_by_id
+            .read()
+            .map(|g| g.values().cloned().collect())
+            .unwrap_or_default();
+        list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(list)
+    }
+
+    pub fn list_api_keys_by_owner(&self, owner_ref: &str) -> anyhow::Result<Vec<ApiKey>> {
+        let rows = self.pool.query(
+            format!(
+                "{} WHERE \"ownerRef\" = $1 ORDER BY \"createdAt\" ASC",
+                Self::api_key_select_sql()
+            ),
+            vec![PgParam::from(owner_ref)],
+        )?;
+        Ok(rows.iter().map(Self::row_to_api_key).collect())
+    }
+
+    pub fn delete_api_key(&self, id: &str) -> anyhow::Result<bool> {
+        let affected = self.pool.execute(
+            r#"DELETE FROM "apiKeys" WHERE "id" = $1 OR "key" = $1"#.to_string(),
+            vec![PgParam::from(id)],
+        )?;
+        if affected > 0 {
+            self.hydrate_table("apiKeys")?;
+            self.notify_table_changed("apiKeys");
+        }
+        Ok(affected > 0)
+    }
+
+    // ========================================================================
+    // Audit Log Operations
+    // ========================================================================
+
+    pub fn append_audit_event(&self, event: &Value) -> anyhow::Result<Value> {
+        let id = event
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{:x}", Utc::now().timestamp_micros()));
+        let timestamp = event
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let actor = event
+            .get("actor")
+            .and_then(|v| v.as_str())
+            .unwrap_or("admin-token");
+        let action = event
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let resource_type = event
+            .get("resourceType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let resource_id = event.get("resourceId").and_then(|v| v.as_str());
+        let owner_ref = event.get("ownerRef").and_then(|v| v.as_str());
+        let request_id = event.get("requestId").and_then(|v| v.as_str());
+        let source_ip = event.get("sourceIp").and_then(|v| v.as_str());
+        let outcome = event
+            .get("outcome")
+            .and_then(|v| v.as_str())
+            .unwrap_or("success");
+        let before = event.get("before").map(|v| v.to_string());
+        let after = event.get("after").map(|v| v.to_string());
+        let metadata = event
+            .get("metadata")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "{}".to_string());
+
+        self.pool.execute(
+            r#"
+            INSERT INTO "auditLog"("id", "timestamp", "actor", "action", "resourceType", "resourceId", "ownerRef", "requestId", "sourceIp", "outcome", "before", "after", "metadata")
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            "#
+            .to_string(),
+            vec![
+                PgParam::from(id.clone()),
+                PgParam::from(timestamp.clone()),
+                PgParam::from(actor),
+                PgParam::from(action),
+                PgParam::from(resource_type),
+                PgParam::from(resource_id),
+                PgParam::from(owner_ref),
+                PgParam::from(request_id),
+                PgParam::from(source_ip),
+                PgParam::from(outcome),
+                PgParam::from(before),
+                PgParam::from(after),
+                PgParam::from(metadata),
+            ],
+        )?;
+
+        let mut row = event.clone();
+        if let Some(obj) = row.as_object_mut() {
+            obj.insert("id".to_string(), json!(id));
+            obj.insert("timestamp".to_string(), json!(timestamp));
+        }
+        Ok(row)
+    }
+
+    pub fn list_audit_events(
+        &self,
+        owner_ref: Option<&str>,
+        action: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Value>> {
+        let mut sql = r#"SELECT "id", "timestamp", "actor", "action", "resourceType", "resourceId", "ownerRef", "requestId", "sourceIp", "outcome", "before", "after", "metadata" FROM "auditLog""#.to_string();
+        let mut conditions = Vec::new();
+        let mut params: Vec<PgParam> = Vec::new();
+        let mut idx = 1usize;
+
+        if let Some(owner) = owner_ref {
+            conditions.push(format!("\"ownerRef\" = ${}", idx));
+            params.push(PgParam::from(owner));
+            idx += 1;
+        }
+        if let Some(act) = action {
+            conditions.push(format!("\"action\" = ${}", idx));
+            params.push(PgParam::from(act));
+            idx += 1;
+        }
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+        sql.push_str(&format!(" ORDER BY \"timestamp\" DESC LIMIT ${}", idx));
+        params.push(PgParam::from(limit.clamp(1, 500) as i64));
+
+        let rows = self.pool.query(sql, params)?;
+        let mut list = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let before = pg_col_opt_str(row, 10).and_then(|s| serde_json::from_str::<Value>(&s).ok());
+            let after = pg_col_opt_str(row, 11).and_then(|s| serde_json::from_str::<Value>(&s).ok());
+            let metadata = pg_col_opt_str(row, 12)
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .unwrap_or_else(|| json!({}));
+
+            list.push(json!({
+                "id": pg_col_str(row, 0),
+                "timestamp": pg_col_str(row, 1),
+                "actor": pg_col_str(row, 2),
+                "action": pg_col_str(row, 3),
+                "resourceType": pg_col_str(row, 4),
+                "resourceId": pg_col_opt_str(row, 5),
+                "ownerRef": pg_col_opt_str(row, 6),
+                "requestId": pg_col_opt_str(row, 7),
+                "sourceIp": pg_col_opt_str(row, 8),
+                "outcome": pg_col_str(row, 9),
+                "before": before,
+                "after": after,
+                "metadata": metadata,
+            }));
+        }
+        Ok(list)
+    }
+
+    // ========================================================================
+    // Budget Helpers
+    // ========================================================================
+
+    pub fn get_budget_used(&self, key: &ApiKey) -> f64 {
+        let row = if key.regenerate_version > 0 {
+            self.pool.query_opt(
+                r#"SELECT COALESCE(SUM("cost"), 0.0::double precision) FROM "usageHistory" WHERE ("apiKey" = $1 OR "apiKeyId" = $2) AND "cost" > 0"#.to_string(),
+                vec![PgParam::from(key.key.clone()), PgParam::from(key.id.clone())],
+            )
+        } else {
+            self.pool.query_opt(
+                r#"SELECT COALESCE(SUM("cost"), 0.0::double precision) FROM "usageHistory" WHERE "apiKey" = $1 AND "cost" > 0"#.to_string(),
+                vec![PgParam::from(key.key.clone())],
+            )
+        };
+        row.ok().flatten().map(|r| pg_col_f64(&r, 0)).unwrap_or(0.0)
+    }
+
+    pub fn has_budget_commit(&self, key_id: &str, commit_model: &str) -> bool {
+        self.pool
+            .query_opt(
+                r#"SELECT "cost" FROM "usageHistory" WHERE "apiKeyId" = $1 AND "provider" = 'budget' AND "model" = $2 LIMIT 1"#.to_string(),
+                vec![PgParam::from(key_id), PgParam::from(commit_model)],
+            )
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    pub fn insert_budget_commit(
+        &self,
+        timestamp: &str,
+        commit_model: &str,
+        api_key: &str,
+        api_key_id: &str,
+        commit_amount: f64,
+    ) -> anyhow::Result<()> {
+        self.pool.execute(
+            r#"
+            INSERT INTO "usageHistory"("timestamp", "provider", "model", "apiKey", "apiKeyId", "cost")
+            VALUES ($1, 'budget', $2, $3, $4, $5)
+            "#
+            .to_string(),
+            vec![
+                PgParam::from(timestamp),
+                PgParam::from(commit_model),
+                PgParam::from(api_key),
+                PgParam::from(api_key_id),
+                PgParam::from(commit_amount),
+            ],
+        )?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Provider Connections Operations
+    // ========================================================================
+
+    pub fn load_provider_connections(&self) -> anyhow::Result<Vec<ProviderConnection>> {
+        self.ensure_fresh("providerConnections")?;
+        Ok(self
+            .provider_connections
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_default())
+    }
+
+    pub fn save_provider_connection(&self, conn: &ProviderConnection) -> anyhow::Result<()> {
+        let data_json = if conn.raw_data.trim().is_empty() {
+            serde_json::to_string(&conn.data)?
+        } else {
+            conn.raw_data.clone()
+        };
+
+        self.pool.execute(
+            r#"
+            INSERT INTO "providerConnections"(
+                "id", "provider", "authType", "name", "email", "priority", "isActive", "data", "createdAt", "updatedAt"
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT("id") DO UPDATE SET
+                "provider" = EXCLUDED."provider", "authType" = EXCLUDED."authType", "name" = EXCLUDED."name",
+                "email" = EXCLUDED."email", "priority" = EXCLUDED."priority", "isActive" = EXCLUDED."isActive",
+                "data" = EXCLUDED."data", "updatedAt" = EXCLUDED."updatedAt"
+            "#
+            .to_string(),
+            vec![
+                PgParam::from(conn.id.clone()),
+                PgParam::from(conn.provider.clone()),
+                PgParam::from(conn.auth_type.clone()),
+                PgParam::from(conn.name.clone()),
+                PgParam::from(conn.email.clone()),
+                PgParam::from(conn.priority),
+                PgParam::from(if conn.is_active { 1i64 } else { 0i64 }),
+                PgParam::from(data_json),
+                PgParam::from(conn.created_at.clone()),
+                PgParam::from(conn.updated_at.clone()),
+            ],
+        )?;
+        self.hydrate_table("providerConnections")?;
+        self.notify_table_changed("providerConnections");
+        Ok(())
+    }
+
+    // ========================================================================
+    // Settings Operations
+    // ========================================================================
+
+    pub fn load_settings(&self) -> anyhow::Result<Value> {
+        self.ensure_fresh("settings")?;
+        if let Ok(guard) = self.settings_cache.read() {
+            if let Some(ref val) = *guard {
+                return Ok(val.clone());
+            }
+        }
+        Ok(json!({
+            "requireLogin": false,
+            "requireApiKey": true,
+            "lowWriteMode": false,
+            "tunnelEnabled": false,
+            "cloudEnabled": false
+        }))
+    }
+
+    pub fn save_settings(&self, settings: &Value) -> anyhow::Result<()> {
+        let data_str = serde_json::to_string(settings)?;
+        self.pool.execute(
+            r#"
+            INSERT INTO "settings"("id", "data") VALUES (1, $1)
+            ON CONFLICT("id") DO UPDATE SET "data" = EXCLUDED."data"
+            "#
+            .to_string(),
+            vec![PgParam::from(data_str.clone())],
+        )?;
+        if let Ok(mut g) = self.settings_cache.write() {
+            *g = Some(settings.clone());
+        }
+        let mut m = HashMap::new();
+        m.insert("id".to_string(), json!(1));
+        m.insert("data".to_string(), json!(data_str));
+        let _ = self.memory.upsert_cached_row("settings", m);
+        self.mark_synced("settings");
+        self.notify_table_changed("settings");
+        Ok(())
+    }
+
+    // ========================================================================
+    // KV Operations (Custom Models, Display Names, Disabled Models, Aliases)
+    // ========================================================================
+
+    fn kv_scope_map(&self, scope: &str) -> anyhow::Result<HashMap<String, String>> {
+        self.ensure_fresh("kv")?;
+        let guard = self
+            .kv_cache
+            .read()
+            .map_err(|e| anyhow::anyhow!("KV lock poisoned: {}", e))?;
+        Ok(guard
+            .as_ref()
+            .and_then(|m| m.get(scope).cloned())
+            .unwrap_or_default())
+    }
+
+    fn kv_upsert(&self, scope: &str, key: &str, value: &str) -> anyhow::Result<()> {
+        self.pool.execute(
+            r#"
+            INSERT INTO "kv"("scope", "key", "value") VALUES ($1, $2, $3)
+            ON CONFLICT("scope", "key") DO UPDATE SET "value" = EXCLUDED."value"
+            "#
+            .to_string(),
+            vec![
+                PgParam::from(scope),
+                PgParam::from(key),
+                PgParam::from(value),
+            ],
+        )?;
+        self.hydrate_table("kv")?;
+        self.notify_table_changed("kv");
+        Ok(())
+    }
+
+    fn kv_delete(&self, scope: &str, key: &str) -> anyhow::Result<()> {
+        self.pool.execute(
+            r#"DELETE FROM "kv" WHERE "scope" = $1 AND "key" = $2"#.to_string(),
+            vec![PgParam::from(scope), PgParam::from(key)],
+        )?;
+        self.hydrate_table("kv")?;
+        self.notify_table_changed("kv");
+        Ok(())
+    }
+
+    pub fn load_custom_models(&self) -> anyhow::Result<Vec<Value>> {
+        let map = self.kv_scope_map("customModels")?;
+        let mut list = Vec::new();
+        for val_str in map.values() {
+            if let Ok(v) = serde_json::from_str::<Value>(val_str) {
+                if !v.is_null() {
+                    list.push(v);
+                }
+            }
+        }
+        Ok(list)
+    }
+
+    pub fn save_custom_model(&self, model: &Value) -> anyhow::Result<()> {
+        let provider_alias = model
+            .get("providerAlias")
+            .or_else(|| model.get("provider"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("custom");
+        let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let model_type = model
+            .get("type")
+            .or_else(|| model.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("llm");
+
+        if id.is_empty() {
+            anyhow::bail!("Model id cannot be empty");
+        }
+        let key = format!("{}|{}|{}", provider_alias, id, model_type);
+        let value_str = serde_json::to_string(model)?;
+        self.kv_upsert("customModels", &key, &value_str)
+    }
+
+    pub fn delete_custom_model(
+        &self,
+        provider_alias: &str,
+        id: &str,
+        model_type: &str,
+    ) -> anyhow::Result<()> {
+        let key = format!("{}|{}|{}", provider_alias, id, model_type);
+        self.kv_delete("customModels", &key)
+    }
+
+    pub fn load_model_display_names(&self) -> anyhow::Result<HashMap<String, String>> {
+        let map = self.kv_scope_map("modelDisplayNames")?;
+        Ok(map
+            .into_iter()
+            .map(|(k, v)| {
+                let decoded = serde_json::from_str::<String>(&v).unwrap_or(v);
+                (k, decoded)
+            })
+            .collect())
+    }
+
+    pub fn set_model_display_name(&self, model_id: &str, display_name: &str) -> anyhow::Result<()> {
+        let val_str = serde_json::to_string(display_name)?;
+        self.kv_upsert("modelDisplayNames", model_id, &val_str)
+    }
+
+    pub fn delete_model_display_name(&self, model_id: &str) -> anyhow::Result<()> {
+        self.kv_delete("modelDisplayNames", model_id)
+    }
+
+    pub fn load_disabled_models(&self) -> anyhow::Result<HashMap<String, Vec<String>>> {
+        let map = self.kv_scope_map("disabledModels")?;
+        Ok(map
+            .into_iter()
+            .map(|(k, v)| {
+                let ids: Vec<String> = serde_json::from_str(&v).unwrap_or_default();
+                (k, ids)
+            })
+            .collect())
+    }
+
+    pub fn disable_models(&self, provider_alias: &str, ids: &[String]) -> anyhow::Result<()> {
+        let existing_str = self
+            .pool
+            .query_opt(
+                r#"SELECT "value" FROM "kv" WHERE "scope" = 'disabledModels' AND "key" = $1"#
+                    .to_string(),
+                vec![PgParam::from(provider_alias)],
+            )?
+            .map(|r| pg_col_str(&r, 0));
+
+        let mut current: Vec<String> = existing_str
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        for id in ids {
+            if !current.contains(id) {
+                current.push(id.clone());
+            }
+        }
+        let val_str = serde_json::to_string(&current)?;
+        self.kv_upsert("disabledModels", provider_alias, &val_str)
+    }
+
+    pub fn enable_models(&self, provider_alias: &str, ids: &[String]) -> anyhow::Result<()> {
+        if ids.is_empty() {
+            return self.kv_delete("disabledModels", provider_alias);
+        }
+
+        let existing_str = self
+            .pool
+            .query_opt(
+                r#"SELECT "value" FROM "kv" WHERE "scope" = 'disabledModels' AND "key" = $1"#
+                    .to_string(),
+                vec![PgParam::from(provider_alias)],
+            )?
+            .map(|r| pg_col_str(&r, 0));
+
+        let current: Vec<String> = existing_str
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        let remove_set: HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let next: Vec<String> = current
+            .into_iter()
+            .filter(|id| !remove_set.contains(id.as_str()))
+            .collect();
+
+        if next.is_empty() {
+            self.kv_delete("disabledModels", provider_alias)
+        } else {
+            let val_str = serde_json::to_string(&next)?;
+            self.kv_upsert("disabledModels", provider_alias, &val_str)
+        }
+    }
+
+    pub fn load_model_aliases(&self) -> anyhow::Result<HashMap<String, String>> {
+        let map = self.kv_scope_map("modelAliases")?;
+        Ok(map
+            .into_iter()
+            .map(|(k, v)| {
+                let decoded = serde_json::from_str::<String>(&v).unwrap_or(v);
+                (k, decoded)
+            })
+            .collect())
+    }
+
+    pub fn set_model_alias(&self, alias: &str, model: &str) -> anyhow::Result<()> {
+        let val_str = serde_json::to_string(model)?;
+        self.kv_upsert("modelAliases", alias, &val_str)
+    }
+
+    pub fn delete_model_alias(&self, alias: &str) -> anyhow::Result<()> {
+        self.kv_delete("modelAliases", alias)
+    }
+
+    // ========================================================================
+    // Combos Operations
+    // ========================================================================
+
+    pub fn load_combos(&self) -> anyhow::Result<Vec<Combo>> {
+        self.ensure_fresh("combos")?;
+        Ok(self
+            .combos_list
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default())
+    }
+
+    pub fn get_combo_by_name(&self, name: &str) -> anyhow::Result<Option<Combo>> {
+        self.ensure_fresh("combos")?;
+        if let Ok(guard) = self.combos_by_name.read() {
+            if let Some(found) = guard.get(name) {
+                return Ok(Some(found.clone()));
+            }
+        }
+        if let Ok(misses) = self.combo_name_misses.read() {
+            if misses.contains(name) {
+                return Ok(None);
+            }
+        }
+        let row = self.pool.query_opt(
+            r#"SELECT "id", "name", "kind", "models", "strategy", "matchRules", "customPrompt", "createdAt", "updatedAt" FROM "combos" WHERE "name" = $1"#.to_string(),
+            vec![PgParam::from(name)],
+        )?;
+        if let Some(ref r) = row {
+            let c = Self::row_to_combo(r);
+            self.hydrate_table("combos")?;
+            Ok(Some(c))
+        } else {
+            if let Ok(mut misses) = self.combo_name_misses.write() {
+                misses.insert(name.to_string());
+            }
+            Ok(None)
+        }
+    }
+
+    pub fn get_combo_by_id(&self, id: &str) -> anyhow::Result<Option<Combo>> {
+        self.ensure_fresh("combos")?;
+        if let Ok(guard) = self.combos_by_id.read() {
+            if let Some(found) = guard.get(id) {
+                return Ok(Some(found.clone()));
+            }
+        }
+        let row = self.pool.query_opt(
+            r#"SELECT "id", "name", "kind", "models", "strategy", "matchRules", "customPrompt", "createdAt", "updatedAt" FROM "combos" WHERE "id" = $1"#.to_string(),
+            vec![PgParam::from(id)],
+        )?;
+        if let Some(ref r) = row {
+            let c = Self::row_to_combo(r);
+            self.hydrate_table("combos")?;
+            Ok(Some(c))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn save_combo(&self, combo: &Combo) -> anyhow::Result<()> {
+        let models_json = serde_json::to_string(&combo.models)?;
+        let strategy = combo.strategy.as_deref().unwrap_or("fallback");
+        let match_rules = combo.match_rules.as_deref().unwrap_or("[]");
+        let custom_prompt = combo.custom_prompt.as_deref().unwrap_or("");
+        self.pool.execute(
+            r#"
+            INSERT INTO "combos"("id", "name", "kind", "models", "strategy", "matchRules", "customPrompt", "createdAt", "updatedAt")
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT("id") DO UPDATE SET
+                "name" = EXCLUDED."name", "kind" = EXCLUDED."kind", "models" = EXCLUDED."models",
+                "strategy" = EXCLUDED."strategy", "matchRules" = EXCLUDED."matchRules",
+                "customPrompt" = EXCLUDED."customPrompt", "updatedAt" = EXCLUDED."updatedAt"
+            "#
+            .to_string(),
+            vec![
+                PgParam::from(combo.id.clone()),
+                PgParam::from(combo.name.clone()),
+                PgParam::from(combo.kind.clone()),
+                PgParam::from(models_json),
+                PgParam::from(strategy),
+                PgParam::from(match_rules),
+                PgParam::from(custom_prompt),
+                PgParam::from(combo.created_at.clone()),
+                PgParam::from(combo.updated_at.clone()),
+            ],
+        )?;
+        self.hydrate_table("combos")?;
+        self.notify_table_changed("combos");
+        Ok(())
+    }
+
+    pub fn delete_combo(&self, id: &str) -> anyhow::Result<bool> {
+        let affected = self.pool.execute(
+            r#"DELETE FROM "combos" WHERE "id" = $1 OR "name" = $1"#.to_string(),
+            vec![PgParam::from(id)],
+        )?;
+        if affected > 0 {
+            self.hydrate_table("combos")?;
+            self.notify_table_changed("combos");
+        }
+        Ok(affected > 0)
+    }
+
+    pub fn bulk_delete_combos(&self, ids: &[String]) -> anyhow::Result<usize> {
+        let mut count = 0usize;
+        for id in ids {
+            let affected = self.pool.execute(
+                r#"DELETE FROM "combos" WHERE "id" = $1 OR "name" = $1"#.to_string(),
+                vec![PgParam::from(id.clone())],
+            )?;
+            count += affected as usize;
+        }
+        if count > 0 {
+            self.hydrate_table("combos")?;
+            self.notify_table_changed("combos");
+        }
+        Ok(count)
+    }
+
+    // ========================================================================
+    // Usage & Request Details Analytics Operations
+    // ========================================================================
+
+    pub fn get_usage_count(&self) -> anyhow::Result<i64> {
+        let row = self.pool.query_opt(
+            r#"SELECT COUNT(*) FROM "usageHistory""#.to_string(),
+            Vec::new(),
+        )?;
+        Ok(row.map(|r| pg_col_i64(&r, 0)).unwrap_or(0))
+    }
+
+    pub fn get_request_details_count(&self) -> anyhow::Result<i64> {
+        let row = self.pool.query_opt(
+            r#"SELECT COUNT(*) FROM "requestDetails""#.to_string(),
+            Vec::new(),
+        )?;
+        Ok(row.map(|r| pg_col_i64(&r, 0)).unwrap_or(0))
+    }
+
+    pub fn get_usage_statistics(&self, period: &str) -> anyhow::Result<Value> {
+        let cutoff = match period {
+            "today" => {
+                let now = Utc::now();
+                now.date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .map(|dt| dt.and_utc().to_rfc3339())
+                    .unwrap_or_default()
+            }
+            "24h" => (Utc::now() - chrono::Duration::hours(24)).to_rfc3339(),
+            "7d" => (Utc::now() - chrono::Duration::days(7)).to_rfc3339(),
+            "30d" => (Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+            "60d" => (Utc::now() - chrono::Duration::days(60)).to_rfc3339(),
+            _ => String::from("1970-01-01T00:00:00Z"),
+        };
+
+        let (total_requests, prompt_tokens, completion_tokens, cached_tokens, total_cost) = self
+            .pool
+            .query_opt(
+                r#"
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM("promptTokens"), 0)::bigint,
+                    COALESCE(SUM("completionTokens"), 0)::bigint,
+                    COALESCE(SUM("cachedTokens"), 0)::bigint,
+                    COALESCE(SUM("cost"), 0.0::double precision)
+                FROM "usageHistory"
+                WHERE "timestamp" >= $1
+                "#
+                .to_string(),
+                vec![PgParam::from(cutoff.clone())],
+            )
+            .ok()
+            .flatten()
+            .map(|r| {
+                (
+                    pg_col_i64(&r, 0),
+                    pg_col_i64(&r, 1),
+                    pg_col_i64(&r, 2),
+                    pg_col_i64(&r, 3),
+                    pg_col_f64(&r, 4),
+                )
+            })
+            .unwrap_or((0, 0, 0, 0, 0.0));
+
+        let mut by_provider = serde_json::Map::new();
+        if let Ok(rows) = self.pool.query(
+            r#"
+            SELECT
+                "provider",
+                COUNT(*),
+                COALESCE(SUM("promptTokens"), 0)::bigint,
+                COALESCE(SUM("completionTokens"), 0)::bigint,
+                COALESCE(SUM("cachedTokens"), 0)::bigint,
+                COALESCE(SUM("cost"), 0.0::double precision)
+            FROM "usageHistory"
+            WHERE "timestamp" >= $1 AND "provider" IS NOT NULL
+            GROUP BY "provider"
+            "#
+            .to_string(),
+            vec![PgParam::from(cutoff.clone())],
+        ) {
+            for r in &rows {
+                if let Some(prov) = pg_col_opt_str(r, 0) {
+                    by_provider.insert(
+                        prov,
+                        json!({
+                            "requests": pg_col_i64(r, 1),
+                            "promptTokens": pg_col_i64(r, 2),
+                            "completionTokens": pg_col_i64(r, 3),
+                            "cachedTokens": pg_col_i64(r, 4),
+                            "cost": pg_col_f64(r, 5),
+                        }),
+                    );
+                }
+            }
+        }
+
+        let mut by_model = serde_json::Map::new();
+        if let Ok(rows) = self.pool.query(
+            r#"
+            SELECT
+                "model",
+                "provider",
+                COUNT(*),
+                COALESCE(SUM("promptTokens"), 0)::bigint,
+                COALESCE(SUM("completionTokens"), 0)::bigint,
+                COALESCE(SUM("cachedTokens"), 0)::bigint,
+                COALESCE(SUM("cost"), 0.0::double precision),
+                MAX("timestamp")
+            FROM "usageHistory"
+            WHERE "timestamp" >= $1 AND "model" IS NOT NULL AND "provider" IS NOT NULL
+            GROUP BY "model", "provider"
+            "#
+            .to_string(),
+            vec![PgParam::from(cutoff.clone())],
+        ) {
+            for r in &rows {
+                if let (Some(mdl), Some(prov)) = (pg_col_opt_str(r, 0), pg_col_opt_str(r, 1)) {
+                    let key = format!("{} ({})", mdl, prov);
+                    by_model.insert(
+                        key,
+                        json!({
+                            "rawModel": mdl,
+                            "provider": prov,
+                            "requests": pg_col_i64(r, 2),
+                            "promptTokens": pg_col_i64(r, 3),
+                            "completionTokens": pg_col_i64(r, 4),
+                            "cachedTokens": pg_col_i64(r, 5),
+                            "cost": pg_col_f64(r, 6),
+                            "lastUsed": pg_col_opt_str(r, 7),
+                        }),
+                    );
+                }
+            }
+        }
+
+        let mut by_account = serde_json::Map::new();
+        if let Ok(rows) = self.pool.query(
+            r#"
+            SELECT
+                COALESCE("connectionId", 'default'),
+                "model",
+                "provider",
+                COUNT(*),
+                COALESCE(SUM("promptTokens"), 0)::bigint,
+                COALESCE(SUM("completionTokens"), 0)::bigint,
+                COALESCE(SUM("cachedTokens"), 0)::bigint,
+                COALESCE(SUM("cost"), 0.0::double precision),
+                MAX("timestamp")
+            FROM "usageHistory"
+            WHERE "timestamp" >= $1 AND "model" IS NOT NULL AND "provider" IS NOT NULL
+            GROUP BY "connectionId", "model", "provider"
+            "#
+            .to_string(),
+            vec![PgParam::from(cutoff)],
+        ) {
+            for r in &rows {
+                if let (Some(mdl), Some(prov)) = (pg_col_opt_str(r, 1), pg_col_opt_str(r, 2)) {
+                    let conn_id = pg_col_str(r, 0);
+                    let key = format!("{} ({} - {})", mdl, prov, conn_id);
+                    by_account.insert(
+                        key,
+                        json!({
+                            "connectionId": conn_id,
+                            "accountName": conn_id,
+                            "rawModel": mdl,
+                            "provider": prov,
+                            "requests": pg_col_i64(r, 3),
+                            "promptTokens": pg_col_i64(r, 4),
+                            "completionTokens": pg_col_i64(r, 5),
+                            "cachedTokens": pg_col_i64(r, 6),
+                            "cost": pg_col_f64(r, 7),
+                            "lastUsed": pg_col_opt_str(r, 8),
+                        }),
+                    );
+                }
+            }
+        }
+
+        let mut recent_requests = Vec::new();
+        if let Ok(rows) = self.pool.query(
+            r#"
+            SELECT
+                "timestamp",
+                "provider",
+                "model",
+                "promptTokens",
+                "completionTokens",
+                "cachedTokens",
+                "status"
+            FROM "usageHistory"
+            ORDER BY "id" DESC
+            LIMIT 20
+            "#
+            .to_string(),
+            Vec::new(),
+        ) {
+            for r in &rows {
+                if let (Some(prov), Some(mdl), Some(stat)) = (
+                    pg_col_opt_str(r, 1),
+                    pg_col_opt_str(r, 2),
+                    pg_col_opt_str(r, 6),
+                ) {
+                    recent_requests.push(json!({
+                        "timestamp": pg_col_str(r, 0),
+                        "provider": prov,
+                        "model": mdl,
+                        "promptTokens": pg_col_i64(r, 3),
+                        "completionTokens": pg_col_i64(r, 4),
+                        "cachedTokens": pg_col_i64(r, 5),
+                        "status": stat,
+                    }));
+                }
+            }
+        }
+
+        Ok(json!({
+            "totalRequests": total_requests,
+            "totalPromptTokens": prompt_tokens,
+            "totalCompletionTokens": completion_tokens,
+            "totalCachedTokens": cached_tokens,
+            "totalCost": total_cost,
+            "byProvider": by_provider,
+            "byModel": by_model,
+            "byAccount": by_account,
+            "byApiKey": json!({}),
+            "byEndpoint": json!({}),
+            "last10Minutes": [
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0},
+                {"requests":0,"promptTokens":0,"completionTokens":0,"cost":0}
+            ],
+            "pending": {
+                "byModel": json!({}),
+                "byAccount": json!({})
+            },
+            "activeRequests": [],
+            "recentRequests": recent_requests,
+            "errorProvider": ""
+        }))
+    }
+
+    pub fn get_chart_data(&self, period: &str) -> anyhow::Result<Value> {
+        let now = Utc::now();
+        let (bucket_count, bucket_hours, cutoff) = match period {
+            "today" | "24h" => (24usize, 1i64, now - chrono::Duration::hours(24)),
+            "7d" => (7usize, 24i64, now - chrono::Duration::days(7)),
+            "30d" => (30usize, 24i64, now - chrono::Duration::days(30)),
+            "60d" => (60usize, 24i64, now - chrono::Duration::days(60)),
+            _ => (7usize, 24i64, now - chrono::Duration::days(7)),
+        };
+
+        let mut buckets = Vec::with_capacity(bucket_count);
+        let start_time = now - chrono::Duration::hours(bucket_count as i64 * bucket_hours);
+        for i in 0..bucket_count {
+            let t = start_time + chrono::Duration::hours(i as i64 * bucket_hours);
+            let label = if bucket_hours == 1 {
+                t.format("%H:00").to_string()
+            } else {
+                t.format("%m/%d").to_string()
+            };
+            buckets.push(json!({
+                "label": label,
+                "tokens": 0i64,
+                "cost": 0.0f64,
+                "requests": 0i64,
+            }));
+        }
+
+        let cutoff_str = cutoff.to_rfc3339();
+        if let Ok(rows) = self.pool.query(
+            r#"SELECT "timestamp", "promptTokens", "completionTokens", "cost" FROM "usageHistory" WHERE "timestamp" >= $1"#.to_string(),
+            vec![PgParam::from(cutoff_str)],
+        ) {
+            for r in &rows {
+                let ts = pg_col_str(r, 0);
+                let pt = pg_col_i64(r, 1);
+                let ct = pg_col_i64(r, 2);
+                let cost = pg_col_f64(r, 3);
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
+                    let dt_utc = dt.with_timezone(&Utc);
+                    let diff_secs = (dt_utc - start_time).num_seconds();
+                    let bucket_secs = bucket_hours * 3600;
+                    if diff_secs >= 0 {
+                        let idx = (diff_secs / bucket_secs) as usize;
+                        if idx < bucket_count {
+                            if let Some(obj) = buckets[idx].as_object_mut() {
+                                let prev_tokens = obj.get("tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let prev_cost = obj.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let prev_reqs = obj.get("requests").and_then(|v| v.as_i64()).unwrap_or(0);
+                                obj.insert("tokens".to_string(), json!(prev_tokens + pt + ct));
+                                obj.insert("cost".to_string(), json!(prev_cost + cost));
+                                obj.insert("requests".to_string(), json!(prev_reqs + 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Value::Array(buckets))
+    }
+
+    pub fn get_api_keys_usage(&self, period: &str) -> anyhow::Result<Value> {
+        let keys = self.list_api_keys()?;
+        let cutoff = match period {
+            "today" => {
+                let now = Utc::now();
+                now.date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .map(|dt| dt.and_utc().to_rfc3339())
+                    .unwrap_or_default()
+            }
+            "24h" => (Utc::now() - chrono::Duration::hours(24)).to_rfc3339(),
+            "7d" => (Utc::now() - chrono::Duration::days(7)).to_rfc3339(),
+            "30d" => (Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+            "60d" => (Utc::now() - chrono::Duration::days(60)).to_rfc3339(),
+            _ => String::from("1970-01-01T00:00:00Z"),
+        };
+
+        let mut usage_by_key: HashMap<String, (i64, i64, i64, i64, f64)> = HashMap::new();
+        if let Ok(rows) = self.pool.query(
+            r#"
+            SELECT
+                "apiKey",
+                COUNT(*),
+                COALESCE(SUM("promptTokens"), 0)::bigint,
+                COALESCE(SUM("completionTokens"), 0)::bigint,
+                COALESCE(SUM("cachedTokens"), 0)::bigint,
+                COALESCE(SUM("cost"), 0.0::double precision)
+            FROM "usageHistory"
+            WHERE "timestamp" >= $1 AND "apiKey" IS NOT NULL AND "apiKey" != ''
+            GROUP BY "apiKey"
+            "#
+            .to_string(),
+            vec![PgParam::from(cutoff)],
+        ) {
+            for r in &rows {
+                usage_by_key.insert(
+                    pg_col_str(r, 0),
+                    (
+                        pg_col_i64(r, 1),
+                        pg_col_i64(r, 2),
+                        pg_col_i64(r, 3),
+                        pg_col_i64(r, 4),
+                        pg_col_f64(r, 5),
+                    ),
+                );
+            }
+        }
+
+        let mut out = Vec::new();
+        for k in keys {
+            let u = usage_by_key.get(&k.key).copied().unwrap_or((0, 0, 0, 0, 0.0));
+            let masked = if k.key.len() > 11 {
+                format!("{}...{}", &k.key[..7], &k.key[k.key.len() - 4..])
+            } else {
+                k.key.clone()
+            };
+            out.push(json!({
+                "id": k.id,
+                "name": k.name,
+                "key": k.key,
+                "maskedKey": masked,
+                "isActive": k.is_active,
+                "createdAt": k.created_at,
+                "expiresAt": k.expires_at,
+                "rateLimitRequests": k.rate_limit_requests,
+                "rateLimitWindowSeconds": k.rate_limit_window_seconds,
+                "tokenLimitDaily": k.token_limit_daily,
+                "tokenLimitMonthly": k.token_limit_monthly,
+                "forceProvider": k.force_provider,
+                "forceModel": k.force_model,
+                "allowedModels": k.allowed_models,
+                "blockedModels": k.blocked_models,
+                "allowedIPs": k.allowed_ips,
+                "blockedIPs": k.blocked_ips,
+                "description": k.description,
+                "usage": {
+                    "requests": u.0,
+                    "promptTokens": u.1,
+                    "completionTokens": u.2,
+                    "cachedTokens": u.3,
+                    "cost": u.4,
+                    "models": json!({}),
+                    "providers": json!({})
+                }
+            }));
+        }
+
+        Ok(Value::Array(out))
+    }
+
+    pub fn get_usage_providers(&self) -> anyhow::Result<Value> {
+        let mut provider_set = HashSet::new();
+        if let Ok(rows) = self.pool.query(
+            r#"SELECT DISTINCT "provider" FROM "usageHistory" WHERE "provider" IS NOT NULL AND "provider" != ''"#.to_string(),
+            Vec::new(),
+        ) {
+            for r in &rows {
+                if let Some(p) = pg_col_opt_str(r, 0) {
+                    provider_set.insert(p);
+                }
+            }
+        }
+        if let Ok(rows) = self
+            .pool
+            .query(r#"SELECT "id" FROM "providerNodes""#.to_string(), Vec::new())
+        {
+            for r in &rows {
+                if let Some(id) = pg_col_opt_str(r, 0) {
+                    provider_set.insert(id);
+                }
+            }
+        }
+
+        let mut providers: Vec<Value> = provider_set
+            .into_iter()
+            .map(|p| json!({ "id": p, "name": p }))
+            .collect();
+        providers.sort_by(|a, b| {
+            a["id"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["id"].as_str().unwrap_or(""))
+        });
+        Ok(json!({ "providers": providers }))
+    }
+
+    pub fn get_request_details(
+        &self,
+        page: i64,
+        page_size: i64,
+        provider: Option<&str>,
+        model: Option<&str>,
+        status: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        let p = page.max(1);
+        let ps = page_size.clamp(1, 100);
+        let offset = (p - 1) * ps;
+
+        let mut conditions = Vec::new();
+        let mut param_values: Vec<PgParam> = Vec::new();
+        let mut idx = 1usize;
+
+        if let Some(prov) = provider.map(str::trim).filter(|s| !s.is_empty()) {
+            conditions.push(format!("\"provider\" = ${}", idx));
+            param_values.push(PgParam::from(prov));
+            idx += 1;
+        }
+        if let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) {
+            conditions.push(format!("\"model\" = ${}", idx));
+            param_values.push(PgParam::from(m));
+            idx += 1;
+        }
+        if let Some(s) = status.map(str::trim).filter(|s| !s.is_empty()) {
+            conditions.push(format!("\"status\" = ${}", idx));
+            param_values.push(PgParam::from(s));
+            idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        let rd_count_sql = format!(r#"SELECT COUNT(*) FROM "requestDetails" {}"#, where_clause);
+        let rd_total: i64 = self
+            .pool
+            .query_opt(rd_count_sql, param_values.clone())
+            .ok()
+            .flatten()
+            .map(|r| pg_col_i64(&r, 0))
+            .unwrap_or(0);
+
+        if rd_total > 0 {
+            let select_sql = format!(
+                r#"SELECT "id", "timestamp", "provider", "model", "connectionId", "status", "data" FROM "requestDetails" {} ORDER BY "timestamp" DESC LIMIT ${} OFFSET ${}"#,
+                where_clause,
+                idx,
+                idx + 1
+            );
+            let mut query_params = param_values.clone();
+            query_params.push(PgParam::from(ps));
+            query_params.push(PgParam::from(offset));
+
+            if let Ok(rows) = self.pool.query(select_sql, query_params) {
+                let mut details = Vec::with_capacity(rows.len());
+                for r in &rows {
+                    let id = pg_col_str(r, 0);
+                    let ts = pg_col_str(r, 1);
+                    let prov = pg_col_opt_str(r, 2);
+                    let mdl = pg_col_opt_str(r, 3);
+                    let conn_id = pg_col_opt_str(r, 4);
+                    let stat = pg_col_opt_str(r, 5);
+                    let data_str = pg_col_str(r, 6);
+
+                    if let Ok(mut parsed) = serde_json::from_str::<Value>(&data_str) {
+                        if let Some(obj) = parsed.as_object_mut() {
+                            obj.entry("id").or_insert_with(|| json!(id));
+                            obj.entry("timestamp").or_insert_with(|| json!(ts));
+                            obj.entry("provider").or_insert_with(|| json!(prov));
+                            obj.entry("model").or_insert_with(|| json!(mdl));
+                            obj.entry("connectionId").or_insert_with(|| json!(conn_id));
+                            obj.entry("status").or_insert_with(|| json!(stat));
+                        }
+                        details.push(parsed);
+                    } else {
+                        details.push(json!({
+                            "id": id,
+                            "timestamp": ts,
+                            "provider": prov,
+                            "model": mdl,
+                            "connectionId": conn_id,
+                            "status": stat,
+                        }));
+                    }
+                }
+                return Ok(json!({
+                    "details": details,
+                    "total": rd_total,
+                    "page": p,
+                    "pageSize": ps,
+                }));
+            }
+        }
+
+        let count_sql = format!(r#"SELECT COUNT(*) FROM "usageHistory" {}"#, where_clause);
+        let total: i64 = self
+            .pool
+            .query_opt(count_sql, param_values.clone())
+            .ok()
+            .flatten()
+            .map(|r| pg_col_i64(&r, 0))
+            .unwrap_or(0);
+
+        let select_sql = format!(
+            r#"SELECT "id", "timestamp", "provider", "model", "connectionId", "apiKey", "promptTokens", "completionTokens", "cachedTokens", "cost", "status", "endpoint" FROM "usageHistory" {} ORDER BY "id" DESC LIMIT ${} OFFSET ${}"#,
+            where_clause,
+            idx,
+            idx + 1
+        );
+        let mut query_params = param_values;
+        query_params.push(PgParam::from(ps));
+        query_params.push(PgParam::from(offset));
+
+        let rows = self.pool.query(select_sql, query_params)?;
+        let mut details = Vec::with_capacity(rows.len());
+        for r in &rows {
+            details.push(json!({
+                "id": pg_col_i64(r, 0),
+                "timestamp": pg_col_str(r, 1),
+                "provider": pg_col_opt_str(r, 2),
+                "model": pg_col_opt_str(r, 3),
+                "connectionId": pg_col_opt_str(r, 4),
+                "apiKey": pg_col_opt_str(r, 5),
+                "promptTokens": pg_col_i64(r, 6),
+                "completionTokens": pg_col_i64(r, 7),
+                "cachedTokens": pg_col_i64(r, 8),
+                "cost": pg_col_f64(r, 9),
+                "status": pg_col_opt_str(r, 10),
+                "endpoint": pg_col_opt_str(r, 11),
+            }));
+        }
+
+        Ok(json!({
+            "details": details,
+            "total": total,
+            "page": p,
+            "pageSize": ps,
+        }))
+    }
+
+    pub fn get_recent_logs(&self, limit: i64) -> Vec<String> {
+        let l = limit.clamp(1, 500);
+        let Ok(rows) = self.pool.query(
+            r#"SELECT "timestamp", "provider", "model", "connectionId", "promptTokens", "completionTokens", "status" FROM "usageHistory" ORDER BY "id" DESC LIMIT $1"#.to_string(),
+            vec![PgParam::from(l)],
+        ) else {
+            return Vec::new();
+        };
+
+        rows.iter()
+            .map(|r| {
+                let ts = pg_col_str(r, 0);
+                let prov = pg_col_opt_str(r, 1).unwrap_or_else(|| "-".to_string());
+                let model = pg_col_opt_str(r, 2).unwrap_or_else(|| "-".to_string());
+                let conn_id = pg_col_opt_str(r, 3).unwrap_or_else(|| "-".to_string());
+                let prompt_tok = pg_col_i64(r, 4);
+                let comp_tok = pg_col_i64(r, 5);
+                let status = pg_col_opt_str(r, 6).unwrap_or_else(|| "-".to_string());
+                format!(
+                    "{} | {} | {} | {} | {} | {} | {}",
+                    ts,
+                    model,
+                    prov.to_uppercase(),
+                    conn_id,
+                    prompt_tok,
+                    comp_tok,
+                    status
+                )
+            })
+            .collect()
+    }
+
+    // ========================================================================
+    // Provider Nodes Operations
+    // ========================================================================
+
+    pub fn load_provider_nodes(&self) -> anyhow::Result<Vec<ProviderNode>> {
+        self.ensure_fresh("providerNodes")?;
+        Ok(self
+            .provider_nodes
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default())
+    }
+
+    pub fn save_provider_node(&self, node: &ProviderNode) -> anyhow::Result<()> {
+        let data_str = serde_json::to_string(&node.data)?;
+        self.pool.execute(
+            r#"
+            INSERT INTO "providerNodes"("id", "type", "name", "data", "createdAt", "updatedAt")
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT("id") DO UPDATE SET
+                "type" = EXCLUDED."type", "name" = EXCLUDED."name", "data" = EXCLUDED."data", "updatedAt" = EXCLUDED."updatedAt"
+            "#
+            .to_string(),
+            vec![
+                PgParam::from(node.id.clone()),
+                PgParam::from(node.node_type.clone()),
+                PgParam::from(node.name.clone()),
+                PgParam::from(data_str),
+                PgParam::from(node.created_at.clone()),
+                PgParam::from(node.updated_at.clone()),
+            ],
+        )?;
+        self.hydrate_table("providerNodes")?;
+        self.notify_table_changed("providerNodes");
+        Ok(())
+    }
+
+    pub fn delete_provider_node(&self, id: &str) -> anyhow::Result<bool> {
+        let affected = self.pool.execute(
+            r#"DELETE FROM "providerNodes" WHERE "id" = $1"#.to_string(),
+            vec![PgParam::from(id)],
+        )?;
+        if affected > 0 {
+            self.hydrate_table("providerNodes")?;
+            self.notify_table_changed("providerNodes");
+        }
+        Ok(affected > 0)
+    }
+
+    pub fn get_provider_node_by_id(&self, id: &str) -> anyhow::Result<Option<ProviderNode>> {
+        self.ensure_fresh("providerNodes")?;
+        if let Ok(guard) = self.provider_nodes.read() {
+            if let Some(found) = guard.iter().find(|n| n.id == id) {
+                return Ok(Some(found.clone()));
+            }
+        }
+        let row = self.pool.query_opt(
+            r#"SELECT "id", "type", "name", "data", "createdAt", "updatedAt" FROM "providerNodes" WHERE "id" = $1"#.to_string(),
+            vec![PgParam::from(id)],
+        )?;
+        if let Some(ref r) = row {
+            let pn = Self::row_to_provider_node(r);
+            self.hydrate_table("providerNodes")?;
+            Ok(Some(pn))
+        } else {
+            Ok(None)
+        }
+    }
+
+    // ========================================================================
+    // Proxy Pools Operations
+    // ========================================================================
+
+    pub fn load_proxy_pools(&self) -> anyhow::Result<Vec<ProxyPool>> {
+        self.ensure_fresh("proxyPools")?;
+        Ok(self
+            .proxy_pools
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default())
+    }
+
+    pub fn get_proxy_pool_by_id(&self, id: &str) -> anyhow::Result<Option<ProxyPool>> {
+        self.ensure_fresh("proxyPools")?;
+        if let Ok(guard) = self.proxy_pools.read() {
+            if let Some(found) = guard.iter().find(|p| p.id == id) {
+                return Ok(Some(found.clone()));
+            }
+        }
+        let row = self.pool.query_opt(
+            r#"SELECT "id", "isActive", "testStatus", "data", "createdAt", "updatedAt" FROM "proxyPools" WHERE "id" = $1"#.to_string(),
+            vec![PgParam::from(id)],
+        )?;
+        if let Some(ref r) = row {
+            let pp = Self::row_to_proxy_pool(r);
+            self.hydrate_table("proxyPools")?;
+            Ok(Some(pp))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn save_proxy_pool(&self, pool: &ProxyPool) -> anyhow::Result<()> {
+        let data_str = serde_json::to_string(&pool.data)?;
+        let is_active = if pool.is_active { 1i64 } else { 0i64 };
+        self.pool.execute(
+            r#"
+            INSERT INTO "proxyPools"("id", "isActive", "testStatus", "data", "createdAt", "updatedAt")
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT("id") DO UPDATE SET
+                "isActive" = EXCLUDED."isActive", "testStatus" = EXCLUDED."testStatus",
+                "data" = EXCLUDED."data", "updatedAt" = EXCLUDED."updatedAt"
+            "#
+            .to_string(),
+            vec![
+                PgParam::from(pool.id.clone()),
+                PgParam::from(is_active),
+                PgParam::from(pool.test_status.clone()),
+                PgParam::from(data_str),
+                PgParam::from(pool.created_at.clone()),
+                PgParam::from(pool.updated_at.clone()),
+            ],
+        )?;
+        self.hydrate_table("proxyPools")?;
+        self.notify_table_changed("proxyPools");
+        Ok(())
+    }
+
+    pub fn delete_proxy_pool(&self, id: &str) -> anyhow::Result<bool> {
+        let affected = self.pool.execute(
+            r#"DELETE FROM "proxyPools" WHERE "id" = $1"#.to_string(),
+            vec![PgParam::from(id)],
+        )?;
+        if affected > 0 {
+            self.hydrate_table("proxyPools")?;
+            self.notify_table_changed("proxyPools");
+        }
+        Ok(affected > 0)
+    }
+
+    pub fn delete_inactive_proxy_pools(
+        &self,
+        protected_ids: &[String],
+    ) -> anyhow::Result<(usize, Vec<String>, Vec<String>)> {
+        let rows = self.pool.query(
+            r#"SELECT "id" FROM "proxyPools" WHERE "isActive" = 0"#.to_string(),
+            Vec::new(),
+        )?;
+        let protect_set: HashSet<&str> = protected_ids.iter().map(|s| s.as_str()).collect();
+        let mut deleted_ids = Vec::new();
+        let mut skipped_ids = Vec::new();
+
+        for r in &rows {
+            let id = pg_col_str(r, 0);
+            if protect_set.contains(id.as_str()) {
+                skipped_ids.push(id);
+            } else {
+                deleted_ids.push(id);
+            }
+        }
+
+        for id in &deleted_ids {
+            self.pool.execute(
+                r#"DELETE FROM "proxyPools" WHERE "id" = $1"#.to_string(),
+                vec![PgParam::from(id.clone())],
+            )?;
+        }
+        if !deleted_ids.is_empty() {
+            self.hydrate_table("proxyPools")?;
+            self.notify_table_changed("proxyPools");
+        }
+        Ok((deleted_ids.len(), deleted_ids, skipped_ids))
+    }
+
+    pub fn replace_proxy_pools_by_source(
+        &self,
+        source: &str,
+        pools: &[ProxyPool],
+    ) -> anyhow::Result<usize> {
+        let rows = self.pool.query(
+            r#"SELECT "id", "data" FROM "proxyPools""#.to_string(),
+            Vec::new(),
+        )?;
+        let mut ids_to_delete = Vec::new();
+        for r in &rows {
+            let id = pg_col_str(r, 0);
+            let data_str = pg_col_str(r, 1);
+            if let Ok(val) = serde_json::from_str::<Value>(&data_str) {
+                if val.get("source").and_then(|v| v.as_str()) == Some(source) {
+                    ids_to_delete.push(id);
+                }
+            }
+        }
+
+        for id in ids_to_delete {
+            self.pool.execute(
+                r#"DELETE FROM "proxyPools" WHERE "id" = $1"#.to_string(),
+                vec![PgParam::from(id)],
+            )?;
+        }
+        for pool in pools {
+            let data_str = serde_json::to_string(&pool.data)?;
+            let is_active = if pool.is_active { 1i64 } else { 0i64 };
+            self.pool.execute(
+                r#"
+                INSERT INTO "proxyPools"("id", "isActive", "testStatus", "data", "createdAt", "updatedAt")
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT("id") DO UPDATE SET
+                    "isActive" = EXCLUDED."isActive", "testStatus" = EXCLUDED."testStatus",
+                    "data" = EXCLUDED."data", "updatedAt" = EXCLUDED."updatedAt"
+                "#
+                .to_string(),
+                vec![
+                    PgParam::from(pool.id.clone()),
+                    PgParam::from(is_active),
+                    PgParam::from(pool.test_status.clone()),
+                    PgParam::from(data_str),
+                    PgParam::from(pool.created_at.clone()),
+                    PgParam::from(pool.updated_at.clone()),
+                ],
+            )?;
+        }
+        self.hydrate_table("proxyPools")?;
+        self.notify_table_changed("proxyPools");
+        Ok(pools.len())
+    }
+
+    // ========================================================================
+    // Plans Operations
+    // ========================================================================
+
+    pub fn load_plans(&self) -> anyhow::Result<Vec<Plan>> {
+        let exists = self
+            .pool
+            .query_opt(
+                "SELECT to_regclass('plans')::text".to_string(),
+                Vec::new(),
+            )?
+            .and_then(|r| pg_col_opt_str(&r, 0))
+            .is_some();
+        if !exists {
+            anyhow::bail!("no such table: plans");
+        }
+        let rows = self.pool.query(
+            r#"SELECT "id", "tenant_id", "name", "description", "limit_micros", "limit_tokens", "rpm_limit", "tpm_limit", "concurrency_limit", "period", "alert_pct", "hard_cutoff", "allowed_models", "created_at", "updated_at" FROM "plans" ORDER BY "created_at" ASC"#.to_string(),
+            Vec::new(),
+        )?;
+        Ok(rows
+            .iter()
+            .map(|r| Plan {
+                id: pg_col_str(r, 0),
+                tenant_id: pg_col_str(r, 1),
+                name: pg_col_str(r, 2),
+                description: pg_col_opt_str(r, 3),
+                limit_micros: pg_col_i64(r, 4),
+                limit_tokens: pg_col_i64(r, 5),
+                rpm_limit: pg_col_i64(r, 6),
+                tpm_limit: pg_col_i64(r, 7),
+                concurrency_limit: pg_col_i64(r, 8),
+                period: pg_col_str(r, 9),
+                alert_pct: pg_col_i64(r, 10),
+                hard_cutoff: pg_col_i64(r, 11) == 1,
+                allowed_models: pg_col_str(r, 12),
+                created_at: pg_col_str(r, 13),
+                updated_at: pg_col_str(r, 14),
+            })
+            .collect())
+    }
+
+    // ========================================================================
+    // Backup & Restore Operations
+    // ========================================================================
+
+    pub fn export_database(&self) -> anyhow::Result<Value> {
+        let settings = self
+            .pool
+            .query_opt(
+                r#"SELECT "data" FROM "settings" WHERE "id" = 1"#.to_string(),
+                Vec::new(),
+            )?
+            .and_then(|r| serde_json::from_str::<Value>(&pg_col_str(&r, 0)).ok())
+            .unwrap_or_else(|| json!({}));
+
+        let mut provider_connections = Vec::new();
+        for r in &self.pool.query(
+            r#"SELECT "id", "provider", "authType", "name", "email", "priority", "isActive", "data", "createdAt", "updatedAt" FROM "providerConnections""#.to_string(),
+            Vec::new(),
+        )? {
+            let mut obj: serde_json::Map<String, Value> =
+                serde_json::from_str(&pg_col_str(r, 7)).unwrap_or_default();
+            obj.insert("id".to_string(), json!(pg_col_str(r, 0)));
+            obj.insert("provider".to_string(), json!(pg_col_str(r, 1)));
+            obj.insert("authType".to_string(), json!(pg_col_str(r, 2)));
+            obj.insert("name".to_string(), json!(pg_col_opt_str(r, 3)));
+            obj.insert("email".to_string(), json!(pg_col_opt_str(r, 4)));
+            obj.insert("priority".to_string(), json!(pg_col_opt_i64(r, 5)));
+            obj.insert("isActive".to_string(), json!(pg_col_i64(r, 6) == 1));
+            obj.insert("createdAt".to_string(), json!(pg_col_str(r, 8)));
+            obj.insert("updatedAt".to_string(), json!(pg_col_str(r, 9)));
+            provider_connections.push(Value::Object(obj));
+        }
+
+        let mut provider_nodes = Vec::new();
+        for r in &self.pool.query(
+            r#"SELECT "id", "type", "name", "data", "createdAt", "updatedAt" FROM "providerNodes""#.to_string(),
+            Vec::new(),
+        )? {
+            let mut obj: serde_json::Map<String, Value> =
+                serde_json::from_str(&pg_col_str(r, 3)).unwrap_or_default();
+            obj.insert("id".to_string(), json!(pg_col_str(r, 0)));
+            obj.insert("type".to_string(), json!(pg_col_opt_str(r, 1)));
+            obj.insert("name".to_string(), json!(pg_col_opt_str(r, 2)));
+            obj.insert("createdAt".to_string(), json!(pg_col_str(r, 4)));
+            obj.insert("updatedAt".to_string(), json!(pg_col_str(r, 5)));
+            provider_nodes.push(Value::Object(obj));
+        }
+
+        let mut proxy_pools = Vec::new();
+        for r in &self.pool.query(
+            r#"SELECT "id", "isActive", "testStatus", "data", "createdAt", "updatedAt" FROM "proxyPools""#.to_string(),
+            Vec::new(),
+        )? {
+            let mut obj: serde_json::Map<String, Value> =
+                serde_json::from_str(&pg_col_str(r, 3)).unwrap_or_default();
+            obj.insert("id".to_string(), json!(pg_col_str(r, 0)));
+            obj.insert("isActive".to_string(), json!(pg_col_i64(r, 1) == 1));
+            obj.insert("testStatus".to_string(), json!(pg_col_opt_str(r, 2)));
+            obj.insert("createdAt".to_string(), json!(pg_col_str(r, 4)));
+            obj.insert("updatedAt".to_string(), json!(pg_col_str(r, 5)));
+            proxy_pools.push(Value::Object(obj));
+        }
+
+        let mut api_keys = Vec::new();
+        for r in &self.pool.query(Self::api_key_select_sql().to_string(), Vec::new())? {
+            let k = Self::row_to_api_key(r);
+            let created_at = k.created_at.clone();
+            api_keys.push(json!({
+                "id": k.id,
+                "key": k.key,
+                "name": k.name,
+                "machineId": k.machine_id,
+                "isActive": k.is_active,
+                "createdAt": created_at,
+                "rateLimitRequests": k.rate_limit_requests,
+                "rateLimitWindowSeconds": k.rate_limit_window_seconds,
+                "tokenLimitDaily": k.token_limit_daily,
+                "tokenLimitMonthly": k.token_limit_monthly,
+                "allowedModels": k.allowed_models,
+                "blockedModels": k.blocked_models,
+                "allowedIPs": k.allowed_ips,
+                "blockedIPs": k.blocked_ips,
+                "expiresAt": k.expires_at,
+                "description": k.description,
+                "ownerRef": k.owner_ref,
+                "maxConcurrentRequests": k.max_concurrent_requests,
+                "allowedProviders": k.allowed_providers,
+                "blockedProviders": k.blocked_providers,
+                "forceProvider": k.force_provider,
+                "forceModel": k.force_model,
+                "allowedEndpoints": k.allowed_endpoints,
+                "blockedEndpoints": k.blocked_endpoints,
+                "metadata": k.metadata,
+                "updatedAt": k.updated_at.unwrap_or(created_at),
+            }));
+        }
+
+        let mut combos = Vec::new();
+        for r in &self.pool.query(
+            r#"SELECT "id", "name", "kind", "models", "strategy", "matchRules", "customPrompt", "createdAt", "updatedAt" FROM "combos""#.to_string(),
+            Vec::new(),
+        )? {
+            let c = Self::row_to_combo(r);
+            let match_rules_val: Value = c
+                .match_rules
+                .as_deref()
+                .map(|s| serde_json::from_str(s).unwrap_or(json!([])))
+                .unwrap_or(json!([]));
+            combos.push(json!({
+                "id": c.id,
+                "name": c.name,
+                "kind": c.kind,
+                "models": c.models,
+                "strategy": c.strategy,
+                "matchRules": match_rules_val,
+                "customPrompt": c.custom_prompt,
+                "createdAt": c.created_at,
+                "updatedAt": c.updated_at,
+            }));
+        }
+
+        let mut model_aliases = serde_json::Map::new();
+        let mut custom_models = Vec::new();
+        let mut mitm_alias = serde_json::Map::new();
+        let mut pricing = serde_json::Map::new();
+
+        for r in &self
+            .pool
+            .query(r#"SELECT "scope", "key", "value" FROM "kv""#.to_string(), Vec::new())?
+        {
+            let scope = pg_col_str(r, 0);
+            let key = pg_col_str(r, 1);
+            let val: Value = serde_json::from_str(&pg_col_str(r, 2)).unwrap_or(Value::Null);
+            match scope.as_str() {
+                "modelAliases" => {
+                    model_aliases.insert(key, val);
+                }
+                "customModels" => custom_models.push(val),
+                "mitmAlias" => {
+                    mitm_alias.insert(key, val);
+                }
+                "pricing" => {
+                    pricing.insert(key, val);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(json!({
+            "settings": settings,
+            "providerConnections": provider_connections,
+            "providerNodes": provider_nodes,
+            "proxyPools": proxy_pools,
+            "apiKeys": api_keys,
+            "combos": combos,
+            "modelAliases": model_aliases,
+            "customModels": custom_models,
+            "mitmAlias": mitm_alias,
+            "pricing": pricing,
+        }))
+    }
+
+    pub fn import_database(&self, payload: &Value) -> anyhow::Result<Value> {
+        if !payload.is_object() {
+            anyhow::bail!("Invalid database payload: root must be an object");
+        }
+        let has_known_table = payload.get("settings").is_some()
+            || payload.get("providerConnections").is_some()
+            || payload.get("providerNodes").is_some()
+            || payload.get("proxyPools").is_some()
+            || payload.get("apiKeys").is_some()
+            || payload.get("combos").is_some()
+            || payload.get("modelAliases").is_some()
+            || payload.get("customModels").is_some()
+            || payload.get("mitmAlias").is_some()
+            || payload.get("pricing").is_some();
+        if !has_known_table {
+            anyhow::bail!("Invalid database payload: it contains none of the backup tables");
+        }
+
+        let payload_cloned = payload.clone();
+        let pool_handle = self.pool.clone_handle();
+
+        let counts = self.pool.run_blocking(move || async move {
+            let mut pooled = pool_handle.acquire().await?;
+            let tx = pooled.client_mut().transaction().await?;
+
+            tx.batch_execute(
+                r#"
+                DELETE FROM "settings";
+                DELETE FROM "providerConnections";
+                DELETE FROM "providerNodes";
+                DELETE FROM "proxyPools";
+                DELETE FROM "apiKeys";
+                DELETE FROM "combos";
+                DELETE FROM "kv" WHERE "scope" IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing');
+                "#,
+            )
+            .await?;
+
+            let mut counts = serde_json::Map::new();
+
+            if let Some(settings_val) = payload_cloned.get("settings") {
+                if settings_val.is_object() {
+                    let data_str = serde_json::to_string(settings_val)?;
+                    tx.execute(
+                        r#"INSERT INTO "settings"("id", "data") VALUES(1, $1) ON CONFLICT("id") DO UPDATE SET "data" = EXCLUDED."data""#,
+                        &[&data_str],
+                    )
+                    .await?;
+                    counts.insert("settings".to_string(), json!(1));
+                } else {
+                    counts.insert("settings".to_string(), json!(0));
+                }
+            } else {
+                counts.insert("settings".to_string(), json!(0));
+            }
+
+            let mut pc_count = 0usize;
+            if let Some(pcs) = payload_cloned
+                .get("providerConnections")
+                .and_then(|v| v.as_array())
+            {
+                for c in pcs {
+                    let id = c.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let provider = c.get("provider").and_then(|v| v.as_str()).unwrap_or_default();
+                    let auth_type = c.get("authType").and_then(|v| v.as_str()).unwrap_or("oauth");
+                    let name = c.get("name").and_then(|v| v.as_str()).map(str::to_string);
+                    let email = c.get("email").and_then(|v| v.as_str()).map(str::to_string);
+                    let priority = c.get("priority").and_then(|v| v.as_i64()).map(|v| v as i32);
+                    let is_active = if c.get("isActive").and_then(|v| v.as_bool()) == Some(false) {
+                        0i32
+                    } else {
+                        1i32
+                    };
+                    let now = Utc::now().to_rfc3339();
+                    let created_at = c.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                    let updated_at = c.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                    let data_str = serde_json::to_string(c)?;
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO "providerConnections"("id", "provider", "authType", "name", "email", "priority", "isActive", "data", "createdAt", "updatedAt")
+                        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        ON CONFLICT("id") DO UPDATE SET
+                            "provider" = EXCLUDED."provider", "authType" = EXCLUDED."authType", "name" = EXCLUDED."name",
+                            "email" = EXCLUDED."email", "priority" = EXCLUDED."priority", "isActive" = EXCLUDED."isActive",
+                            "data" = EXCLUDED."data", "updatedAt" = EXCLUDED."updatedAt"
+                        "#,
+                        &[&id, &provider, &auth_type, &name, &email, &priority, &is_active, &data_str, &created_at, &updated_at],
+                    )
+                    .await?;
+                    pc_count += 1;
+                }
+            }
+            counts.insert("providerConnections".to_string(), json!(pc_count));
+
+            let mut pn_count = 0usize;
+            if let Some(pns) = payload_cloned.get("providerNodes").and_then(|v| v.as_array()) {
+                for n in pns {
+                    let id = n.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let node_type = n.get("type").and_then(|v| v.as_str()).map(str::to_string);
+                    let name = n.get("name").and_then(|v| v.as_str()).map(str::to_string);
+                    let now = Utc::now().to_rfc3339();
+                    let created_at = n.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                    let updated_at = n.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                    let data_str = serde_json::to_string(n)?;
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO "providerNodes"("id", "type", "name", "data", "createdAt", "updatedAt")
+                        VALUES($1, $2, $3, $4, $5, $6)
+                        ON CONFLICT("id") DO UPDATE SET
+                            "type" = EXCLUDED."type", "name" = EXCLUDED."name", "data" = EXCLUDED."data", "updatedAt" = EXCLUDED."updatedAt"
+                        "#,
+                        &[&id, &node_type, &name, &data_str, &created_at, &updated_at],
+                    )
+                    .await?;
+                    pn_count += 1;
+                }
+            }
+            counts.insert("providerNodes".to_string(), json!(pn_count));
+
+            let mut pp_count = 0usize;
+            if let Some(pps) = payload_cloned.get("proxyPools").and_then(|v| v.as_array()) {
+                for p in pps {
+                    let id = p.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let is_active = if p.get("isActive").and_then(|v| v.as_bool()) == Some(false) {
+                        0i32
+                    } else {
+                        1i32
+                    };
+                    let test_status = p
+                        .get("testStatus")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let now = Utc::now().to_rfc3339();
+                    let created_at = p.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                    let updated_at = p.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                    let data_str = serde_json::to_string(p)?;
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO "proxyPools"("id", "isActive", "testStatus", "data", "createdAt", "updatedAt")
+                        VALUES($1, $2, $3, $4, $5, $6)
+                        ON CONFLICT("id") DO UPDATE SET
+                            "isActive" = EXCLUDED."isActive", "testStatus" = EXCLUDED."testStatus",
+                            "data" = EXCLUDED."data", "updatedAt" = EXCLUDED."updatedAt"
+                        "#,
+                        &[&id, &is_active, &test_status, &data_str, &created_at, &updated_at],
+                    )
+                    .await?;
+                    pp_count += 1;
+                }
+            }
+            counts.insert("proxyPools".to_string(), json!(pp_count));
+
+            let mut ak_count = 0usize;
+            if let Some(aks) = payload_cloned.get("apiKeys").and_then(|v| v.as_array()) {
+                for k in aks {
+                    let id = k.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    let key = k.get("key").and_then(|v| v.as_str()).unwrap_or_default();
+                    if id.is_empty() || key.is_empty() {
+                        continue;
+                    }
+                    let name = k.get("name").and_then(|v| v.as_str()).map(str::to_string);
+                    let machine_id = k.get("machineId").and_then(|v| v.as_str()).map(str::to_string);
+                    let is_active = if k.get("isActive").and_then(|v| v.as_bool()) == Some(false) {
+                        0i32
+                    } else {
+                        1i32
+                    };
+                    let now = Utc::now().to_rfc3339();
+                    let created_at = k.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                    let rate_limit_requests = k.get("rateLimitRequests").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let rate_limit_window_seconds = k.get("rateLimitWindowSeconds").and_then(|v| v.as_i64()).unwrap_or(60) as i32;
+                    let token_limit_daily = k.get("tokenLimitDaily").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let token_limit_monthly = k.get("tokenLimitMonthly").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let allowed_models = k.get("allowedModels").and_then(|v| v.as_str()).unwrap_or("");
+                    let blocked_models = k.get("blockedModels").and_then(|v| v.as_str()).unwrap_or("");
+                    let allowed_ips = k.get("allowedIPs").and_then(|v| v.as_str()).unwrap_or("");
+                    let blocked_ips = k.get("blockedIPs").and_then(|v| v.as_str()).unwrap_or("");
+                    let expires_at = k.get("expiresAt").and_then(|v| v.as_str()).unwrap_or("");
+                    let description = k.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    let owner_ref = k.get("ownerRef").and_then(|v| v.as_str()).map(str::to_string);
+                    let max_concurrent_requests = k.get("maxConcurrentRequests").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let allowed_providers = k.get("allowedProviders").and_then(|v| v.as_str()).unwrap_or("");
+                    let blocked_providers = k.get("blockedProviders").and_then(|v| v.as_str()).unwrap_or("");
+                    let force_provider = k.get("forceProvider").and_then(|v| v.as_str()).unwrap_or("");
+                    let force_model = k.get("forceModel").and_then(|v| v.as_str()).unwrap_or("");
+                    let allowed_endpoints = k.get("allowedEndpoints").and_then(|v| v.as_str()).unwrap_or("");
+                    let blocked_endpoints = k.get("blockedEndpoints").and_then(|v| v.as_str()).unwrap_or("");
+                    let metadata = k
+                        .get("metadata")
+                        .map(|v| {
+                            if let Some(s) = v.as_str() {
+                                s.to_string()
+                            } else {
+                                serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string())
+                            }
+                        })
+                        .unwrap_or_else(|| "{}".to_string());
+                    let updated_at = k.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(created_at);
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO "apiKeys"("id", "key", "name", "machineId", "isActive", "createdAt", "rateLimitRequests", "rateLimitWindowSeconds", "tokenLimitDaily", "tokenLimitMonthly", "allowedModels", "blockedModels", "allowedIPs", "blockedIPs", "expiresAt", "description", "ownerRef", "maxConcurrentRequests", "allowedProviders", "blockedProviders", "forceProvider", "forceModel", "allowedEndpoints", "blockedEndpoints", "metadata", "updatedAt")
+                        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+                        ON CONFLICT("id") DO UPDATE SET
+                            "key" = EXCLUDED."key", "name" = EXCLUDED."name", "machineId" = EXCLUDED."machineId",
+                            "isActive" = EXCLUDED."isActive", "rateLimitRequests" = EXCLUDED."rateLimitRequests",
+                            "rateLimitWindowSeconds" = EXCLUDED."rateLimitWindowSeconds",
+                            "tokenLimitDaily" = EXCLUDED."tokenLimitDaily", "tokenLimitMonthly" = EXCLUDED."tokenLimitMonthly",
+                            "allowedModels" = EXCLUDED."allowedModels", "blockedModels" = EXCLUDED."blockedModels",
+                            "allowedIPs" = EXCLUDED."allowedIPs", "blockedIPs" = EXCLUDED."blockedIPs",
+                            "expiresAt" = EXCLUDED."expiresAt", "description" = EXCLUDED."description",
+                            "ownerRef" = EXCLUDED."ownerRef", "maxConcurrentRequests" = EXCLUDED."maxConcurrentRequests",
+                            "allowedProviders" = EXCLUDED."allowedProviders", "blockedProviders" = EXCLUDED."blockedProviders",
+                            "forceProvider" = EXCLUDED."forceProvider", "forceModel" = EXCLUDED."forceModel",
+                            "allowedEndpoints" = EXCLUDED."allowedEndpoints", "blockedEndpoints" = EXCLUDED."blockedEndpoints",
+                            "metadata" = EXCLUDED."metadata", "updatedAt" = EXCLUDED."updatedAt"
+                        "#,
+                        &[
+                            &id, &key, &name, &machine_id, &is_active, &created_at,
+                            &rate_limit_requests, &rate_limit_window_seconds, &token_limit_daily, &token_limit_monthly,
+                            &allowed_models, &blocked_models, &allowed_ips, &blocked_ips, &expires_at, &description,
+                            &owner_ref, &max_concurrent_requests, &allowed_providers, &blocked_providers,
+                            &force_provider, &force_model, &allowed_endpoints, &blocked_endpoints, &metadata, &updated_at,
+                        ],
+                    )
+                    .await?;
+                    ak_count += 1;
+                }
+            }
+            counts.insert("apiKeys".to_string(), json!(ak_count));
+
+            let mut combo_count = 0usize;
+            if let Some(cbs) = payload_cloned.get("combos").and_then(|v| v.as_array()) {
+                for c in cbs {
+                    let id = c.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    let name = c.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+                    if id.is_empty() || name.is_empty() {
+                        continue;
+                    }
+                    let kind = c.get("kind").and_then(|v| v.as_str()).map(str::to_string);
+                    let models_str = serde_json::to_string(c.get("models").unwrap_or(&json!([])))?;
+                    let strategy = c.get("strategy").and_then(|v| v.as_str()).unwrap_or("fallback");
+                    let match_rules = serde_json::to_string(c.get("matchRules").unwrap_or(&json!([])))?;
+                    let custom_prompt = c.get("customPrompt").and_then(|v| v.as_str()).unwrap_or("");
+                    let now = Utc::now().to_rfc3339();
+                    let created_at = c.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now);
+                    let updated_at = c.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(&now);
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO "combos"("id", "name", "kind", "models", "strategy", "matchRules", "customPrompt", "createdAt", "updatedAt")
+                        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        ON CONFLICT("id") DO UPDATE SET
+                            "name" = EXCLUDED."name", "kind" = EXCLUDED."kind", "models" = EXCLUDED."models",
+                            "strategy" = EXCLUDED."strategy", "matchRules" = EXCLUDED."matchRules",
+                            "customPrompt" = EXCLUDED."customPrompt", "updatedAt" = EXCLUDED."updatedAt"
+                        "#,
+                        &[&id, &name, &kind, &models_str, &strategy, &match_rules, &custom_prompt, &created_at, &updated_at],
+                    )
+                    .await?;
+                    combo_count += 1;
+                }
+            }
+            counts.insert("combos".to_string(), json!(combo_count));
+
+            let mut alias_count = 0usize;
+            if let Some(map) = payload_cloned.get("modelAliases").and_then(|v| v.as_object()) {
+                for (k, v) in map {
+                    let val_str = serde_json::to_string(v)?;
+                    tx.execute(
+                        r#"INSERT INTO "kv"("scope", "key", "value") VALUES('modelAliases', $1, $2) ON CONFLICT("scope", "key") DO UPDATE SET "value" = EXCLUDED."value""#,
+                        &[&k, &val_str],
+                    )
+                    .await?;
+                    alias_count += 1;
+                }
+            }
+            counts.insert("modelAliases".to_string(), json!(alias_count));
+
+            let mut cm_count = 0usize;
+            if let Some(cms) = payload_cloned.get("customModels").and_then(|v| v.as_array()) {
+                for m in cms {
+                    let provider_alias = m.get("providerAlias").and_then(|v| v.as_str()).unwrap_or("custom");
+                    let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("default");
+                    let model_type = m.get("type").and_then(|v| v.as_str()).unwrap_or("llm");
+                    let key = format!("{}|{}|{}", provider_alias, id, model_type);
+                    let val_str = serde_json::to_string(m)?;
+                    tx.execute(
+                        r#"INSERT INTO "kv"("scope", "key", "value") VALUES('customModels', $1, $2) ON CONFLICT("scope", "key") DO UPDATE SET "value" = EXCLUDED."value""#,
+                        &[&key, &val_str],
+                    )
+                    .await?;
+                    cm_count += 1;
+                }
+            }
+            counts.insert("customModels".to_string(), json!(cm_count));
+
+            let mut mitm_count = 0usize;
+            if let Some(map) = payload_cloned.get("mitmAlias").and_then(|v| v.as_object()) {
+                for (k, v) in map {
+                    let val_str = serde_json::to_string(v)?;
+                    tx.execute(
+                        r#"INSERT INTO "kv"("scope", "key", "value") VALUES('mitmAlias', $1, $2) ON CONFLICT("scope", "key") DO UPDATE SET "value" = EXCLUDED."value""#,
+                        &[&k, &val_str],
+                    )
+                    .await?;
+                    mitm_count += 1;
+                }
+            }
+            counts.insert("mitmAlias".to_string(), json!(mitm_count));
+
+            let mut pricing_count = 0usize;
+            if let Some(map) = payload_cloned.get("pricing").and_then(|v| v.as_object()) {
+                for (k, v) in map {
+                    let val_str = serde_json::to_string(v)?;
+                    tx.execute(
+                        r#"INSERT INTO "kv"("scope", "key", "value") VALUES('pricing', $1, $2) ON CONFLICT("scope", "key") DO UPDATE SET "value" = EXCLUDED."value""#,
+                        &[&k, &val_str],
+                    )
+                    .await?;
+                    pricing_count += 1;
+                }
+            }
+            counts.insert("pricing".to_string(), json!(pricing_count));
+
+            tx.commit().await?;
+            Ok(Value::Object(counts))
+        })?;
+
+        self.refresh_all_caches()?;
+        self.notify_table_changed("*");
+        Ok(counts)
     }
 }
 

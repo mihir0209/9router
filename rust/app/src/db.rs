@@ -542,24 +542,79 @@ impl GatewayMetrics {
     }
 }
 
-/// Shared SQLite database handle and background write-behind coordinator.
-/// Uses a dedicated writer connection and a pool of read-only connections
-/// for concurrent, non-blocking reads across CPU cores.
+/// Shared SQLite or Postgres database handle and background write-behind coordinator.
+/// Uses a dedicated SQLite writer connection + read-only pool by default, or
+/// switches to live async Postgres (memory-tiered cache + write-behind batch flush)
+/// when `DATABASE_URL` / `POSTGRES_URL` is configured.
 pub struct Database {
-    writer: Arc<Mutex<Connection>>,
+    writer: Option<Arc<Mutex<Connection>>>,
     reader_pool: Option<r2d2::Pool<SqliteConnectionManager>>,
-    usage_tx: mpsc::Sender<UsageRecord>,
-    request_details_tx: mpsc::Sender<RequestDetail>,
+    pg: Option<Arc<crate::db_pg::PgBackend>>,
+    usage_tx: Option<mpsc::Sender<UsageRecord>>,
+    request_details_tx: Option<mpsc::Sender<RequestDetail>>,
     rate_limiter: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
     pub budget_reservations: Arc<Mutex<HashMap<String, BudgetReservation>>>,
     pub metrics: Arc<GatewayMetrics>,
 }
 
 impl Database {
-    /// Opens the SQLite database configured in the config object.
+    fn is_postgres_url(url: &str) -> bool {
+        let lower = url.trim().to_ascii_lowercase();
+        lower.starts_with("postgres://") || lower.starts_with("postgresql://")
+    }
+
+    fn resolve_postgres_url(config: &Config) -> Option<String> {
+        if let Some(ref url) = config.storage.database_url {
+            let trimmed = url.trim();
+            if Self::is_postgres_url(trimmed) {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Ok(url) = std::env::var("DATABASE_URL").or_else(|_| std::env::var("POSTGRES_URL")) {
+            let trimmed = url.trim();
+            if Self::is_postgres_url(trimmed) {
+                return Some(trimmed.to_string());
+            }
+        }
+        None
+    }
+
+    /// Opens the database configured in the config object (Postgres when DATABASE_URL/POSTGRES_URL
+    /// starts with postgres:// or postgresql://, otherwise lock-free SQLite WAL).
     pub fn open(config: &Config) -> anyhow::Result<Arc<Self>> {
+        if let Some(pg_url) = Self::resolve_postgres_url(config) {
+            return Self::open_postgres(config, &pg_url);
+        }
         config.ensure_dirs()?;
         Self::open_path(&config.db_path)
+    }
+
+    /// Opens a live Postgres-backed Database using `PgConfig` derived from `Config`.
+    pub fn open_postgres(config: &Config, url: &str) -> anyhow::Result<Arc<Self>> {
+        let data_dir_str = config.data_dir.to_string_lossy();
+        let data_dir_opt = if data_dir_str.trim().is_empty() {
+            None
+        } else {
+            Some(data_dir_str.as_ref())
+        };
+        let pg_cfg = crate::db_pg::PgConfig::new(
+            url,
+            data_dir_opt,
+            config.storage.db_ssl,
+            Some(config.storage.db_pool_max),
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
+        let pg = crate::db_pg::PgBackend::connect(pg_cfg)?;
+        Ok(Arc::new(Self {
+            writer: None,
+            reader_pool: None,
+            pg: Some(pg),
+            usage_tx: None,
+            request_details_tx: None,
+            rate_limiter: Arc::new(Mutex::new(HashMap::new())),
+            budget_reservations: Arc::new(Mutex::new(HashMap::new())),
+            metrics: Arc::new(GatewayMetrics::new()),
+        }))
     }
 
     /// Opens an in-memory database instance (primarily for tests).
@@ -825,10 +880,11 @@ impl Database {
         let metrics = Arc::new(GatewayMetrics::new());
 
         let db = Arc::new(Self {
-            writer: Arc::clone(&writer_arc),
+            writer: Some(Arc::clone(&writer_arc)),
             reader_pool,
-            usage_tx,
-            request_details_tx,
+            pg: None,
+            usage_tx: Some(usage_tx),
+            request_details_tx: Some(request_details_tx),
             rate_limiter,
             budget_reservations,
             metrics,
@@ -841,6 +897,37 @@ impl Database {
         Ok(db)
     }
 
+    /// Returns true if this Database instance is backed by live Postgres.
+    pub fn is_postgres(&self) -> bool {
+        self.pg.is_some()
+    }
+
+    /// Returns the isolated Postgres schema name if running in Postgres mode.
+    pub fn pg_schema(&self) -> Option<String> {
+        self.pg.as_ref().and_then(|p| p.config().schema.clone())
+    }
+
+    /// Returns the underlying PgBackend handle if running in Postgres mode.
+    pub fn pg_backend(&self) -> Option<&Arc<crate::db_pg::PgBackend>> {
+        self.pg.as_ref()
+    }
+
+    /// Flushes any queued write-behind records (usageHistory / requestDetails) in Postgres mode.
+    pub fn flush_write_behind(&self) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.flush_write_behind();
+        }
+        Ok(())
+    }
+
+    /// Refreshes all in-memory Postgres caches from the live database.
+    pub fn refresh_pg_cache(&self) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.refresh_all_caches();
+        }
+        Ok(())
+    }
+
     /// Returns a read connection: either borrowed from the read-only pool or from the writer fallback.
     pub fn reader(&self) -> anyhow::Result<ReadConnection<'_>> {
         if let Some(ref pool) = self.reader_pool {
@@ -848,12 +935,14 @@ impl Database {
                 .get()
                 .map_err(|e| anyhow::anyhow!("Failed to acquire reader connection from pool: {}", e))?;
             Ok(ReadConnection::Pooled(conn))
-        } else {
-            let guard = match self.writer.lock() {
+        } else if let Some(ref writer) = self.writer {
+            let guard = match writer.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
             Ok(ReadConnection::Writer(guard))
+        } else {
+            anyhow::bail!("Raw SQLite reader connection is unavailable in Postgres mode")
         }
     }
 
@@ -864,7 +953,11 @@ impl Database {
 
     /// Returns a lock guard on the dedicated writer connection.
     pub fn writer(&self) -> MutexGuard<'_, Connection> {
-        match self.writer.lock() {
+        let writer = self
+            .writer
+            .as_ref()
+            .expect("Raw SQLite writer connection is unavailable in Postgres mode");
+        match writer.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         }
@@ -877,12 +970,16 @@ impl Database {
 
     /// Returns a clone of the dedicated writer connection Arc.
     pub fn writer_arc(&self) -> Arc<Mutex<Connection>> {
-        Arc::clone(&self.writer)
+        Arc::clone(
+            self.writer
+                .as_ref()
+                .expect("Raw SQLite writer connection is unavailable in Postgres mode"),
+        )
     }
 
-    /// Returns whether the database is using a reader pool (file-based) or writer fallback (in-memory).
+    /// Returns whether the database is using a reader pool (file-based or Postgres) or writer fallback (in-memory).
     pub fn is_pooled(&self) -> bool {
-        self.reader_pool.is_some()
+        self.reader_pool.is_some() || self.pg.is_some()
     }
 
     /// Returns reader pool state if pooled.
@@ -1081,20 +1178,35 @@ impl Database {
 
     /// Enqueue a usage record into the non-blocking write-behind channel.
     pub fn queue_usage(&self, record: UsageRecord) {
-        if let Err(e) = self.usage_tx.try_send(record) {
-            warn!("Write-behind queue is full or closed: {}", e);
+        if let Some(ref pg) = self.pg {
+            pg.queue_usage(record);
+            return;
+        }
+        if let Some(ref tx) = self.usage_tx {
+            if let Err(e) = tx.try_send(record) {
+                warn!("Write-behind queue is full or closed: {}", e);
+            }
         }
     }
 
     /// Enqueue a request detail record into the non-blocking write-behind channel.
     pub fn record_request_detail(&self, detail: RequestDetail) {
-        if let Err(e) = self.request_details_tx.try_send(detail) {
-            warn!("Request detail write-behind queue is full or closed: {}", e);
+        if let Some(ref pg) = self.pg {
+            pg.record_request_detail(detail);
+            return;
+        }
+        if let Some(ref tx) = self.request_details_tx {
+            if let Err(e) = tx.try_send(detail) {
+                warn!("Request detail write-behind queue is full or closed: {}", e);
+            }
         }
     }
 
-    /// Returns the total count of request details records in SQLite.
+    /// Returns the total count of request details records in the database.
     pub fn get_request_details_count(&self) -> anyhow::Result<i64> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_request_details_count();
+        }
         let guard = self.reader()?;
         let count: i64 = guard.query_row("SELECT COUNT(*) FROM requestDetails", [], |r| r.get(0))?;
         Ok(count)
@@ -1143,6 +1255,9 @@ impl Database {
 
     /// Look up an API key by exact key string.
     pub fn get_api_key_by_key(&self, key: &str) -> anyhow::Result<Option<ApiKey>> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_api_key_by_key(key);
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             r#"
@@ -1163,6 +1278,9 @@ impl Database {
 
     /// Look up an API key by ID.
     pub fn get_api_key_by_id(&self, id: &str) -> anyhow::Result<Option<ApiKey>> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_api_key_by_id(id);
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             r#"
@@ -1183,6 +1301,9 @@ impl Database {
 
     /// Insert or replace an API key record.
     pub fn save_api_key(&self, key: &ApiKey) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.save_api_key(key);
+        }
         let guard = self.writer();
         guard.execute(
             r#"
@@ -1252,6 +1373,9 @@ impl Database {
 
     /// List all API keys.
     pub fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKey>> {
+        if let Some(ref pg) = self.pg {
+            return pg.list_api_keys();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare(
             r#"
@@ -1276,6 +1400,9 @@ impl Database {
 
     /// List API keys belonging to a specific ownerRef.
     pub fn list_api_keys_by_owner(&self, owner_ref: &str) -> anyhow::Result<Vec<ApiKey>> {
+        if let Some(ref pg) = self.pg {
+            return pg.list_api_keys_by_owner(owner_ref);
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare(
             r#"
@@ -1314,6 +1441,9 @@ impl Database {
 
     /// Delete an API key by ID or Key string.
     pub fn delete_api_key(&self, id: &str) -> anyhow::Result<bool> {
+        if let Some(ref pg) = self.pg {
+            return pg.delete_api_key(id);
+        }
         let guard = self.writer();
         let affected = guard.execute(
             "DELETE FROM apiKeys WHERE id = ?1 OR key = ?1",
@@ -1327,6 +1457,9 @@ impl Database {
     // ==========================================
 
     pub fn append_audit_event(&self, event: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        if let Some(ref pg) = self.pg {
+            return pg.append_audit_event(event);
+        }
         let guard = self.writer();
         let id = event
             .get("id")
@@ -1379,6 +1512,9 @@ impl Database {
         action: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
+        if let Some(ref pg) = self.pg {
+            return pg.list_audit_events(owner_ref, action, limit);
+        }
         let guard = self.reader()?;
         let mut sql = "SELECT id, timestamp, actor, action, resourceType, resourceId, ownerRef, requestId, sourceIp, outcome, before, after, metadata FROM auditLog".to_string();
         let mut conditions = Vec::new();
@@ -1468,39 +1604,42 @@ impl Database {
             });
         };
 
-        let guard = match self.reader() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("Failed to acquire reader for get_budget_state: {}", e);
-                return json!({
-                    "enabled": true,
-                    "limit": limit,
-                    "used": 0.0,
-                    "reserved": 0.0,
-                    "remaining": limit,
-                    "exceeded": false,
-                    "resetsAt": null
-                });
+        let used: f64 = if let Some(ref pg) = self.pg {
+            pg.get_budget_used(key)
+        } else {
+            let guard = match self.reader() {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::error!("Failed to acquire reader for get_budget_state: {}", e);
+                    return json!({
+                        "enabled": true,
+                        "limit": limit,
+                        "used": 0.0,
+                        "reserved": 0.0,
+                        "remaining": limit,
+                        "exceeded": false,
+                        "resetsAt": null
+                    });
+                }
+            };
+            if key.regenerate_version > 0 {
+                guard
+                    .query_row(
+                        "SELECT COALESCE(SUM(cost), 0.0) FROM usageHistory WHERE (apiKey = ? OR apiKeyId = ?) AND cost > 0",
+                        params![key.key, key.id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0.0)
+            } else {
+                guard
+                    .query_row(
+                        "SELECT COALESCE(SUM(cost), 0.0) FROM usageHistory WHERE apiKey = ? AND cost > 0",
+                        params![key.key],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0.0)
             }
         };
-        let used: f64 = if key.regenerate_version > 0 {
-            guard
-                .query_row(
-                    "SELECT COALESCE(SUM(cost), 0.0) FROM usageHistory WHERE (apiKey = ? OR apiKeyId = ?) AND cost > 0",
-                    params![key.key, key.id],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0.0)
-        } else {
-            guard
-                .query_row(
-                    "SELECT COALESCE(SUM(cost), 0.0) FROM usageHistory WHERE apiKey = ? AND cost > 0",
-                    params![key.key],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0.0)
-        };
-        drop(guard);
 
         let mut res_guard = self.budget_reservations.lock().unwrap();
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1597,22 +1736,26 @@ impl Database {
                 ));
             }
             let commit_model = format!("budget-commit:{}", request_id);
-            let guard = self.reader().map_err(|e| (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to acquire reader connection: {}", e),
-                None,
-            ))?;
-            let existing: Option<f64> = guard
-                .query_row(
-                    "SELECT cost FROM usageHistory WHERE apiKeyId = ? AND provider = 'budget' AND model = ? LIMIT 1",
-                    params![key.id, commit_model],
-                    |row| row.get(0),
-                )
-                .optional()
-                .unwrap_or(None);
-            drop(guard);
+            let existing_exists = if let Some(ref pg) = self.pg {
+                pg.has_budget_commit(&key.id, &commit_model)
+            } else {
+                let guard = self.reader().map_err(|e| (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to acquire reader connection: {}", e),
+                    None,
+                ))?;
+                let existing: Option<f64> = guard
+                    .query_row(
+                        "SELECT cost FROM usageHistory WHERE apiKeyId = ? AND provider = 'budget' AND model = ? LIMIT 1",
+                        params![key.id, commit_model],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .unwrap_or(None);
+                existing.is_some()
+            };
 
-            if existing.is_some() {
+            if existing_exists {
                 let mut res_guard = self.budget_reservations.lock().unwrap();
                 res_guard.remove(&reservation_key);
                 drop(res_guard);
@@ -1641,21 +1784,30 @@ impl Database {
                 ));
             }
 
-            let guard = self.writer();
-            let _ = guard.execute(
-                r#"
-                INSERT INTO usageHistory(timestamp, provider, model, apiKey, apiKeyId, cost)
-                VALUES (?, 'budget', ?, ?, ?, ?)
-                "#,
-                params![
-                    chrono::Utc::now().to_rfc3339(),
-                    commit_model,
-                    key.key,
-                    key.id,
-                    commit_amount
-                ],
-            );
-            drop(guard);
+            if let Some(ref pg) = self.pg {
+                let _ = pg.insert_budget_commit(
+                    &chrono::Utc::now().to_rfc3339(),
+                    &commit_model,
+                    &key.key,
+                    &key.id,
+                    commit_amount,
+                );
+            } else {
+                let guard = self.writer();
+                let _ = guard.execute(
+                    r#"
+                    INSERT INTO usageHistory(timestamp, provider, model, apiKey, apiKeyId, cost)
+                    VALUES (?, 'budget', ?, ?, ?, ?)
+                    "#,
+                    params![
+                        chrono::Utc::now().to_rfc3339(),
+                        commit_model,
+                        key.key,
+                        key.id,
+                        commit_amount
+                    ],
+                );
+            }
 
             let mut updated_state = self.get_budget_state(&key);
             if let Some(obj) = updated_state.as_object_mut() {
@@ -1954,6 +2106,9 @@ impl Database {
 
     /// Loads all provider connections from the database.
     pub fn load_provider_connections(&self) -> anyhow::Result<Vec<ProviderConnection>> {
+        if let Some(ref pg) = self.pg {
+            return pg.load_provider_connections();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare(
             r#"
@@ -2003,6 +2158,9 @@ impl Database {
 
     /// Saves or updates a provider connection.
     pub fn save_provider_connection(&self, conn: &ProviderConnection) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.save_provider_connection(conn);
+        }
         let guard = self.writer();
         let data_json = if conn.raw_data.trim().is_empty() {
             serde_json::to_string(&conn.data)?
@@ -2042,6 +2200,9 @@ impl Database {
 
     /// Loads settings JSON from the database. Returns defaults if unset.
     pub fn load_settings(&self) -> anyhow::Result<serde_json::Value> {
+        if let Some(ref pg) = self.pg {
+            return pg.load_settings();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached("SELECT data FROM settings WHERE id = 1")?;
 
@@ -2064,6 +2225,9 @@ impl Database {
 
     /// Saves settings JSON into the database.
     pub fn save_settings(&self, settings: &serde_json::Value) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.save_settings(settings);
+        }
         let guard = self.writer();
         let data_str = serde_json::to_string(settings)?;
         guard.execute(
@@ -2078,6 +2242,9 @@ impl Database {
 
     /// Loads custom models stored under kv scope 'customModels'.
     pub fn load_custom_models(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        if let Some(ref pg) = self.pg {
+            return pg.load_custom_models();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached("SELECT value FROM kv WHERE scope = 'customModels'")?;
         let rows = stmt.query_map([], |row| {
@@ -2097,6 +2264,9 @@ impl Database {
 
     /// Saves a custom model to kv table under scope 'customModels'.
     pub fn save_custom_model(&self, model: &serde_json::Value) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.save_custom_model(model);
+        }
         let provider_alias = model
             .get("providerAlias")
             .or_else(|| model.get("provider"))
@@ -2132,6 +2302,9 @@ impl Database {
 
     /// Deletes a custom model from kv table under scope 'customModels'.
     pub fn delete_custom_model(&self, provider_alias: &str, id: &str, model_type: &str) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.delete_custom_model(provider_alias, id, model_type);
+        }
         let key = format!("{}|{}|{}", provider_alias, id, model_type);
         let guard = self.writer();
         guard.execute(
@@ -2143,6 +2316,9 @@ impl Database {
 
     /// Loads model display names from kv scope 'modelDisplayNames'.
     pub fn load_model_display_names(&self) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        if let Some(ref pg) = self.pg {
+            return pg.load_model_display_names();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached("SELECT key, value FROM kv WHERE scope = 'modelDisplayNames'")?;
         let rows = stmt.query_map([], |row| {
@@ -2160,6 +2336,9 @@ impl Database {
 
     /// Sets a model display name in kv scope 'modelDisplayNames'.
     pub fn set_model_display_name(&self, model_id: &str, display_name: &str) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.set_model_display_name(model_id, display_name);
+        }
         let guard = self.writer();
         let val_str = serde_json::to_string(display_name)?;
         guard.execute(
@@ -2174,6 +2353,9 @@ impl Database {
 
     /// Deletes a model display name in kv scope 'modelDisplayNames'.
     pub fn delete_model_display_name(&self, model_id: &str) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.delete_model_display_name(model_id);
+        }
         let guard = self.writer();
         guard.execute(
             "DELETE FROM kv WHERE scope = 'modelDisplayNames' AND key = ?",
@@ -2184,6 +2366,9 @@ impl Database {
 
     /// Loads disabled models by provider alias from kv scope 'disabledModels'.
     pub fn load_disabled_models(&self) -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
+        if let Some(ref pg) = self.pg {
+            return pg.load_disabled_models();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached("SELECT key, value FROM kv WHERE scope = 'disabledModels'")?;
         let rows = stmt.query_map([], |row| {
@@ -2201,6 +2386,9 @@ impl Database {
 
     /// Disables models for a provider alias.
     pub fn disable_models(&self, provider_alias: &str, ids: &[String]) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.disable_models(provider_alias, ids);
+        }
         let guard = self.writer();
         let existing_str: Option<String> = guard
             .query_row(
@@ -2233,6 +2421,9 @@ impl Database {
 
     /// Enables models for a provider alias (removes from disabled list).
     pub fn enable_models(&self, provider_alias: &str, ids: &[String]) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.enable_models(provider_alias, ids);
+        }
         let guard = self.writer();
         if ids.is_empty() {
             guard.execute(
@@ -2280,6 +2471,9 @@ impl Database {
 
     /// Loads all model aliases from kv scope 'modelAliases'.
     pub fn load_model_aliases(&self) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        if let Some(ref pg) = self.pg {
+            return pg.load_model_aliases();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached("SELECT key, value FROM kv WHERE scope = 'modelAliases'")?;
         let rows = stmt.query_map([], |row| {
@@ -2297,6 +2491,9 @@ impl Database {
 
     /// Sets a model alias in kv scope 'modelAliases'.
     pub fn set_model_alias(&self, alias: &str, model: &str) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.set_model_alias(alias, model);
+        }
         let guard = self.writer();
         let val_str = serde_json::to_string(model)?;
         guard.execute(
@@ -2311,6 +2508,9 @@ impl Database {
 
     /// Deletes a model alias from kv scope 'modelAliases'.
     pub fn delete_model_alias(&self, alias: &str) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.delete_model_alias(alias);
+        }
         let guard = self.writer();
         guard.execute(
             "DELETE FROM kv WHERE scope = 'modelAliases' AND key = ?",
@@ -2325,6 +2525,9 @@ impl Database {
 
     /// Loads all model combos.
     pub fn load_combos(&self) -> anyhow::Result<Vec<Combo>> {
+        if let Some(ref pg) = self.pg {
+            return pg.load_combos();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare(
             "SELECT id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt FROM combos ORDER BY createdAt ASC",
@@ -2355,6 +2558,9 @@ impl Database {
 
     /// Retrieves a combo by its unique name.
     pub fn get_combo_by_name(&self, name: &str) -> anyhow::Result<Option<Combo>> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_combo_by_name(name);
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             "SELECT id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt FROM combos WHERE name = ?",
@@ -2383,6 +2589,9 @@ impl Database {
 
     /// Retrieves a combo by its ID.
     pub fn get_combo_by_id(&self, id: &str) -> anyhow::Result<Option<Combo>> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_combo_by_id(id);
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             "SELECT id, name, kind, models, strategy, matchRules, customPrompt, createdAt, updatedAt FROM combos WHERE id = ?",
@@ -2411,6 +2620,9 @@ impl Database {
 
     /// Saves or updates a combo.
     pub fn save_combo(&self, combo: &Combo) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.save_combo(combo);
+        }
         let guard = self.writer();
         let models_json = serde_json::to_string(&combo.models)?;
         let strategy = combo.strategy.as_deref().unwrap_or("fallback");
@@ -2442,6 +2654,9 @@ impl Database {
 
     /// Deletes a combo by ID or name.
     pub fn delete_combo(&self, id: &str) -> anyhow::Result<bool> {
+        if let Some(ref pg) = self.pg {
+            return pg.delete_combo(id);
+        }
         let guard = self.writer();
         let affected = guard.execute(
             "DELETE FROM combos WHERE id = ?1 OR name = ?1",
@@ -2452,6 +2667,9 @@ impl Database {
 
     /// Bulk deletes combos by IDs.
     pub fn bulk_delete_combos(&self, ids: &[String]) -> anyhow::Result<usize> {
+        if let Some(ref pg) = self.pg {
+            return pg.bulk_delete_combos(ids);
+        }
         let guard = self.writer();
         let mut count = 0;
         for id in ids {
@@ -2466,6 +2684,9 @@ impl Database {
 
     /// Returns count of total rows in usageHistory.
     pub fn get_usage_count(&self) -> anyhow::Result<i64> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_usage_count();
+        }
         let guard = self.reader()?;
         let count: i64 =
             guard.query_row("SELECT COUNT(*) FROM usageHistory", [], |r| r.get(0))?;
@@ -2474,6 +2695,9 @@ impl Database {
 
     /// Aggregates usage statistics for the given time period ("today", "24h", "7d", "30d", "60d", "all").
     pub fn get_usage_statistics(&self, period: &str) -> anyhow::Result<serde_json::Value> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_usage_statistics(period);
+        }
         let guard = self.reader()?;
 
         let cutoff = match period {
@@ -2735,6 +2959,9 @@ impl Database {
 
     /// Computes aggregated chart buckets for the specified period.
     pub fn get_chart_data(&self, period: &str) -> anyhow::Result<serde_json::Value> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_chart_data(period);
+        }
         let guard = self.reader()?;
 
         let now = chrono::Utc::now();
@@ -2806,6 +3033,9 @@ impl Database {
 
     /// Aggregates per-API-key usage summary for the specified period.
     pub fn get_api_keys_usage(&self, period: &str) -> anyhow::Result<serde_json::Value> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_api_keys_usage(period);
+        }
         let keys = self.list_api_keys()?;
         let guard = self.reader()?;
 
@@ -2900,6 +3130,9 @@ impl Database {
 
     /// Returns list of unique providers found in usage history and provider nodes.
     pub fn get_usage_providers(&self) -> anyhow::Result<serde_json::Value> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_usage_providers();
+        }
         let guard = self.reader()?;
         let mut provider_set = std::collections::HashSet::new();
 
@@ -2946,6 +3179,9 @@ impl Database {
         model: Option<&str>,
         status: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_request_details(page, page_size, provider, model, status);
+        }
         let guard = self.reader()?;
         let p = page.max(1);
         let ps = page_size.clamp(1, 100);
@@ -3102,6 +3338,9 @@ impl Database {
 
     /// Returns formatted log lines from recent usage history.
     pub fn get_recent_logs(&self, limit: i64) -> Vec<String> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_recent_logs(limit);
+        }
         let guard = match self.reader() {
             Ok(g) => g,
             Err(e) => {
@@ -3145,6 +3384,9 @@ impl Database {
 
     /// Loads all provider nodes (custom endpoints with prefixes).
     pub fn load_provider_nodes(&self) -> anyhow::Result<Vec<ProviderNode>> {
+        if let Some(ref pg) = self.pg {
+            return pg.load_provider_nodes();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare(
             "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes ORDER BY createdAt ASC",
@@ -3185,6 +3427,9 @@ impl Database {
 
     /// Saves or updates a provider node.
     pub fn save_provider_node(&self, node: &ProviderNode) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.save_provider_node(node);
+        }
         let guard = self.writer();
         let data_str = serde_json::to_string(&node.data)?;
         guard.execute(
@@ -3208,6 +3453,9 @@ impl Database {
 
     /// Deletes a provider node by ID.
     pub fn delete_provider_node(&self, id: &str) -> anyhow::Result<bool> {
+        if let Some(ref pg) = self.pg {
+            return pg.delete_provider_node(id);
+        }
         let guard = self.writer();
         let affected = guard.execute(
             "DELETE FROM providerNodes WHERE id = ?1",
@@ -3218,6 +3466,9 @@ impl Database {
 
     /// Retrieves a single provider node by ID.
     pub fn get_provider_node_by_id(&self, id: &str) -> anyhow::Result<Option<ProviderNode>> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_provider_node_by_id(id);
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes WHERE id = ?",
@@ -3261,6 +3512,9 @@ impl Database {
 
     /// Loads all proxy pool configurations.
     pub fn load_proxy_pools(&self) -> anyhow::Result<Vec<ProxyPool>> {
+        if let Some(ref pg) = self.pg {
+            return pg.load_proxy_pools();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare(
             "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools ORDER BY createdAt ASC",
@@ -3294,6 +3548,9 @@ impl Database {
 
     /// Retrieves a single proxy pool by ID.
     pub fn get_proxy_pool_by_id(&self, id: &str) -> anyhow::Result<Option<ProxyPool>> {
+        if let Some(ref pg) = self.pg {
+            return pg.get_proxy_pool_by_id(id);
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare_cached(
             "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools WHERE id = ?",
@@ -3326,6 +3583,9 @@ impl Database {
 
     /// Upserts a proxy pool configuration into the database.
     pub fn save_proxy_pool(&self, pool: &ProxyPool) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.save_proxy_pool(pool);
+        }
         let guard = self.writer();
         let data_str = serde_json::to_string(&pool.data)?;
         let is_active = if pool.is_active { 1 } else { 0 };
@@ -3350,6 +3610,9 @@ impl Database {
 
     /// Deletes a proxy pool by ID.
     pub fn delete_proxy_pool(&self, id: &str) -> anyhow::Result<bool> {
+        if let Some(ref pg) = self.pg {
+            return pg.delete_proxy_pool(id);
+        }
         let guard = self.writer();
         let affected = guard.execute(
             "DELETE FROM proxyPools WHERE id = ?1",
@@ -3363,6 +3626,9 @@ impl Database {
         &self,
         protected_ids: &[String],
     ) -> anyhow::Result<(usize, Vec<String>, Vec<String>)> {
+        if let Some(ref pg) = self.pg {
+            return pg.delete_inactive_proxy_pools(protected_ids);
+        }
         let guard = self.writer();
         let mut stmt = guard.prepare("SELECT id FROM proxyPools WHERE isActive = 0")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -3393,6 +3659,9 @@ impl Database {
         source: &str,
         pools: &[ProxyPool],
     ) -> anyhow::Result<usize> {
+        if let Some(ref pg) = self.pg {
+            return pg.replace_proxy_pools_by_source(source, pools);
+        }
         let guard = self.writer();
         let mut stmt = guard.prepare("SELECT id, data FROM proxyPools")?;
         let rows = stmt.query_map([], |row| {
@@ -3445,6 +3714,9 @@ impl Database {
 
     /// Loads all rate-limit / token usage plans.
     pub fn load_plans(&self) -> anyhow::Result<Vec<Plan>> {
+        if let Some(ref pg) = self.pg {
+            return pg.load_plans();
+        }
         let guard = self.reader()?;
         let mut stmt = guard.prepare(
             "SELECT id, tenant_id, name, description, limit_micros, limit_tokens, rpm_limit, tpm_limit, concurrency_limit, period, alert_pct, hard_cutoff, allowed_models, created_at, updated_at FROM plans ORDER BY created_at ASC",
@@ -3518,6 +3790,9 @@ impl Database {
 
     /// Exports full database backup payload matching Next.js exportDb schema.
     pub fn export_database(&self) -> anyhow::Result<serde_json::Value> {
+        if let Some(ref pg) = self.pg {
+            return pg.export_database();
+        }
         let guard = self.reader()?;
 
         let settings = match guard.prepare_cached("SELECT data FROM settings WHERE id = 1") {
@@ -3785,6 +4060,9 @@ impl Database {
     /// Replaces database contents with payload in a single atomic transaction.
     /// Returns per-table written row counts.
     pub fn import_database(&self, payload: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        if let Some(ref pg) = self.pg {
+            return pg.import_database(payload);
+        }
         if !payload.is_object() {
             anyhow::bail!("Invalid database payload: root must be an object");
         }
