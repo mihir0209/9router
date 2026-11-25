@@ -12,6 +12,7 @@ pub mod embed;
 pub mod gemini;
 pub mod media;
 pub mod mitm;
+pub mod oauth_api;
 pub mod original;
 pub mod proxy;
 pub mod proxy_pools;
