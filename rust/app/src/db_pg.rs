@@ -15,14 +15,14 @@
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, Notify, Semaphore};
+use tokio::sync::{mpsc, watch, Notify, Semaphore};
 use tokio_postgres::types::{private::BytesMut, IsNull, ToSql, Type};
 use tokio_postgres::{AsyncMessage, Client, Config as TokioPgConfig, NoTls, Row};
 use tracing::{error, warn};
@@ -1947,6 +1947,7 @@ pub struct PgBackend {
     combos_list: Arc<RwLock<Vec<Combo>>>,
     combo_name_misses: Arc<RwLock<HashSet<String>>>,
     settings_cache: Arc<RwLock<Option<Value>>>,
+    settings_tx: watch::Sender<Option<Value>>,
     kv_cache: Arc<RwLock<Option<HashMap<String, HashMap<String, String>>>>>,
     // Write-behind channels
     usage_tx: mpsc::Sender<PgUsageMsg>,
@@ -2022,6 +2023,7 @@ impl PgBackend {
 
         let (usage_tx, usage_rx) = mpsc::channel(10_000);
         let (detail_tx, detail_rx) = mpsc::channel(10_000);
+        let (settings_tx, _settings_rx) = watch::channel(None);
 
         let backend = Arc::new(Self {
             pool: Arc::clone(&pool),
@@ -2043,6 +2045,7 @@ impl PgBackend {
             combos_list: Arc::new(RwLock::new(Vec::new())),
             combo_name_misses: Arc::new(RwLock::new(HashSet::new())),
             settings_cache: Arc::new(RwLock::new(None)),
+            settings_tx,
             kv_cache: Arc::new(RwLock::new(None)),
             usage_tx,
             detail_tx,
@@ -2076,6 +2079,11 @@ impl PgBackend {
         &self.memory
     }
 
+    /// Subscribes to live settings updates published on local writes or Postgres LISTEN/NOTIFY resyncs.
+    pub fn subscribe_settings(&self) -> watch::Receiver<Option<Value>> {
+        self.settings_tx.subscribe()
+    }
+
     pub fn refresh_all_caches(&self) -> anyhow::Result<()> {
         for table in &[
             "settings",
@@ -2097,13 +2105,14 @@ impl PgBackend {
         let channel = backend.notify_channel.clone();
         let stale = Arc::clone(&backend.stale_mask);
         let shutdown = Arc::clone(&backend.shutdown);
+        let weak_backend = Arc::downgrade(&backend);
 
         rt.spawn(async move {
             let mut backoff_ms = 100u64;
             loop {
                 tokio::select! {
                     _ = shutdown.notified() => break,
-                    res = Self::run_listen_session(&cfg, &channel, &stale, &shutdown) => {
+                    res = Self::run_listen_session(&cfg, &channel, &stale, &shutdown, &weak_backend) => {
                         match res {
                             Ok(()) => break,
                             Err(e) => {
@@ -2128,6 +2137,7 @@ impl PgBackend {
         channel: &str,
         stale: &Arc<AtomicU64>,
         shutdown: &Arc<Notify>,
+        backend: &Weak<Self>,
     ) -> anyhow::Result<()> {
         let (pg_cfg, use_tls) = build_tokio_pg_config(cfg)?;
         let listen_sql = format!("LISTEN {}", pg_ident(channel));
@@ -2159,7 +2169,7 @@ impl PgBackend {
                     }
                     msg = rx.recv() => {
                         match msg {
-                            Some(payload) => Self::mark_table_stale_from_notify(stale, &payload),
+                            Some(payload) => Self::handle_notify_payload(stale, backend, &payload),
                             None => {
                                 let _ = driver.await?;
                                 anyhow::bail!("LISTEN stream closed");
@@ -2193,7 +2203,7 @@ impl PgBackend {
                     }
                     msg = rx.recv() => {
                         match msg {
-                            Some(payload) => Self::mark_table_stale_from_notify(stale, &payload),
+                            Some(payload) => Self::handle_notify_payload(stale, backend, &payload),
                             None => {
                                 let _ = driver.await?;
                                 anyhow::bail!("LISTEN stream closed");
@@ -2201,6 +2211,19 @@ impl PgBackend {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    fn handle_notify_payload(stale: &Arc<AtomicU64>, backend: &Weak<Self>, payload: &str) {
+        Self::mark_table_stale_from_notify(stale, payload);
+        if payload == "settings" || payload == "*" {
+            if let Some(b) = backend.upgrade() {
+                tokio::spawn(async move {
+                    if let Err(e) = b.hydrate_settings_async().await {
+                        warn!("Postgres settings resync after NOTIFY failed: {}", e);
+                    }
+                });
             }
         }
     }
@@ -2515,6 +2538,39 @@ impl PgBackend {
         self.memory.mark_loaded(table);
     }
 
+    fn apply_hydrated_settings(&self, parsed: Option<Value>) {
+        if let Some(ref val) = parsed {
+            let mut m = HashMap::new();
+            m.insert("id".to_string(), json!(1));
+            m.insert("data".to_string(), json!(val.to_string()));
+            self.memory.resync_table("settings", vec![m]);
+        } else {
+            self.memory.resync_table("settings", Vec::new());
+        }
+        if let Ok(mut g) = self.settings_cache.write() {
+            *g = parsed.clone();
+        }
+        self.mark_synced("settings");
+        self.settings_tx.send_if_modified(|current| {
+            if *current != parsed {
+                *current = parsed;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    async fn hydrate_settings_async(&self) -> anyhow::Result<()> {
+        let row = self
+            .pool
+            .query_opt_async(r#"SELECT "data" FROM "settings" WHERE "id" = 1"#, &[])
+            .await?;
+        let parsed = row.and_then(|r| serde_json::from_str::<Value>(&pg_col_str(&r, 0)).ok());
+        self.apply_hydrated_settings(parsed);
+        Ok(())
+    }
+
     pub fn hydrate_table(&self, table: &str) -> anyhow::Result<()> {
         match table {
             "settings" => {
@@ -2524,18 +2580,7 @@ impl PgBackend {
                 )?;
                 let parsed = row
                     .and_then(|r| serde_json::from_str::<Value>(&pg_col_str(&r, 0)).ok());
-                if let Some(ref val) = parsed {
-                    let mut m = HashMap::new();
-                    m.insert("id".to_string(), json!(1));
-                    m.insert("data".to_string(), json!(val.to_string()));
-                    self.memory.resync_table("settings", vec![m]);
-                } else {
-                    self.memory.resync_table("settings", Vec::new());
-                }
-                if let Ok(mut g) = self.settings_cache.write() {
-                    *g = parsed;
-                }
-                self.mark_synced("settings");
+                self.apply_hydrated_settings(parsed);
             }
             "apiKeys" => {
                 let rows = self.pool.query(
@@ -3300,6 +3345,15 @@ impl PgBackend {
         m.insert("data".to_string(), json!(data_str));
         let _ = self.memory.upsert_cached_row("settings", m);
         self.mark_synced("settings");
+        let next = Some(settings.clone());
+        self.settings_tx.send_if_modified(|current| {
+            if *current != next {
+                *current = next;
+                true
+            } else {
+                false
+            }
+        });
         self.notify_table_changed("settings");
         Ok(())
     }

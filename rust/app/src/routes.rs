@@ -6609,6 +6609,20 @@ pub fn create_router(state: AppState) -> Router {
         state.rate_limiter.update_from_settings(&saved_settings);
     }
 
+    if let Some(mut settings_rx) = state.db.subscribe_settings() {
+        let rate_limiter = Arc::clone(&state.rate_limiter);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                while settings_rx.changed().await.is_ok() {
+                    let new_settings = settings_rx.borrow_and_update().clone();
+                    if let Some(settings) = new_settings {
+                        rate_limiter.update_from_settings(&settings);
+                    }
+                }
+            });
+        }
+    }
+
     let body_limit = resolve_max_body_limit(&state.config);
 
     let mut router = Router::new()
