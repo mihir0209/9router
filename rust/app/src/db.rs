@@ -4348,6 +4348,95 @@ impl Database {
 
         Ok(serde_json::Value::Object(counts))
     }
+
+    /// Deletes a provider connection by ID and reorders remaining priorities for its provider.
+    pub fn delete_provider_connection(&self, id: &str) -> anyhow::Result<bool> {
+        if let Some(ref pg) = self.pg {
+            return pg.delete_provider_connection(id);
+        }
+        let guard = self.writer();
+        let provider: Option<String> = guard
+            .query_row(
+                "SELECT provider FROM providerConnections WHERE id = ?",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(provider) = provider else {
+            return Ok(false);
+        };
+        let affected = guard.execute("DELETE FROM providerConnections WHERE id = ?", params![id])?;
+        if affected > 0 {
+            let mut stmt = guard.prepare(
+                "SELECT id FROM providerConnections WHERE provider = ? ORDER BY priority ASC, createdAt ASC",
+            )?;
+            let ids: Vec<String> = stmt
+                .query_map(params![provider], |r| r.get(0))?
+                .flatten()
+                .collect();
+            drop(stmt);
+            for (idx, conn_id) in ids.iter().enumerate() {
+                guard.execute(
+                    "UPDATE providerConnections SET priority = ? WHERE id = ?",
+                    params![(idx + 1) as i64, conn_id],
+                )?;
+            }
+        }
+        Ok(affected > 0)
+    }
+
+    /// Loads all key/value string pairs for a given `kv` scope.
+    pub fn kv_scope_map(&self, scope: &str) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        if let Some(ref pg) = self.pg {
+            return pg.kv_scope_map(scope);
+        }
+        let guard = self.reader()?;
+        let mut stmt = guard.prepare("SELECT key, value FROM kv WHERE scope = ?")?;
+        let rows = stmt.query_map(params![scope], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for r in rows.flatten() {
+            map.insert(r.0, r.1);
+        }
+        Ok(map)
+    }
+
+    /// Inserts or updates a raw string value in `kv` for `(scope, key)`.
+    pub fn kv_upsert(&self, scope: &str, key: &str, value: &str) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.kv_upsert(scope, key, value);
+        }
+        let guard = self.writer();
+        guard.execute(
+            "INSERT INTO kv(scope, key, value) VALUES (?, ?, ?) ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value",
+            params![scope, key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes a single entry from `kv` for `(scope, key)`.
+    pub fn kv_delete(&self, scope: &str, key: &str) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.kv_delete(scope, key);
+        }
+        let guard = self.writer();
+        guard.execute(
+            "DELETE FROM kv WHERE scope = ? AND key = ?",
+            params![scope, key],
+        )?;
+        Ok(())
+    }
+
+    /// Clears all entries in `kv` for a given `scope`.
+    pub fn kv_clear_scope(&self, scope: &str) -> anyhow::Result<()> {
+        if let Some(ref pg) = self.pg {
+            return pg.kv_clear_scope(scope);
+        }
+        let guard = self.writer();
+        guard.execute("DELETE FROM kv WHERE scope = ?", params![scope])?;
+        Ok(())
+    }
 }
 
 /// Helper to match model patterns like `*`, `openai/*`, or `gpt-4o`.

@@ -15,6 +15,7 @@ pub mod media;
 pub mod mitm;
 pub mod oauth_api;
 pub mod original;
+pub mod providers_extra_api;
 pub mod proxy;
 pub mod proxy_pools;
 pub mod ratelimit;
