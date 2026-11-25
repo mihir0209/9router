@@ -81,3 +81,9 @@ binding = "DB"
 database_name = "router-db"
 # Created with `npx wrangler d1 create router-db` on the paid account.
 database_id = "3bc7cca5-54f8-454f-bcdf-87413ff396c0"
+
+# Optional R2 bucket for offloading heavy requestDetails payloads from D1.
+# Create with `npx wrangler r2 bucket create router-request-details` then uncomment:
+# [[r2_buckets]]
+# binding = "REQUEST_DETAILS_BUCKET"
+# bucket_name = "router-request-details"
