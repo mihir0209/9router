@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-25T17:30:19.545Z",
+  "generatedAt": "2026-11-26T15:45:32.896Z",
   "summary": {
     "totalNodeRouteFiles": 199,
     "totalNodeRouteMethods": 330,
@@ -166,12 +166,12 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:7037"
+        "rust/app/src/routes.rs:7110"
       ],
       "handlers": {
         "GET": {
           "expr": "changelog_handler",
-          "definedAt": "rust/app/src/routes.rs:3546"
+          "definedAt": "rust/app/src/routes.rs:3624"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -187,7 +187,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6907"
+        "rust/app/src/routes.rs:6980"
       ],
       "handlers": {
         "POST": {
@@ -208,7 +208,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6911"
+        "rust/app/src/routes.rs:6984"
       ],
       "handlers": {
         "POST": {
@@ -229,7 +229,7 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6923"
+        "rust/app/src/routes.rs:6996"
       ],
       "handlers": {
         "GET": {
@@ -291,12 +291,12 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:7041"
+        "rust/app/src/routes.rs:7114"
       ],
       "handlers": {
         "GET": {
           "expr": "models_meta_handler",
-          "definedAt": "rust/app/src/routes.rs:3553"
+          "definedAt": "rust/app/src/routes.rs:3631"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -312,7 +312,7 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6927"
+        "rust/app/src/routes.rs:7000"
       ],
       "handlers": {
         "GET": {
@@ -333,7 +333,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6886"
+        "rust/app/src/routes.rs:6959"
       ],
       "handlers": {
         "POST": {
@@ -354,7 +354,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6890"
+        "rust/app/src/routes.rs:6963"
       ],
       "handlers": {
         "POST": {
@@ -375,12 +375,12 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:7091"
+        "rust/app/src/routes.rs:7164"
       ],
       "handlers": {
         "POST": {
           "expr": "test_provider_handler",
-          "definedAt": "rust/app/src/routes.rs:3692"
+          "definedAt": "rust/app/src/routes.rs:3770"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -396,7 +396,7 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:7000"
+        "rust/app/src/routes.rs:7073"
       ],
       "handlers": {
         "GET": {
@@ -417,12 +417,12 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:7206"
+        "rust/app/src/routes.rs:7279"
       ],
       "handlers": {
         "GET": {
           "expr": "get_usage_handler",
-          "definedAt": "rust/app/src/routes.rs:5399"
+          "definedAt": "rust/app/src/routes.rs:5472"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -438,12 +438,12 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:7210"
+        "rust/app/src/routes.rs:7283"
       ],
       "handlers": {
         "GET": {
           "expr": "get_usage_handler",
-          "definedAt": "rust/app/src/routes.rs:5399"
+          "definedAt": "rust/app/src/routes.rs:5472"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -459,7 +459,7 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6813"
+        "rust/app/src/routes.rs:6886"
       ],
       "handlers": {
         "GET": {
@@ -480,12 +480,12 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:7033"
+        "rust/app/src/routes.rs:7106"
       ],
       "handlers": {
         "GET": {
           "expr": "version_handler",
-          "definedAt": "rust/app/src/routes.rs:3536"
+          "definedAt": "rust/app/src/routes.rs:3614"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -501,7 +501,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6846"
+        "rust/app/src/routes.rs:6919"
       ],
       "handlers": {
         "POST": {
@@ -522,7 +522,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6834"
+        "rust/app/src/routes.rs:6907"
       ],
       "handlers": {
         "POST": {
@@ -599,7 +599,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6669"
+        "rust/app/src/routes.rs:6742"
       ],
       "handlers": {
         "POST": {
@@ -620,7 +620,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6744"
+        "rust/app/src/routes.rs:6817"
       ],
       "handlers": {
         "POST": {
@@ -641,7 +641,7 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6651"
+        "rust/app/src/routes.rs:6724"
       ],
       "handlers": {
         "GET": {
@@ -662,7 +662,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6757"
+        "rust/app/src/routes.rs:6830"
       ],
       "handlers": {
         "POST": {
@@ -683,7 +683,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6682"
+        "rust/app/src/routes.rs:6755"
       ],
       "handlers": {
         "POST": {
@@ -704,7 +704,7 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6805"
+        "rust/app/src/routes.rs:6878"
       ],
       "handlers": {
         "GET": {
@@ -725,7 +725,7 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6809"
+        "rust/app/src/routes.rs:6882"
       ],
       "handlers": {
         "GET": {
@@ -746,7 +746,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6783"
+        "rust/app/src/routes.rs:6856"
       ],
       "handlers": {
         "POST": {
@@ -767,7 +767,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6796"
+        "rust/app/src/routes.rs:6869"
       ],
       "handlers": {
         "POST": {
@@ -788,7 +788,7 @@
         "POST"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6770"
+        "rust/app/src/routes.rs:6843"
       ],
       "handlers": {
         "POST": {
@@ -809,7 +809,7 @@
         "OPTIONS"
       ],
       "registrations": [
-        "rust/app/src/routes.rs:6821"
+        "rust/app/src/routes.rs:6894"
       ],
       "handlers": {
         "GET": {
@@ -1144,12 +1144,12 @@
         "/api/admin/audit"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7126"
+        "rust/app/src/routes.rs:7199"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "admin_audit_handler",
-          "definedAt": "rust/app/src/routes.rs:4375"
+          "definedAt": "rust/app/src/routes.rs:4453"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -1232,16 +1232,16 @@
         "/api/admin/gateway"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7120"
+        "rust/app/src/routes.rs:7193"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "admin_gateway_get_handler",
-          "definedAt": "rust/app/src/routes.rs:4265"
+          "definedAt": "rust/app/src/routes.rs:4343"
         },
         "PUT": {
           "expr": "admin_gateway_put_handler",
-          "definedAt": "rust/app/src/routes.rs:4285"
+          "definedAt": "rust/app/src/routes.rs:4363"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -1332,16 +1332,16 @@
         "/api/admin/keys/{id}/rotate"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7144"
+        "rust/app/src/routes.rs:7217"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "admin_key_rotate_handler",
-          "definedAt": "rust/app/src/routes.rs:4756"
+          "definedAt": "rust/app/src/routes.rs:4834"
         },
         "PUT": {
           "expr": "admin_key_rotate_handler",
-          "definedAt": "rust/app/src/routes.rs:4756"
+          "definedAt": "rust/app/src/routes.rs:4834"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -1442,20 +1442,20 @@
         "/api/admin/keys/{id}"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7137"
+        "rust/app/src/routes.rs:7210"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "admin_key_detail_get_handler",
-          "definedAt": "rust/app/src/routes.rs:4593"
+          "definedAt": "rust/app/src/routes.rs:4671"
         },
         "PUT": {
           "expr": "admin_key_detail_put_handler",
-          "definedAt": "rust/app/src/routes.rs:4612"
+          "definedAt": "rust/app/src/routes.rs:4690"
         },
         "DELETE": {
           "expr": "admin_key_detail_delete_handler",
-          "definedAt": "rust/app/src/routes.rs:4721"
+          "definedAt": "rust/app/src/routes.rs:4799"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -1555,16 +1555,16 @@
         "/api/admin/keys"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7131"
+        "rust/app/src/routes.rs:7204"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "admin_keys_get_handler",
-          "definedAt": "rust/app/src/routes.rs:4403"
+          "definedAt": "rust/app/src/routes.rs:4481"
         },
         "POST": {
           "expr": "admin_keys_post_handler",
-          "definedAt": "rust/app/src/routes.rs:4427"
+          "definedAt": "rust/app/src/routes.rs:4505"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -1666,12 +1666,12 @@
         "/api/auth/login"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7004"
+        "rust/app/src/routes.rs:7077"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "login_handler",
-          "definedAt": "rust/app/src/routes.rs:3429"
+          "definedAt": "rust/app/src/routes.rs:3481"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -1697,7 +1697,6 @@
         "sse": [],
         "shared": [],
         "all": [
-          "@opennextjs/cloudflare",
           "bcryptjs",
           "next/headers",
           "next/server",
@@ -1742,6 +1741,7 @@
           "isSamlConfigured",
           "recordFail",
           "recordSuccess",
+          "resolveInitialPassword",
           "setDashboardAuthCookie"
         ]
       },
@@ -1780,12 +1780,12 @@
         "/api/auth/logout"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7008"
+        "rust/app/src/routes.rs:7081"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "logout_handler",
-          "definedAt": "rust/app/src/routes.rs:3490"
+          "definedAt": "rust/app/src/routes.rs:3563"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -2038,12 +2038,12 @@
         "/api/auth/oidc/test"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7198"
+        "rust/app/src/routes.rs:7271"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "test_oidc_handler",
-          "definedAt": "rust/app/src/routes.rs:5365"
+          "definedAt": "rust/app/src/routes.rs:5438"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -2496,12 +2496,12 @@
         "/api/auth/saml/test"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7202"
+        "rust/app/src/routes.rs:7275"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "test_saml_handler",
-          "definedAt": "rust/app/src/routes.rs:5389"
+          "definedAt": "rust/app/src/routes.rs:5462"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -2592,12 +2592,12 @@
         "/api/auth/status"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7012"
+        "rust/app/src/routes.rs:7085"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "auth_status_handler",
-          "definedAt": "rust/app/src/routes.rs:3505"
+          "definedAt": "rust/app/src/routes.rs:3578"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -2610,6 +2610,7 @@
       "imports": {
         "lib": [
           "src/lib/auth/dashboardSession",
+          "src/lib/auth/initialPassword",
           "src/lib/auth/oidc",
           "src/lib/auth/saml.js",
           "src/lib/localDb"
@@ -2624,6 +2625,7 @@
           "next/headers",
           "next/server",
           "src/lib/auth/dashboardSession",
+          "src/lib/auth/initialPassword",
           "src/lib/auth/oidc",
           "src/lib/auth/saml.js",
           "src/lib/localDb"
@@ -2644,11 +2646,14 @@
         "inlineSignals": [
           "cookies",
           "getDashboardAuthSession",
+          "hasOperatorInitialPassword",
           "import:src/lib/auth/dashboardSession",
+          "import:src/lib/auth/initialPassword",
           "import:src/lib/auth/oidc",
           "import:src/lib/auth/saml.js",
           "isOidcConfigured",
-          "isSamlConfigured"
+          "isSamlConfigured",
+          "resolveInitialPassword"
         ]
       },
       "dbExpectations": {
@@ -2686,12 +2691,12 @@
         "/api/cli-tools/all-statuses"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7256"
+        "rust/app/src/routes.rs:7329"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "cli_tools_all_statuses_handler",
-          "definedAt": "rust/app/src/routes.rs:6189"
+          "definedAt": "rust/app/src/routes.rs:6262"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -5179,7 +5184,7 @@
         "/api/combos/{id}"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6915"
+        "rust/app/src/routes.rs:6988"
       ],
       "rustHandlers": {
         "GET": {
@@ -5382,7 +5387,7 @@
         "/api/combos"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6901"
+        "rust/app/src/routes.rs:6974"
       ],
       "rustHandlers": {
         "GET": {
@@ -5568,7 +5573,7 @@
         "/api/dashboard/chat/completions"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7264"
+        "rust/app/src/routes.rs:7337"
       ],
       "rustHandlers": {
         "POST": {
@@ -6184,7 +6189,7 @@
         "/api/health"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6647"
+        "rust/app/src/routes.rs:6720"
       ],
       "rustHandlers": {
         "GET": {
@@ -6322,12 +6327,12 @@
         "/api/key-actions/debit"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7150"
+        "rust/app/src/routes.rs:7223"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "key_actions_debit_handler",
-          "definedAt": "rust/app/src/routes.rs:4790"
+          "definedAt": "rust/app/src/routes.rs:4868"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -6417,16 +6422,16 @@
         "/api/keys/{id}/byok"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7114"
+        "rust/app/src/routes.rs:7187"
       ],
       "rustHandlers": {
         "PUT": {
           "expr": "byok_key_handler",
-          "definedAt": "rust/app/src/routes.rs:4192"
+          "definedAt": "rust/app/src/routes.rs:4270"
         },
         "DELETE": {
           "expr": "byok_clear_handler",
-          "definedAt": "rust/app/src/routes.rs:4220"
+          "definedAt": "rust/app/src/routes.rs:4298"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -6525,16 +6530,16 @@
         "/api/keys/{id}/regenerate"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7108"
+        "rust/app/src/routes.rs:7181"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "regenerate_key_handler",
-          "definedAt": "rust/app/src/routes.rs:4178"
+          "definedAt": "rust/app/src/routes.rs:4256"
         },
         "PUT": {
           "expr": "regenerate_key_handler",
-          "definedAt": "rust/app/src/routes.rs:4178"
+          "definedAt": "rust/app/src/routes.rs:4256"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -6626,20 +6631,20 @@
         "/api/keys/{id}"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7101"
+        "rust/app/src/routes.rs:7174"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_key_detail_handler",
-          "definedAt": "rust/app/src/routes.rs:4084"
+          "definedAt": "rust/app/src/routes.rs:4162"
         },
         "PUT": {
           "expr": "update_key_handler",
-          "definedAt": "rust/app/src/routes.rs:4111"
+          "definedAt": "rust/app/src/routes.rs:4189"
         },
         "DELETE": {
           "expr": "delete_key_handler",
-          "definedAt": "rust/app/src/routes.rs:4238"
+          "definedAt": "rust/app/src/routes.rs:4316"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -6740,16 +6745,16 @@
         "/api/keys"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7095"
+        "rust/app/src/routes.rs:7168"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_keys_handler",
-          "definedAt": "rust/app/src/routes.rs:3798"
+          "definedAt": "rust/app/src/routes.rs:3876"
         },
         "POST": {
           "expr": "create_key_handler",
-          "definedAt": "rust/app/src/routes.rs:3968"
+          "definedAt": "rust/app/src/routes.rs:4046"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -7504,20 +7509,20 @@
         "/api/models/alias"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7045"
+        "rust/app/src/routes.rs:7118"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_model_aliases_handler",
-          "definedAt": "rust/app/src/routes.rs:6020"
+          "definedAt": "rust/app/src/routes.rs:6093"
         },
         "PUT": {
           "expr": "put_model_aliases_handler",
-          "definedAt": "rust/app/src/routes.rs:6031"
+          "definedAt": "rust/app/src/routes.rs:6104"
         },
         "DELETE": {
           "expr": "delete_model_aliases_handler",
-          "definedAt": "rust/app/src/routes.rs:6050"
+          "definedAt": "rust/app/src/routes.rs:6123"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -7785,20 +7790,20 @@
         "/api/models/custom"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7052"
+        "rust/app/src/routes.rs:7125"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_custom_models_handler",
-          "definedAt": "rust/app/src/routes.rs:5858"
+          "definedAt": "rust/app/src/routes.rs:5931"
         },
         "POST": {
           "expr": "post_custom_models_handler",
-          "definedAt": "rust/app/src/routes.rs:5869"
+          "definedAt": "rust/app/src/routes.rs:5942"
         },
         "DELETE": {
           "expr": "delete_custom_models_handler",
-          "definedAt": "rust/app/src/routes.rs:5883"
+          "definedAt": "rust/app/src/routes.rs:5956"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -7896,20 +7901,20 @@
         "/api/models/disabled"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7066"
+        "rust/app/src/routes.rs:7139"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_disabled_models_handler",
-          "definedAt": "rust/app/src/routes.rs:5956"
+          "definedAt": "rust/app/src/routes.rs:6029"
         },
         "POST": {
           "expr": "post_disabled_models_handler",
-          "definedAt": "rust/app/src/routes.rs:5973"
+          "definedAt": "rust/app/src/routes.rs:6046"
         },
         "DELETE": {
           "expr": "delete_disabled_models_handler",
-          "definedAt": "rust/app/src/routes.rs:5997"
+          "definedAt": "rust/app/src/routes.rs:6070"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -8001,20 +8006,20 @@
         "/api/models/display-names"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7059"
+        "rust/app/src/routes.rs:7132"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_model_display_names_handler",
-          "definedAt": "rust/app/src/routes.rs:5908"
+          "definedAt": "rust/app/src/routes.rs:5981"
         },
         "PUT": {
           "expr": "put_model_display_names_handler",
-          "definedAt": "rust/app/src/routes.rs:5919"
+          "definedAt": "rust/app/src/routes.rs:5992"
         },
         "DELETE": {
           "expr": "delete_model_display_names_handler",
-          "definedAt": "rust/app/src/routes.rs:5938"
+          "definedAt": "rust/app/src/routes.rs:6011"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -8205,12 +8210,12 @@
         "/api/models"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7016"
+        "rust/app/src/routes.rs:7089"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "dashboard_models_handler",
-          "definedAt": "rust/app/src/routes.rs:6209"
+          "definedAt": "rust/app/src/routes.rs:6282"
         },
         "PUT": {
           "expr": "crate::providers_extra_api::models_put_handler",
@@ -8317,12 +8322,12 @@
         "/api/models/test"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7073"
+        "rust/app/src/routes.rs:7146"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "post_model_test_handler",
-          "definedAt": "rust/app/src/routes.rs:6068"
+          "definedAt": "rust/app/src/routes.rs:6141"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -10207,12 +10212,12 @@
         "/api/observability/alerts"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7155"
+        "rust/app/src/routes.rs:7228"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "observability_alerts_handler",
-          "definedAt": "rust/app/src/routes.rs:4831"
+          "definedAt": "rust/app/src/routes.rs:4909"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -10287,12 +10292,12 @@
         "/api/observability/metrics"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7160"
+        "rust/app/src/routes.rs:7233"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "observability_metrics_handler",
-          "definedAt": "rust/app/src/routes.rs:4843"
+          "definedAt": "rust/app/src/routes.rs:4921"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -10372,12 +10377,12 @@
         "/api/pricing"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7022"
+        "rust/app/src/routes.rs:7095"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_pricing_handler",
-          "definedAt": "rust/app/src/routes.rs:6442"
+          "definedAt": "rust/app/src/routes.rs:6515"
         },
         "PATCH": {
           "expr": "crate::providers_extra_api::pricing_patch_handler",
@@ -10472,7 +10477,7 @@
         "/api/provider-nodes/{id}"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6894"
+        "rust/app/src/routes.rs:6967"
       ],
       "rustHandlers": {
         "PUT": {
@@ -10581,7 +10586,7 @@
         "/api/provider-nodes"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6880"
+        "rust/app/src/routes.rs:6953"
       ],
       "rustHandlers": {
         "GET": {
@@ -10789,12 +10794,12 @@
         "/api/providers/{id}/models"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7260"
+        "rust/app/src/routes.rs:7333"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "provider_connection_models_handler",
-          "definedAt": "rust/app/src/routes.rs:5721"
+          "definedAt": "rust/app/src/routes.rs:5794"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -11485,16 +11490,16 @@
         "/api/providers"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7081"
+        "rust/app/src/routes.rs:7154"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_providers_handler",
-          "definedAt": "rust/app/src/routes.rs:3560"
+          "definedAt": "rust/app/src/routes.rs:3638"
         },
         "POST": {
           "expr": "create_provider_handler",
-          "definedAt": "rust/app/src/routes.rs:3587"
+          "definedAt": "rust/app/src/routes.rs:3665"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -11611,12 +11616,12 @@
         "/api/providers/suggested-models"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7077"
+        "rust/app/src/routes.rs:7150"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_suggested_models_handler",
-          "definedAt": "rust/app/src/routes.rs:6159"
+          "definedAt": "rust/app/src/routes.rs:6232"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -11777,12 +11782,12 @@
         "/api/providers/validate"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7087"
+        "rust/app/src/routes.rs:7160"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "validate_provider_handler",
-          "definedAt": "rust/app/src/routes.rs:3701"
+          "definedAt": "rust/app/src/routes.rs:3779"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -12003,7 +12008,7 @@
         "/api/proxy-pools/{id}"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6988"
+        "rust/app/src/routes.rs:7061"
       ],
       "rustHandlers": {
         "GET": {
@@ -12100,7 +12105,7 @@
         "/api/proxy-pools/{id}/test"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6995"
+        "rust/app/src/routes.rs:7068"
       ],
       "rustHandlers": {
         "POST": {
@@ -12185,7 +12190,7 @@
         "/api/proxy-pools/cloudflare-deploy"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6976"
+        "rust/app/src/routes.rs:7049"
       ],
       "rustHandlers": {
         "POST": {
@@ -12270,7 +12275,7 @@
         "/api/proxy-pools/deno-deploy"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6980"
+        "rust/app/src/routes.rs:7053"
       ],
       "rustHandlers": {
         "POST": {
@@ -12444,7 +12449,7 @@
         "/api/proxy-pools/inactive"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6938"
+        "rust/app/src/routes.rs:7011"
       ],
       "rustHandlers": {
         "DELETE": {
@@ -12524,7 +12529,7 @@
         "/api/proxy-pools/netlify-deploy"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6984"
+        "rust/app/src/routes.rs:7057"
       ],
       "rustHandlers": {
         "POST": {
@@ -12612,7 +12617,7 @@
         "/api/proxy-pools/providers/{id}/refresh"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6967"
+        "rust/app/src/routes.rs:7040"
       ],
       "rustHandlers": {
         "POST": {
@@ -12695,7 +12700,7 @@
         "/api/proxy-pools/providers/{id}"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6960"
+        "rust/app/src/routes.rs:7033"
       ],
       "rustHandlers": {
         "GET": {
@@ -12787,12 +12792,12 @@
         "/api/proxy-pools/providers"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6954"
+        "rust/app/src/routes.rs:7027"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "crate::proxy_pools::get_providers_handler",
-          "definedAt": "rust/app/src/routes.rs:3560"
+          "definedAt": "rust/app/src/routes.rs:3638"
         },
         "POST": {
           "expr": "crate::proxy_pools::update_providers_handler",
@@ -12878,7 +12883,7 @@
         "/api/proxy-pools/proxyscrape/refresh"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6949"
+        "rust/app/src/routes.rs:7022"
       ],
       "rustHandlers": {
         "POST": {
@@ -12968,7 +12973,7 @@
         "/api/proxy-pools/proxyscrape"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6943"
+        "rust/app/src/routes.rs:7016"
       ],
       "rustHandlers": {
         "GET": {
@@ -13065,7 +13070,7 @@
         "/api/proxy-pools"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6932"
+        "rust/app/src/routes.rs:7005"
       ],
       "rustHandlers": {
         "GET": {
@@ -13170,7 +13175,7 @@
         "/api/proxy-pools/vercel-deploy"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6972"
+        "rust/app/src/routes.rs:7045"
       ],
       "rustHandlers": {
         "POST": {
@@ -13900,20 +13905,20 @@
         "/api/settings/blocked-ips"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7187"
+        "rust/app/src/routes.rs:7260"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_blocked_ips_handler",
-          "definedAt": "rust/app/src/routes.rs:6358"
+          "definedAt": "rust/app/src/routes.rs:6431"
         },
         "POST": {
           "expr": "post_blocked_ips_handler",
-          "definedAt": "rust/app/src/routes.rs:6380"
+          "definedAt": "rust/app/src/routes.rs:6453"
         },
         "DELETE": {
           "expr": "delete_blocked_ips_handler",
-          "definedAt": "rust/app/src/routes.rs:6414"
+          "definedAt": "rust/app/src/routes.rs:6487"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -14000,16 +14005,16 @@
         "/api/settings/database"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7173"
+        "rust/app/src/routes.rs:7246"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "export_database_handler",
-          "definedAt": "rust/app/src/routes.rs:5143"
+          "definedAt": "rust/app/src/routes.rs:5216"
         },
         "POST": {
           "expr": "import_database_handler",
-          "definedAt": "rust/app/src/routes.rs:5174"
+          "definedAt": "rust/app/src/routes.rs:5247"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -14107,12 +14112,12 @@
         "/api/settings/proxy-test"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7183"
+        "rust/app/src/routes.rs:7256"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "proxy_test_handler",
-          "definedAt": "rust/app/src/routes.rs:5281"
+          "definedAt": "rust/app/src/routes.rs:5354"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -14188,12 +14193,12 @@
         "/api/settings/require-login"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7179"
+        "rust/app/src/routes.rs:7252"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_require_login_handler",
-          "definedAt": "rust/app/src/routes.rs:5241"
+          "definedAt": "rust/app/src/routes.rs:5314"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -14273,20 +14278,20 @@
         "/api/settings"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7166"
+        "rust/app/src/routes.rs:7239"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_settings_handler",
-          "definedAt": "rust/app/src/routes.rs:4864"
+          "definedAt": "rust/app/src/routes.rs:4942"
         },
         "PATCH": {
           "expr": "patch_settings_handler",
-          "definedAt": "rust/app/src/routes.rs:4977"
+          "definedAt": "rust/app/src/routes.rs:5055"
         },
         "PUT": {
           "expr": "patch_settings_handler",
-          "definedAt": "rust/app/src/routes.rs:4977"
+          "definedAt": "rust/app/src/routes.rs:5055"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -14538,16 +14543,16 @@
         "/api/translator/console-logs"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7246"
+        "rust/app/src/routes.rs:7319"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "get_console_logs_handler",
-          "definedAt": "rust/app/src/routes.rs:5632"
+          "definedAt": "rust/app/src/routes.rs:5705"
         },
         "DELETE": {
           "expr": "delete_console_logs_handler",
-          "definedAt": "rust/app/src/routes.rs:5652"
+          "definedAt": "rust/app/src/routes.rs:5725"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -14617,12 +14622,12 @@
         "/api/translator/console-logs/stream"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7252"
+        "rust/app/src/routes.rs:7325"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "console_logs_stream_handler",
-          "definedAt": "rust/app/src/routes.rs:5671"
+          "definedAt": "rust/app/src/routes.rs:5744"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -15028,7 +15033,7 @@
         "/api/tunnel/disable"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7277"
+        "rust/app/src/routes.rs:7350"
       ],
       "rustHandlers": {
         "POST": {
@@ -15112,7 +15117,7 @@
         "/api/tunnel/enable"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7273"
+        "rust/app/src/routes.rs:7346"
       ],
       "rustHandlers": {
         "POST": {
@@ -15196,7 +15201,7 @@
         "/api/tunnel/status"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7269"
+        "rust/app/src/routes.rs:7342"
       ],
       "rustHandlers": {
         "GET": {
@@ -15269,7 +15274,7 @@
         "/api/tunnel/tailscale-check"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7281"
+        "rust/app/src/routes.rs:7354"
       ],
       "rustHandlers": {
         "GET": {
@@ -15346,7 +15351,7 @@
         "/api/tunnel/tailscale-disable"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7289"
+        "rust/app/src/routes.rs:7362"
       ],
       "rustHandlers": {
         "POST": {
@@ -15430,7 +15435,7 @@
         "/api/tunnel/tailscale-enable"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7285"
+        "rust/app/src/routes.rs:7358"
       ],
       "rustHandlers": {
         "POST": {
@@ -15514,7 +15519,7 @@
         "/api/tunnel/tailscale-install"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7293"
+        "rust/app/src/routes.rs:7366"
       ],
       "rustHandlers": {
         "POST": {
@@ -15976,12 +15981,12 @@
         "/api/usage/api-keys"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7222"
+        "rust/app/src/routes.rs:7295"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "usage_api_keys_handler",
-          "definedAt": "rust/app/src/routes.rs:5510"
+          "definedAt": "rust/app/src/routes.rs:5583"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -16078,12 +16083,12 @@
         "/api/usage/chart"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7218"
+        "rust/app/src/routes.rs:7291"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "usage_chart_handler",
-          "definedAt": "rust/app/src/routes.rs:5476"
+          "definedAt": "rust/app/src/routes.rs:5549"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -16242,12 +16247,12 @@
         "/api/usage/logs"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7234"
+        "rust/app/src/routes.rs:7307"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "usage_logs_handler",
-          "definedAt": "rust/app/src/routes.rs:5611"
+          "definedAt": "rust/app/src/routes.rs:5684"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -16323,12 +16328,12 @@
         "/api/usage/providers"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7226"
+        "rust/app/src/routes.rs:7299"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "usage_providers_handler",
-          "definedAt": "rust/app/src/routes.rs:5537"
+          "definedAt": "rust/app/src/routes.rs:5610"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -16412,12 +16417,12 @@
         "/api/usage/request-details"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7230"
+        "rust/app/src/routes.rs:7303"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "usage_request_details_handler",
-          "definedAt": "rust/app/src/routes.rs:5572"
+          "definedAt": "rust/app/src/routes.rs:5645"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -16502,12 +16507,12 @@
         "/api/usage/request-logs"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7238"
+        "rust/app/src/routes.rs:7311"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "usage_logs_handler",
-          "definedAt": "rust/app/src/routes.rs:5611"
+          "definedAt": "rust/app/src/routes.rs:5684"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -16583,12 +16588,12 @@
         "/api/usage/stats"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7214"
+        "rust/app/src/routes.rs:7287"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "usage_stats_handler",
-          "definedAt": "rust/app/src/routes.rs:5430"
+          "definedAt": "rust/app/src/routes.rs:5503"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -16668,12 +16673,12 @@
         "/api/usage/stream"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7242"
+        "rust/app/src/routes.rs:7315"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "usage_stream_handler",
-          "definedAt": "rust/app/src/routes.rs:5453"
+          "definedAt": "rust/app/src/routes.rs:5526"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -16839,7 +16844,7 @@
         "/v1/audio/speech"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6850"
+        "rust/app/src/routes.rs:6923"
       ],
       "rustHandlers": {
         "POST": {
@@ -16915,7 +16920,7 @@
         "/v1/audio/transcriptions"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6838"
+        "rust/app/src/routes.rs:6911"
       ],
       "rustHandlers": {
         "POST": {
@@ -17075,7 +17080,7 @@
         "/v1/chat/completions"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6673"
+        "rust/app/src/routes.rs:6746"
       ],
       "rustHandlers": {
         "POST": {
@@ -17154,7 +17159,7 @@
         "/v1/embeddings"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6748"
+        "rust/app/src/routes.rs:6821"
       ],
       "rustHandlers": {
         "POST": {
@@ -17230,7 +17235,7 @@
         "/v1/images/generations"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6761"
+        "rust/app/src/routes.rs:6834"
       ],
       "rustHandlers": {
         "POST": {
@@ -17306,7 +17311,7 @@
         "/v1/messages/count_tokens"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6695"
+        "rust/app/src/routes.rs:6768"
       ],
       "rustHandlers": {
         "POST": {
@@ -17385,7 +17390,7 @@
         "/v1/messages"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6686"
+        "rust/app/src/routes.rs:6759"
       ],
       "rustHandlers": {
         "POST": {
@@ -17631,7 +17636,7 @@
         "/v1/models"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6660"
+        "rust/app/src/routes.rs:6733"
       ],
       "rustHandlers": {
         "GET": {
@@ -17772,7 +17777,7 @@
         "/v1/responses/compact"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6713"
+        "rust/app/src/routes.rs:6786"
       ],
       "rustHandlers": {
         "POST": {
@@ -17857,7 +17862,7 @@
         "/v1/responses"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6704"
+        "rust/app/src/routes.rs:6777"
       ],
       "rustHandlers": {
         "POST": {
@@ -18048,7 +18053,7 @@
         "/v1/search"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6863"
+        "rust/app/src/routes.rs:6936"
       ],
       "rustHandlers": {
         "POST": {
@@ -18125,7 +18130,7 @@
         "/v1/systemone"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6875"
+        "rust/app/src/routes.rs:6948"
       ],
       "rustHandlers": {
         "POST": {
@@ -18201,7 +18206,7 @@
         "/v1/videos/{id}"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6825"
+        "rust/app/src/routes.rs:6898"
       ],
       "rustHandlers": {
         "GET": {
@@ -18278,7 +18283,7 @@
         "/v1/videos/edits"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6787"
+        "rust/app/src/routes.rs:6860"
       ],
       "rustHandlers": {
         "POST": {
@@ -18355,7 +18360,7 @@
         "/v1/videos/extensions"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6800"
+        "rust/app/src/routes.rs:6873"
       ],
       "rustHandlers": {
         "POST": {
@@ -18432,7 +18437,7 @@
         "/v1/videos/generations"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6774"
+        "rust/app/src/routes.rs:6847"
       ],
       "rustHandlers": {
         "POST": {
@@ -18509,7 +18514,7 @@
         "/v1/web/fetch"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6855"
+        "rust/app/src/routes.rs:6928"
       ],
       "rustHandlers": {
         "POST": {
@@ -18588,7 +18593,7 @@
         "/v1beta/models/{*path}"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6733"
+        "rust/app/src/routes.rs:6806"
       ],
       "rustHandlers": {
         "GET": {
@@ -18709,7 +18714,7 @@
         "/v1beta/models"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:6723"
+        "rust/app/src/routes.rs:6796"
       ],
       "rustHandlers": {
         "GET": {
@@ -18796,12 +18801,12 @@
         "/api/version"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7029"
+        "rust/app/src/routes.rs:7102"
       ],
       "rustHandlers": {
         "GET": {
           "expr": "version_handler",
-          "definedAt": "rust/app/src/routes.rs:3536"
+          "definedAt": "rust/app/src/routes.rs:3614"
         },
         "OPTIONS": {
           "expr": "options_handler",
@@ -18870,12 +18875,12 @@
         "/api/version/shutdown"
       ],
       "rustRegistrations": [
-        "rust/app/src/routes.rs:7194"
+        "rust/app/src/routes.rs:7267"
       ],
       "rustHandlers": {
         "POST": {
           "expr": "shutdown_handler",
-          "definedAt": "rust/app/src/routes.rs:5352"
+          "definedAt": "rust/app/src/routes.rs:5425"
         },
         "OPTIONS": {
           "expr": "options_handler",

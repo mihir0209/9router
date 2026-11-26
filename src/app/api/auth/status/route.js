@@ -4,12 +4,14 @@ import { getSettings } from "@/lib/localDb";
 import { isOidcConfigured } from "@/lib/auth/oidc";
 import { isSamlConfigured } from "@/lib/auth/saml.js";
 import { getDashboardAuthSession } from "@/lib/auth/dashboardSession";
+import { hasOperatorInitialPassword, resolveInitialPassword } from "@/lib/auth/initialPassword";
 
 export async function GET() {
   try {
     const settings = await getSettings();
     const cookieStore = await cookies();
     const session = await getDashboardAuthSession(cookieStore.get("auth_token")?.value);
+    const envInitial = await resolveInitialPassword();
     const requireLogin = settings.requireLogin !== false;
     const authMode = settings.authMode || "password";
     const ssoType = settings.ssoType || "oidc";
@@ -35,7 +37,7 @@ export async function GET() {
       oidcLoginLabel: (settings.oidcLoginLabel || "Sign in with OIDC").trim() || "Sign in with OIDC",
       samlConfigured: isSamlConfigured(settings),
       samlLoginLabel: (settings.samlLoginLabel || "Sign in with SAML SSO").trim() || "Sign in with SAML SSO",
-      hasPassword: !!settings.password,
+      hasPassword: !!settings.password || hasOperatorInitialPassword(envInitial),
       displayName,
       loginMethod,
       authenticated: !!session,

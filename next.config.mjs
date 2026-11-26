@@ -48,17 +48,23 @@ const nextConfig = {
     "*": ["./node_modules/undici/**/*"]
   },
   outputFileTracingExcludes: {
-    "*": ["./gitbook/**/*"]
+    "*": ["./gitbook/**/*", "./rust/**/*", "./release_assets/**/*", "./tests/**/*"]
   },
   images: {
     unoptimized: true
   },
+  productionBrowserSourceMaps: false,
   env: {},
   experimental: {
     // #1529/#1572: LLM clients can send long context or base64 image payloads through /v1 rewrites.
     proxyClientMaxBodySize,
     // Cache fetch responses across HMR refreshes for faster dev reloads.
     serverComponentsHmrCache: true,
+    // Keep Next.js production builds within strict RAM budgets on 16-core hosts
+    webpackMemoryOptimizations: true,
+    webpackBuildWorker: true,
+    memoryBasedWorkersCount: true,
+    serverSourceMaps: false,
     // Tree-shake heavy barrel imports to cut compile + bundle size
     optimizePackageImports: ["@xyflow/react", "@dnd-kit/core", "@dnd-kit/sortable", "material-symbols", "marked"],
   },
@@ -113,7 +119,7 @@ const nextConfig = {
     config.watchOptions = {
       ...config.watchOptions,
       aggregateTimeout: 300,
-      ignored: /[\\/](node_modules|\.git|logs|\.next|\.next-cli-build|gitbook|cli|open-sse\.old|tests|docs)[\\/]/,
+      ignored: /[\\/](node_modules|\.git|logs|\.next|\.next-cli-build|gitbook|cli|open-sse\.old|tests|docs|rust|release_assets)[\\/]/,
     };
     return config;
   },

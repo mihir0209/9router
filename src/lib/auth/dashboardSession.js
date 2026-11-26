@@ -1,6 +1,7 @@
 import { SignJWT, jwtVerify } from "jose";
 import { getSettings } from "@/lib/localDb";
 import { ensureJwtSecretEnv } from "@/lib/auth/jwtSecret";
+import { resolveInitialPassword } from "@/lib/auth/initialPassword";
 
 const DEFAULT_PASSWORD = "123456";
 const SESSION_MAX_AGE_SEC = 24 * 60 * 60;
@@ -84,6 +85,7 @@ export async function verifyDashboardPassword(password) {
     const { default: bcrypt } = await import("bcryptjs");
     return bcrypt.compare(password, storedHash);
   }
-  const initialPassword = process.env.INITIAL_PASSWORD || DEFAULT_PASSWORD;
+  const envInitial = await resolveInitialPassword();
+  const initialPassword = envInitial || DEFAULT_PASSWORD;
   return password === initialPassword;
 }

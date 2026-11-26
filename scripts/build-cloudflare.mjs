@@ -312,7 +312,13 @@ async function hasValidDashboardCookie(request, env) {
 
 async function hasValidAdminToken(request, env) {
   const configured = env.ADMIN_API_TOKEN;
-  if (!configured || env.INITIAL_PASSWORD === "123456") return false;
+  const initialPwd = String(env.INITIAL_PASSWORD || "").trim();
+  if (
+    !configured ||
+    ["123456", "change-me", "your-password", "your-secure-password", "votre-mot-de-passe", "tu-contraseña"].includes(initialPwd)
+  ) {
+    return false;
+  }
   const auth = request.headers.get("authorization") || "";
   if (!auth.startsWith("Bearer ")) return false;
   const supplied = auth.slice(7);
@@ -407,7 +413,7 @@ async function guardCloudflareAdminRequest(request, env) {
     return __9routerBodyTooLarge(request, env);
   }
 
-  if (pathname.startsWith("/api/admin") || pathname.startsWith("/api/observability")) {
+  if (pathname.startsWith("/api/admin") || pathname.startsWith("/api/observability") || pathname === "/api/settings/database") {
     if (await hasValidAdminToken(request, env)) return null;
   }
 

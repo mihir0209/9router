@@ -86,7 +86,7 @@ export default async function proxy(request) {
   }
 
   if (pathname.startsWith("/api/") || pathname.startsWith("/dashboard")) {
-    if (pathname.startsWith("/api/admin") || pathname.startsWith("/api/observability")) {
+    if (pathname.startsWith("/api/admin") || pathname.startsWith("/api/observability") || pathname === "/api/settings/database") {
       if (await hasValidAdminApiToken(request)) return NextResponse.next();
     }
     if (await hasValidDashboardCookie(request)) return NextResponse.next();

@@ -9,6 +9,11 @@ compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 # some dependencies read function/class .name.
 minify = true
 
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
+
 [assets]
 directory = ".open-next/assets"
 binding = "ASSETS"

@@ -3426,21 +3426,75 @@ pub struct LoginPayload {
     pub password: Option<String>,
 }
 
+fn is_placeholder_initial_password(pwd: &str) -> bool {
+    matches!(
+        pwd.trim(),
+        "" | "123456"
+            | "change-me"
+            | "your-password"
+            | "your-secure-password"
+            | "votre-mot-de-passe"
+            | "tu-contraseña"
+    )
+}
+
+fn resolve_operator_initial_password() -> Option<String> {
+    std::env::var("INITIAL_PASSWORD")
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !is_placeholder_initial_password(p))
+}
+
+fn is_loopback_host_str(raw: &str) -> bool {
+    let mut s = raw.trim().to_ascii_lowercase();
+    if s.starts_with('[') {
+        if let Some(end) = s.find(']') {
+            s = s[1..end].to_string();
+        }
+    } else if s.matches(':').count() == 1 {
+        if let Some(idx) = s.find(':') {
+            s.truncate(idx);
+        }
+    }
+    if let Some(stripped) = s.strip_prefix("::ffff:") {
+        s = stripped.to_string();
+    }
+    matches!(s.as_str(), "localhost" | "127.0.0.1" | "::1")
+}
+
+fn is_local_request_headers(headers: &HeaderMap) -> bool {
+    if headers.contains_key("x-9r-via-proxy") {
+        return false;
+    }
+    for key in ["cf-connecting-ip", "x-9r-real-ip", "x-forwarded-for", "x-real-ip"] {
+        if let Some(val) = headers.get(key).and_then(|v| v.to_str().ok()) {
+            let first = val.split(',').next().unwrap_or("").trim();
+            return is_loopback_host_str(first);
+        }
+    }
+    if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
+        return is_loopback_host_str(host);
+    }
+    true
+}
+
 pub async fn login_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<LoginPayload>,
 ) -> Response {
     let password = payload.password.unwrap_or_default();
     let settings = state.db.load_settings().unwrap_or_else(|_| json!({}));
-    let expected_password = settings
+    let stored_pwd = settings
         .get("password")
-        .and_then(|p| p.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| {
-            std::env::var("INITIAL_PASSWORD")
-                .ok()
-                .filter(|p| !p.trim().is_empty() && p.trim() != "change-me" && p.trim() != "your-password")
-                .unwrap_or_else(|| "123456".to_string())
-        });
+        .and_then(|p| p.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let operator_init = resolve_operator_initial_password();
+    let has_stored_pwd = stored_pwd.is_some();
+    let expected_password = stored_pwd
+        .or_else(|| operator_init.clone())
+        .unwrap_or_else(|| "123456".to_string());
 
     let valid = if password == expected_password {
         true
@@ -3458,6 +3512,25 @@ pub async fn login_handler(
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, "application/json")],
             Json(json!({"error": "Invalid password"})),
+        )
+            .into_response();
+    }
+
+    let is_local = is_local_request_headers(&headers);
+    let must_change_password =
+        ((!has_stored_pwd && operator_init.is_none()) || password == "123456") && !is_local;
+    if must_change_password {
+        return (
+            StatusCode::FORBIDDEN,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            Json(json!({
+                "success": false,
+                "error": "Default password must be changed before remote access. Change it from the local machine (or set INITIAL_PASSWORD).",
+                "mustChangePassword": true
+            })),
         )
             .into_response();
     }
@@ -3511,7 +3584,12 @@ pub async fn auth_status_handler(
         .get("requireLogin")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let has_password = settings.get("password").is_some();
+    let has_password = settings
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+        || resolve_operator_initial_password().is_some();
 
     let authenticated = if !require_login {
         true
@@ -4873,7 +4951,7 @@ pub async fn get_settings_handler(
         Err(_) => json!({}),
     };
 
-    let initial_pwd = std::env::var("INITIAL_PASSWORD").ok().filter(|v| !v.trim().is_empty() && v.trim() != "change-me" && v.trim() != "your-password");
+    let initial_pwd = resolve_operator_initial_password();
     let has_password = base
         .get("password")
         .and_then(|v| v.as_str())
@@ -4996,8 +5074,7 @@ pub async fn patch_settings_handler(
             .unwrap_or("");
 
         let valid_current = if current_pwd.is_empty() {
-            let env_init = std::env::var("INITIAL_PASSWORD").ok().unwrap_or_default();
-            if !env_init.is_empty() && env_init != "change-me" && env_init != "your-password" {
+            if let Some(env_init) = resolve_operator_initial_password() {
                 input_current == env_init
             } else {
                 input_current.is_empty() || input_current == "123456"
@@ -5125,17 +5202,13 @@ fn is_database_authorized(
             }
         }
         _ => {
-            if let Ok(init_pwd) = std::env::var("INITIAL_PASSWORD") {
-                let init_pwd = init_pwd.trim();
-                if !init_pwd.is_empty() && init_pwd != "change-me" && init_pwd != "your-password" {
-                    return provided.map(|p| p == init_pwd).unwrap_or(false);
-                }
+            if let Some(init_pwd) = resolve_operator_initial_password() {
+                return provided.map(|p| p == init_pwd).unwrap_or(false);
             }
-            if let Some(prov) = provided {
-                prov.is_empty() || prov == "123456"
-            } else {
-                true
+            if !is_local_request_headers(headers) {
+                return false;
             }
+            matches!(provided, Some(prov) if prov.is_empty() || prov == "123456")
         }
     }
 }
@@ -8285,6 +8358,74 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let blocked_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(blocked_json["blockedIPs"], serde_json::json!(["5.6.7.8"]));
+    }
+
+    #[test]
+    fn test_placeholder_initial_password_and_local_headers() {
+        assert!(is_placeholder_initial_password(""));
+        assert!(is_placeholder_initial_password("123456"));
+        assert!(is_placeholder_initial_password("change-me"));
+        assert!(is_placeholder_initial_password("your-password"));
+        assert!(is_placeholder_initial_password("your-secure-password"));
+        assert!(!is_placeholder_initial_password("k7#Qv9!operator-chosen"));
+
+        let mut remote_hdrs = HeaderMap::new();
+        remote_hdrs.insert("cf-connecting-ip", "203.0.113.10".parse().unwrap());
+        assert!(!is_local_request_headers(&remote_hdrs));
+
+        let mut host_hdrs = HeaderMap::new();
+        host_hdrs.insert(header::HOST, "mihir-router.themihir.workers.dev".parse().unwrap());
+        assert!(!is_local_request_headers(&host_hdrs));
+
+        let mut local_hdrs = HeaderMap::new();
+        local_hdrs.insert(header::HOST, "127.0.0.1:20128".parse().unwrap());
+        assert!(is_local_request_headers(&local_hdrs));
+    }
+
+    #[tokio::test]
+    async fn test_remote_default_123456_login_rejected() {
+        let db = Database::open_in_memory().unwrap();
+        let config = Arc::new(Config {
+            jwt_secret: "secret-test-jwt".to_string(),
+            ..Default::default()
+        });
+        let combo_tracker = crate::combo_router::ComboTracker::new();
+        let state = AppState {
+            rate_limiter: Arc::new(crate::ratelimit::RateLimiter::from_config(&config)),
+            db: Arc::clone(&db),
+            config: Arc::clone(&config),
+            proxy: Arc::new(ProxyService::new()),
+            original: crate::original::Original::empty(),
+            token_cache: crate::cache::TokenCache::default(),
+            combo_tracker: combo_tracker.clone(),
+            circuit_breaker: Arc::clone(&combo_tracker.circuit_breakers),
+            console_buffer: ConsoleLogBuffer::new(),
+        };
+        let app = create_router(state);
+
+        // Remote attempt on default "123456" must fail closed with 403 mustChangePassword
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("cf-connecting-ip", "203.0.113.42")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"password":"123456"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json_body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["mustChangePassword"], true);
+
+        // Unauthenticated remote GET /api/settings/database must fail with 401
+        let db_req = Request::builder()
+            .method("GET")
+            .uri("/api/settings/database")
+            .header("cf-connecting-ip", "203.0.113.42")
+            .body(Body::empty())
+            .unwrap();
+        let db_resp = app.oneshot(db_req).await.unwrap();
+        assert_eq!(db_resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

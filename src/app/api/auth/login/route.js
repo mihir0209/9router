@@ -7,7 +7,7 @@ import { isOidcConfigured } from "@/lib/auth/oidc";
 import { isSamlConfigured } from "@/lib/auth/saml.js";
 import { checkLock, recordFail, recordSuccess, getClientIp } from "@/lib/auth/loginLimiter";
 import { isLocalRequest } from "@/dashboardGuard";
-import { hasOperatorInitialPassword } from "@/lib/auth/initialPassword";
+import { hasOperatorInitialPassword, resolveInitialPassword } from "@/lib/auth/initialPassword";
 
 const RESET_HINT = "Forgot password? Reset to default via 9Router CLI → Settings → Reset Password to Default.";
 const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
@@ -52,19 +52,11 @@ export async function POST(request) {
     }
 
     let isValid = false;
+    const envInitialPassword = await resolveInitialPassword();
     if (storedHash) {
       isValid = await bcrypt.compare(password, storedHash);
     } else {
-      // Use env var or default
-      let initialPassword = process.env.INITIAL_PASSWORD;
-      if (!initialPassword) {
-        try {
-          const { getCloudflareContext } = await import("@opennextjs/cloudflare");
-          const ctx = await getCloudflareContext({ async: true });
-          initialPassword = ctx?.env?.INITIAL_PASSWORD;
-        } catch {}
-      }
-      initialPassword = initialPassword || "123456";
+      const initialPassword = envInitialPassword || "123456";
       isValid = password === initialPassword;
     }
 
@@ -73,8 +65,9 @@ export async function POST(request) {
 
       // Default password still in use on a remote client → force a password
       // change before the dashboard is exposed remotely (keeps local UX intact).
-          const mustChangePassword =
-            !storedHash && !hasOperatorInitialPassword() && !isLocalRequest(request);
+      const mustChangePassword =
+        (!storedHash && !hasOperatorInitialPassword(envInitialPassword) && !isLocalRequest(request)) ||
+        (password === "123456" && !isLocalRequest(request));
 
       if (mustChangePassword) {
         // Do NOT issue a session token: a fresh install's default password is
