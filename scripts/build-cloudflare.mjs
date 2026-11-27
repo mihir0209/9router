@@ -330,14 +330,14 @@ async function hasValidAdminToken(request, env) {
   return diff === 0;
 }
 
-// Copy the Worker env (vars and secrets) into process.env. Bindings and vars are
-// fixed for the life of an isolate, so this runs once, not on every request.
+// Copy the Worker env (vars and secrets) into process.env, overriding any build-time
+// .env values OpenNext may have bundled into next-env.mjs. Runs once per isolate.
 let __9routerEnvSynced = false;
 function __9routerSyncEnv(env) {
   if (__9routerEnvSynced || !env) return;
   __9routerEnvSynced = true;
   for (const [k, v] of Object.entries(env)) {
-    if (typeof v === "string" && !process.env[k]) process.env[k] = v;
+    if (typeof v === "string" && v !== "") process.env[k] = v;
   }
 }
 
@@ -589,6 +589,30 @@ function writeAssetHeaders() {
   }
 }
 
+function sanitizeCloudflareNextEnv() {
+  const nextEnvPath = join(root, ".open-next", "cloudflare", "next-env.mjs");
+  if (!existsSync(nextEnvPath)) return;
+  const sensitiveKeys = new Set([
+    "INITIAL_PASSWORD",
+    "ADMIN_API_TOKEN",
+    "JWT_SECRET",
+    "API_KEY_SECRET",
+    "MACHINE_ID_SALT",
+    "CRON_SECRET",
+  ]);
+  const raw = readFileSync(nextEnvPath, "utf8");
+  const scrubbed = raw.replace(/export const (\w+)\s*=\s*(\{[\s\S]*?\});/g, (full, name, objStr) => {
+    try {
+      const parsed = JSON.parse(objStr);
+      for (const k of sensitiveKeys) delete parsed[k];
+      return `export const ${name} = ${JSON.stringify(parsed)};`;
+    } catch {
+      return full;
+    }
+  });
+  writeFileSync(nextEnvPath, scrubbed, "utf8");
+}
+
 try {
   // Always build from a clean state: Next's webpack filesystem cache can
   // otherwise reuse modules compiled from pre-swap sources (e.g. the local
@@ -623,6 +647,7 @@ try {
   ensureEdgeWasm();
 
   run("npx", ["opennextjs-cloudflare", "build", ...(wranglerConfig ? ["--config", wranglerConfig] : [])]);
+  sanitizeCloudflareNextEnv();
   await injectWorkerGuard();
   writeAssetHeaders();
 

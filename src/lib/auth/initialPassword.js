@@ -19,10 +19,6 @@ export function isPlaceholderInitialPassword(value) {
  * Resolve INITIAL_PASSWORD from Node process.env or Cloudflare Worker env context.
  */
 export async function resolveInitialPassword() {
-  const fromEnv = typeof process !== "undefined" ? process.env?.INITIAL_PASSWORD : undefined;
-  if (fromEnv && String(fromEnv).trim()) {
-    return String(fromEnv).trim();
-  }
   try {
     const { getCloudflareContext } = await import("@opennextjs/cloudflare");
     const ctx = await getCloudflareContext({ async: true });
@@ -32,6 +28,10 @@ export async function resolveInitialPassword() {
     }
   } catch {
     // Not running under OpenNext / Cloudflare Workers
+  }
+  const fromEnv = typeof process !== "undefined" ? process.env?.INITIAL_PASSWORD : undefined;
+  if (fromEnv && String(fromEnv).trim()) {
+    return String(fromEnv).trim();
   }
   return "";
 }
